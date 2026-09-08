@@ -4,6 +4,7 @@ lpips_loss: false
 color_correction: false
 color_correction_start: 10
 color_corrector_weight: 1.0e-3
+hard_separation: false
 seed: 0
 resume: false
 resume_checkpoint: null
