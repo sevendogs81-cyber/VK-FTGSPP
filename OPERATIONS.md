@@ -45,7 +45,7 @@ python -m ftgspp.run <hydra overrides...>
 ### 2.2 安装与编译
 
 ```bash
-cd /path/to/ftgspp-vulkan
+cd /path/to/ftgspp-vulkan-community
 python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install -U pip
@@ -421,7 +421,7 @@ run.view_load_mode=lazy run.view_rgb_cache=64
 ```
 
 ```bash
-cd /path/to/ftgspp-vulkan
+cd /path/to/ftgspp-vulkan-community
 source .venv/bin/activate
 # 按本机方式 export Vulkan SDK PATH
 
