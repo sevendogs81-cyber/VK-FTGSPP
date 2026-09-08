@@ -3203,6 +3203,7 @@ public:
     }
 
     void render_flow_dynamic_times(float timestamp, float end_timestamp) {
+        // Diagnostic-only model-flow rendering; RGB training/eval never calls it.
         uniforms.active_sh = config.max_sh_degree;
         auto deviceGuard = DeviceGuard(&trainer);
         trainer.executeFTGSPPMaterialize(config, buffers, end_timestamp);
