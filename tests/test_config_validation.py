@@ -61,6 +61,14 @@ class StaticConfigValidationTests(unittest.TestCase):
     def test_valid_relocation_contract_is_accepted(self):
         validate_static_config(_valid_config())
 
+    def test_hard_separation_requires_marginal_gating(self):
+        config = copy.deepcopy(_valid_config())
+        config.train.hard_separation = True
+        with self.assertRaisesRegex(ValueError, "requires model.marginal_gating"):
+            validate_static_config(config)
+        config.model.marginal_gating = True
+        validate_static_config(config)
+
     def test_train_seed_must_be_non_negative(self):
         config = copy.deepcopy(_valid_config())
         config.train.seed = -1
