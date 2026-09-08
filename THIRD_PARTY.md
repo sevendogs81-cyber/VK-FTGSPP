@@ -19,7 +19,7 @@ their respective upstream terms.
 | Slang | compilation of bundled `.slang` kernels | Apache-2.0 |
 | GLM | C++ camera/vector math | MIT |
 | pybind11 | native Python boundary | BSD-3-Clause |
-| PyTorch | optional only: LPIPS plugin (`.[lpips]`), `.pt` checkpoint convert (`.[convert]`), UFM/MEMFOF tooling (`.[flow]`); not used by native training | BSD-style |
+| PyTorch | optional only: LPIPS plugin (`.[lpips]`), `.pt` checkpoint convert (`.[convert]`), UFM preprocessing (`.[flow]`); not used by native training | BSD-style |
 | Hydra/OmegaConf | retained configuration composition | MIT / BSD-3-Clause |
 | OpenCV, NumPy, SciPy, imageio | SelfCap data and initialization utilities | upstream terms |
 | torchmetrics, flip-evaluator | optional LPIPS / FLIP evaluation extras | Apache-2.0; BSD-3-Clause |
@@ -34,13 +34,12 @@ runs outside the production training pipeline and emits explicit-only V5.
 | Component | Upstream | License/terms |
 | --- | --- | --- |
 | UFM pretrained weights | https://huggingface.co/infinity1096/UFM-Base | CC-BY-NC-4.0 |
-| MEMFOF and weights | https://github.com/msu-video-group/memfof | BSD-3-Clause |
 | SelfCap Dataset | https://huggingface.co/datasets/zju3dv/SelfCap-Dataset | dataset terms |
 
 UFM is an **offline preprocessing tool** only: run
 `python -m ftgspp.data.flow <config> --out ...` to write flow/covisibility
 caches. Native initialization reads those NPZ files and never embeds UFM
-inference. MEMFOF is an **evaluation/render reference-flow tool** only: its
-Gaussian flow feature projection/rasterization is implemented by the bundled
-Vulkan kernels, while MEMFOF supplies the image-derived comparison flow and
-must be installed separately when that metric is requested.
+inference. The Vulkan model-flow endpoint is a diagnostic renderer and is not
+part of the native training graph or default metrics. MEMFOF and other
+reference-flow evaluators are intentionally not bundled; users who need such
+comparisons must run them externally.

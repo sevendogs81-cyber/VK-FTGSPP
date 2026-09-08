@@ -26,7 +26,6 @@ convert = [
     "torchvision>=0.20",
 ]
 flow = [
-    "memfof @ git+https://github.com/msu-video-group/memfof.git",
     "torch>=2.5",
     "av>=14.0.0",
     "imageio>=2.37",

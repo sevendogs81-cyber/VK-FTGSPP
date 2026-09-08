@@ -73,8 +73,9 @@ stall。
 
 - Color correction：Vulkan affine forward/backward/Adam；
 - LPIPS：可选 Torch 主机插件，仅单卡；
-- UFM/MEMFOF：预处理或 eval 旁路，不在 native train graph；
-- flow：Vulkan materialize endpoints + projected feature raster；
+- UFM：离线预处理并为可选速度初始化提供 flow/covis cache，不在 native train graph；
+- model flow：Vulkan materialize endpoints + projected feature raster，仅按需用于运动诊断/可视化；
+- MEMFOF/reference-flow：不内置，任何 flow EPE 由外部工具完成；
 - gated occupancy：活动性看 \(\phi=g+(1-g)a(t)\)，persistents 不被短 duration 硬裁。
 
 ## Optimizer 与 ABI

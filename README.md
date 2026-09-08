@@ -8,7 +8,8 @@ explicit velocity 和原生 Vulkan/Slang 内核。
 社区版只保留容易复现的主线：
 
 - explicit velocity 4D Gaussian 训练、L1+SSIM loss 和 Vulkan Adam；
-- gated marginalization、relocation 和 optical-flow feature；
+- gated marginalization、relocation，以及可选的 UFM 速度初始化；
+- Vulkan 预测光流 endpoint 仅用于运动诊断和可视化，不进入默认训练或指标；
 - 可选 per-camera color correction；
 - 单卡和双卡同步训练（Host collective / GPU pair merge）；
 - 可选 **hard separation**：主训练完成后，把 gate 固化为静态/动态两组，
@@ -70,8 +71,13 @@ train:
 - `configs/train/`：训练、采样、relocation 和 hard separation 参数；
 - `scripts/smoke_native.py`：单卡 Vulkan 冒烟测试；
 - `scripts/smoke_sync_multi_gpu.py`：双卡同步通信测试；
+- `python -m ftgspp.data.flow`：可选 UFM 光流预处理，用于速度初始化；
 - `ftgspp-convert-checkpoint`：迁移旧 explicit/field checkpoint（可选
   `.[convert]` 依赖）。
+
+UFM 光流只在 `init.temporal_motion_adapted=true` 时参与初始化；Vulkan
+`render_flow_diagnostic`（底层 `render_flow_*`）只生成模型运动诊断图，默认训练、checkpoint 和
+`metrics.jsonl` 都不会调用它。社区版不内置 MEMFOF 或其它参考光流评估链路。
 
 更多实现边界见 [VULKANIZATION.md](VULKANIZATION.md)，双卡通信见
 [MULTI_GPU.md](MULTI_GPU.md)，运维命令见 [OPERATIONS.md](OPERATIONS.md)。

@@ -1,4 +1,4 @@
-"""UFM/MEMFOF cache path naming (shared by preprocess and native consumers)."""
+"""UFM flow-cache path naming shared by preprocessing and native consumers."""
 
 from __future__ import annotations
 

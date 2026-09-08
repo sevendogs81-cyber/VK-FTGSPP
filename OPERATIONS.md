@@ -7,7 +7,7 @@
 面向在本机/服务器上**从零准备 SelfCap 数据并跑通 native 训练**的完整说明。  
 实现边界见 [VULKANIZATION.md](VULKANIZATION.md)，环境验收见 [SERVER_DEBUG.md](SERVER_DEBUG.md)，许可证见 [THIRD_PARTY.md](THIRD_PARTY.md)。
 
-**本仓库只支持 `run.runtime=native`（Vulkan）。** 默认训练路径不依赖 PyTorch/CUDA；LPIPS、checkpoint 转换、UFM/MEMFOF 为可选旁路。
+**本仓库只支持 `run.runtime=native`（Vulkan）。** 默认训练路径不依赖 PyTorch/CUDA；LPIPS、checkpoint 转换和 UFM 光流预处理为可选旁路。MEMFOF 不在仓库内置。
 
 ---
 
@@ -40,7 +40,7 @@ python -m ftgspp.run <hydra overrides...>
 - Python **3.12**
 - C++17、CMake、Ninja、pybind11
 - Vulkan SDK **1.2+**（需 `slangc`、`glslc`、可计算的 GPU）
-- 可选：`.[lpips]`（Torch + torchmetrics，**不**要求 Torch CUDA 可用）、`.[convert]`、`.[flow]`、`.[eval]`
+- 可选：`.[lpips]`（Torch + torchmetrics，**不**要求 Torch CUDA 可用）、`.[convert]`、`.[flow]`（UFM 预处理）、`.[eval]`
 
 ### 2.2 安装与编译
 
@@ -206,6 +206,11 @@ init.temporal_motion_adapted=true init.temporal_flow_path=/path/to/prepared/_flo
 ```
 
 UFM **不会**在训练进程内推理；native 只读 NPZ cache。
+
+Vulkan 预测光流通过 native 的 `render_flow_dynamic*` 接口按需生成，Python
+侧建议使用 `NativeVulkanBackend.render_flow_diagnostic`，
+用于检查 Gaussian 的图像平面运动或制作可视化。它不是训练 loss，也不在
+默认 `metrics.jsonl` 中计算；仓库不提供 MEMFOF/reference-flow 评估流程。
 
 ---
 

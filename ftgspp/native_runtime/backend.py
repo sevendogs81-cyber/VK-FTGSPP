@@ -1696,9 +1696,14 @@ class NativeVulkanBackend:
             return np.asarray(copy_rgb(), dtype=np.float32)
         return np.array(self.native.pixel_state, dtype=np.float32, copy=True)[..., :3]
 
-    def render_flow_eval(self, view_index: int, end_timestamp: float) -> np.ndarray:
+    def render_flow_diagnostic(self, view_index: int, end_timestamp: float) -> np.ndarray:
+        """Render model flow for diagnostics; default evaluation does not call it."""
         self.native.render_flow_dynamic_val_view(int(view_index), float(end_timestamp))
         return np.array(self.native.pixel_state, dtype=np.float32, copy=True)[..., :2]
+
+    def render_flow_eval(self, view_index: int, end_timestamp: float) -> np.ndarray:
+        """Backward-compatible alias for :meth:`render_flow_diagnostic`."""
+        return self.render_flow_diagnostic(view_index, end_timestamp)
 
     def materialize(self, timestamp: float) -> dict[str, np.ndarray]:
         self.native.materialize_dynamic(float(timestamp))
