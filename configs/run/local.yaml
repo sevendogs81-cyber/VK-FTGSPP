@@ -1,0 +1,13 @@
+runtime: native
+gpu: 0
+experiment_root: ${oc.env:FTGSPP_RUNS_ROOT,runs}/${data.name}
+output_path: ${run.experiment_root}/run_${train.iterations}
+log_dir: ${oc.env:FTGSPP_LOG_DIR,runs/logs}
+export_filename: gaussians_4dgs.ply
+overwrite_completed: false
+# lazy is the safe default for 20+ camera data and shares decoded RGB in sync
+# mode; resident is an explicit small-dataset opt-in that duplicates residency.
+view_load_mode: lazy
+view_rgb_cache: 64
+image_cache_device: cpu
+view_load_workers: 8

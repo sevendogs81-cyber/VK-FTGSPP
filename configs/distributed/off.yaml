@@ -1,0 +1,15 @@
+# Single-device, paper-compatible optimizer semantics.
+mode: "off"
+device_ids: []
+reduction: mean
+reduction_dtype: fp32
+# Ignored in off mode; auto remains the only alias for hierarchical_host when
+# the profile is switched to synchronous mode.
+backend: auto
+# Randomly reshuffle the complete flat (frame, camera) table each epoch. This
+# guarantees that every training image is consumed once before the next epoch,
+# while keeping the order deterministic and exactly resumable from seed + step.
+sampling_policy: flat_epoch
+global_batch_size: 1
+verify_replica_interval: 0
+allow_resume_world_size_change: false

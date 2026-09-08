@@ -1,0 +1,53 @@
+[project]
+name = "ftgspp-vulkan-community"
+version = "0.1.0"
+description = "Community FTGSPP pipeline with native Vulkan training and optional hard separation"
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = "==3.12.*"
+dependencies = [
+    "hydra-core>=1.3.2,<1.4",
+    "numpy>=2.0",
+    "omegaconf>=2.3,<2.4",
+    "opencv-python-headless==4.12.0.88",
+    "pycolmap>=3.12,<3.13",
+    "scipy>=1.14",
+    "tqdm>=4.67",
+]
+
+[project.optional-dependencies]
+build = ["cmake>=3.24", "ninja>=1.11", "pybind11>=2.11"]
+# Optional Torch LPIPS host plugin for native training/eval.  TorchMetrics'
+# learned-perceptual implementation imports torchvision model definitions.
+lpips = ["torch>=2.5", "torchvision>=0.20", "torchmetrics>=1.6"]
+# Optional legacy .pt/.npz → explicit-only V5 checkpoint conversion.
+convert = [
+    "torch>=2.5",
+    "torchvision>=0.20",
+]
+flow = [
+    "memfof @ git+https://github.com/msu-video-group/memfof.git",
+    "torch>=2.5",
+    "av>=14.0.0",
+    "imageio>=2.37",
+    "msgspec>=0.19",
+    "pillow>=11",
+    "pycolmap>=3.12,<3.13",
+]
+eval = ["flip-evaluator>=1.6"]
+
+[project.scripts]
+ftgspp-vulkan = "ftgspp.run:main"
+ftgspp-prepare-selfcap = "ftgspp.data.prepare_selfcap:main"
+ftgspp-build-vulkan = "ftgspp.build_native:main"
+ftgspp-convert-checkpoint = "ftgspp.checkpoint_convert:main"
+
+[build-system]
+requires = ["setuptools>=80"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["ftgspp*"]
+
+[tool.pyright]
+pythonVersion = "3.12"

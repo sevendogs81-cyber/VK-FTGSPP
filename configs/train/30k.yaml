@@ -1,0 +1,38 @@
+iterations: 30000
+batch_size: 1
+lpips_loss: false
+color_correction: false
+color_correction_start: 3000
+color_corrector_weight: 1.0e-3
+hard_separation: false
+seed: 0
+resume: false
+resume_checkpoint: null
+checkpoint_interval: 2000
+
+relocation:
+  start: 500
+  # Preserve the 30k baseline while keeping train.iterations CLI overrides valid.
+  stop: ${ftgspp_min:29000,${train.iterations}}
+  every: 100
+  opacity_threshold: 5.0e-3
+  mode: 3d_mcmc
+  score_mode: default
+  score_mode_start: 3000
+
+lrs:
+  means: 1.6e-4
+  quats: 1.0e-3
+  scales: 5.0e-3
+  opacities: 5.0e-2
+  sh_0: 2.5e-3
+  sh_n: 1.25e-4
+  durations: 5.0e-3
+  times: 1.6e-4
+  velocity_model: 1.6e-4
+  marginal_gates: 1.0e-3
+  color_correctors: 1.0e-3
+
+lr_schedules:
+  means: 0.01
+  velocity_model: 0.01
