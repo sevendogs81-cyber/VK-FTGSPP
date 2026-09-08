@@ -354,7 +354,7 @@ def collect_runtime_provenance(
             "files": {},
         }
     try:
-        package_version = version("ftgspp-vulkan")
+        package_version = version("ftgspp-vulkan-community")
     except PackageNotFoundError:
         package_version = "unknown"
     return {
@@ -467,6 +467,18 @@ def _algorithm_config(config: AppConfig) -> dict[str, object]:
                 "alternating_sign": "integer-parity",
                 "opacity_max": 1.0 - float(np.finfo(np.float32).eps),
             },
+            "hard_separation": {
+                "steps": 5000,
+                "means_lr": 0.001 * 1.6e-4,
+                "scale_regularization": 0.001,
+                "opacity_regularization": 0.001,
+                "gate_regularization": 0.0,
+                "color_regularization": 0.0,
+                "freeze_explicit_velocity_gate": True,
+                "freeze_color_parameters": True,
+                "phase_local_sampling_step": True,
+                "phase_local_relocation_window": "500<step<3000,every=100",
+            },
         },
         "relocation": {
             "start": int(relocation.start),
@@ -477,6 +489,7 @@ def _algorithm_config(config: AppConfig) -> dict[str, object]:
             "score_mode": str(relocation.score_mode),
             "score_mode_start": int(relocation.score_mode_start),
         },
+        "hard_separation": bool(config.train.hard_separation),
     }
     return dict(_jsonable(values))
 
@@ -631,6 +644,7 @@ def build_checkpoint_metadata(
                     "sampling": "views_seen advances sampler slots; flat_epoch thresholds stay phase-local optimizer_steps for K=1-compatible configs",
                     "sh_schedule": "views_seen is the sample clock; threshold units remain optimizer_steps for K=1-compatible configs",
                     "relocation": "views_seen is the sample clock; threshold units remain phase-local optimizer_steps for K=1-compatible configs",
+                    "hard_separation": "views_seen is the sample clock; threshold units remain phase-local optimizer_steps for K=1-compatible configs",
                     "lr": "optimizer_steps unless world_size_lr_scaling explicitly opts into a quality candidate",
                 },
                 **clock_values,
@@ -648,6 +662,11 @@ def build_checkpoint_metadata(
                     phase="main",
                     train_iterations=config.train.iterations,
                 ),
+                "hard_separation": sampling_phase_seed(
+                    seed=config.train.seed,
+                    phase="hard_separation",
+                    train_iterations=config.train.iterations,
+                ),
             },
         },
         "dataset": dataset.checkpoint_metadata(),
@@ -657,6 +676,7 @@ def build_checkpoint_metadata(
             "max_duration": float(config.model.max_duration),
             "sh_degree": int(config.init.sh_degree),
             "color_correction": bool(config.train.color_correction),
+            "hard_separation": bool(config.train.hard_separation),
         },
         "algorithm": _algorithm_manifest(config),
         "runtime": _jsonable(provenance),
@@ -1044,7 +1064,7 @@ def validate_resume_compatibility(
     current_model = dict(current.get("model_config", {}))
     for key in (
         "velocity_model", "marginal_gating", "max_duration", "sh_degree",
-        "color_correction",
+        "color_correction", "hard_separation",
     ):
         if saved_model.get(key) != current_model.get(key):
             errors.append(

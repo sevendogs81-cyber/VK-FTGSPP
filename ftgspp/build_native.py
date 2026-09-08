@@ -85,8 +85,6 @@ def build(
         [
             root / "build" / "native" / "_deps" / "glm-src" / "cmake" / "glm",
             root / "build" / "_deps" / "glm-src" / "cmake" / "glm",
-            root.parent / "ftgspp-vulkan" / "build" / "native" / "_deps"
-            / "glm-src" / "cmake" / "glm",
         ],
         "glmConfig.cmake",
     )

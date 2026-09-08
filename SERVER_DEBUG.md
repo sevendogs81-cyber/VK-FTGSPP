@@ -42,7 +42,7 @@ ftgspp_explicit_adam.spv
 ftgspp_sparse_{flag,pack,prepare,scatter}.spv
 ```
 
-当前 native ABI 为 `ftgspp-vulkan-explicit-v5-abi-v2`。不要把旧 `.so` 与新
+当前 native ABI 为 `ftgspp-vulkan-community-explicit-v5-abi-v1`。不要把旧 `.so` 与新
 SPIR-V 混用。
 
 ## 3. 无数据 GPU smoke

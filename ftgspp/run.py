@@ -13,7 +13,7 @@ def main(config: DictConfig) -> None:
     if runtime != "native":
         raise ValueError(
             f"run.runtime={runtime!r} is unsupported; "
-            "ftgspp-vulkan only provides the native Vulkan training path "
+            "ftgspp-vulkan-community only provides the native Vulkan training path "
             "(set run.runtime=native)"
         )
     from ftgspp.native_runtime.runner import NativeRunner

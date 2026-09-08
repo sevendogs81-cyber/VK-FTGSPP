@@ -90,7 +90,7 @@ eps = 1e-15/sqrt(B)
 ```
 
 checkpoint 固定 explicit-only V5，native ABI 为
-`ftgspp-vulkan-explicit-v5-abi-v2`。旧 explicit V4 必须离线迁移；旧 field
+`ftgspp-vulkan-community-explicit-v5-abi-v1`。旧 explicit V4 必须离线迁移；旧 field
 必须离线 sample 为 explicit。源码、SPIR-V 与 native module 必须一起重建。
 
 ## 验证状态
