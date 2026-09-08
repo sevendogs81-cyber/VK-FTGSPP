@@ -6,8 +6,8 @@ Reuses the native runtime geometry / undistort maps so training with
 
 Example:
   python scripts/bake_undistort_images.py \\
-    --source /mnt/merge/home/xiaowenhan/datasets/SelfCap/ftgspp/corgi \\
-    --output /nas1/home/xiaowenhan/datasets/corgi_undist_scale1 \\
+    --source /path/to/dataset \\
+    --output /path/to/dataset_undistorted \\
     --scale 1.0 --jpeg-quality 90 --workers 16 --start 0 --stop 300
 """
 
@@ -209,7 +209,7 @@ fps: 60.0
 strict_time_offsets: true
 # Keep original root so points_stride* resolve without copying PLYs.
 root: {source_root}
-video_path: /mnt/merge/home/xiaowenhan/datasets/SelfCap/corgi-release/videos
+video_path: {source_root}
 calibration_path: {output_root}
 extracted_path: {output_root}/images
 scale: {scale}

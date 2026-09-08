@@ -1,0 +1,18 @@
+name: corgi_first300_scale05
+fps: 60.0
+# If any supported time-offset JSON exists, require an entry for every camera.
+# Set false only to opt into a warned 0-second fallback for legacy metadata.
+strict_time_offsets: true
+root: ${oc.env:FTGSPP_CORGI_ROOT,/path/to/corgi}
+video_path: ${data.root}
+calibration_path: ${data.root}
+extracted_path: ${data.root}/images
+scale: 0.5
+frames:
+  start: 0
+  stop: 300
+
+# Resolved automatically from train_*.yml and test_*.yml.
+train_cameras: null
+eval_cameras: null
+camera_split_source: null

@@ -1,0 +1,17 @@
+name: corgi_0525_train21_eval3_scale1_stride5
+fps: 60.0
+strict_time_offsets: true
+# Prepared links point at the raw 0525_corgi images/calibration on /nas1;
+# only the stride-5 keyframe PLY links are materialized locally.
+root: ${oc.env:FTGSPP_CORGI_ROOT,/path/to/corgi_0525_stride5}
+video_path: ${oc.env:FTGSPP_CORGI_VIDEO_ROOT,${data.root}}
+calibration_path: ${data.root}
+extracted_path: ${data.root}/images
+scale: 1.0
+frames:
+  start: 0
+  stop: 300
+# 21 train / 3 eval, explicitly overriding the raw 16/8 staging split.
+train_cameras: [1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 23]
+eval_cameras: [0, 8, 16]
+camera_split_source: corgi_0525_explicit_21_3

@@ -1,0 +1,20 @@
+name: corgi_first300_train21_eval3_scale1_stride5
+fps: 60.0
+# Camera sync from SelfCap optimized/sync.json, staged as t_offsets.json.
+# Images keep a shared logical frame index so they stay aligned with
+# points_stride5. Native timestamp = logical_frame / fps - t_offsets[camera].
+# If an offset file is present, every discovered camera must have an entry.
+strict_time_offsets: true
+root: ${oc.env:FTGSPP_CORGI_ROOT,/path/to/corgi_first300_scale1_stride5}
+video_path: ${oc.env:FTGSPP_CORGI_VIDEO_ROOT,${data.root}}
+calibration_path: ${data.root}
+extracted_path: ${data.root}/images
+scale: 1.0
+frames:
+  start: 0
+  stop: 300
+
+# 21/3 split: eval cameras 0, 8, 16; remaining cameras train.
+train_cameras: null
+eval_cameras: [0, 8, 16]
+camera_split_source: null

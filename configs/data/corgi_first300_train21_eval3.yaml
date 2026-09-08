@@ -1,0 +1,14 @@
+name: corgi_first300_train21_eval3
+fps: 60.0
+strict_time_offsets: true
+root: ${oc.env:FTGSPP_CORGI_ROOT,/path/to/corgi}
+video_path: ${data.root}
+calibration_path: ${data.root}
+extracted_path: ${data.root}/images
+scale: 0.5
+frames:
+  start: 0
+  stop: 300
+train_cameras: null
+eval_cameras: [0, 8, 16]
+camera_split_source: null

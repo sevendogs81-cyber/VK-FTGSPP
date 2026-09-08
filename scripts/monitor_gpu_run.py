@@ -3,7 +3,7 @@
 
 Example (run in a second tmux pane while training):
   python scripts/monitor_gpu_run.py \\
-    --run-dir /nas1/home/xiaowenhan/ftgspp_runs/corgi_first300_train21_eval3/sync2_explicit_cc_mgate_resident_sqrtlr_30k \\
+    --run-dir /path/to/run \\
     --interval 5 \\
     --gpus 0,1
 """
