@@ -53,6 +53,8 @@ python -m ftgspp.run data=<data_config> model=explicit pipeline=from_points \
 默认配置位于 `configs/train/30k.yaml`。开启 hard separation：
 
 ```yaml
+model:
+  marginal_gating: true
 train:
   hard_separation: true
 ```

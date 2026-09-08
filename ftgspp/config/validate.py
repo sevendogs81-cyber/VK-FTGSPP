@@ -111,6 +111,10 @@ def validate_static_config(config: AppConfig) -> None:
         raise ValueError("init.num_gaussians must be greater than zero")
     if config.train.iterations <= 0:
         raise ValueError("train.iterations must be greater than zero")
+    if config.train.hard_separation and not config.model.marginal_gating:
+        raise ValueError(
+            "train.hard_separation requires model.marginal_gating=true"
+        )
     if config.train.seed < 0:
         raise ValueError("train.seed must be non-negative")
     if config.train.seed > 0xFFFFFFFF:
