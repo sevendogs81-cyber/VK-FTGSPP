@@ -102,7 +102,10 @@ def main(argv: list[str] | None = None) -> None:
     source.add_argument("--config", type=Path)
     source.add_argument("--resume", type=Path)
     train.add_argument("--output", type=Path)
-    train.add_argument("--devices", nargs="+", type=int)
+    train.add_argument(
+        "--devices", nargs="+", type=int,
+        help="Vulkan device id from `ftgspp doctor` (first release: one device)",
+    )
     train.add_argument(
         "--pipeline", choices=("scene", "foreground"),
         help="select the full-scene or foreground-target profile",
@@ -153,8 +156,17 @@ def main(argv: list[str] | None = None) -> None:
             if args.output:
                 overrides = OmegaConf.merge(overrides, {"run": {"output_path": str(args.output.expanduser().resolve())}})
             if args.devices:
-                if len(args.devices) not in (1, 2):
-                    parser.error("train supports one or two devices")
+                if len(args.devices) == 2:
+                    print(
+                        "warning: two-device training is in development and is "
+                        "not part of the first-release supported surface",
+                        file=sys.stderr,
+                    )
+                elif len(args.devices) != 1:
+                    parser.error(
+                        "train accepts one Vulkan device; two-device sync is "
+                        "in development"
+                    )
                 overrides = OmegaConf.merge(overrides, {
                     "run": {"gpu": args.devices[0]},
                     "distributed": {"mode": "sync" if len(args.devices) == 2 else "off",

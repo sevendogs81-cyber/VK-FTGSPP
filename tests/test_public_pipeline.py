@@ -190,6 +190,42 @@ def test_train_cli_pipeline_switch_resolves_foreground_profile(tmp_path, monkeyp
     assert config.pipeline.eval_protocol == "foreground_v1"
 
 
+def test_train_cli_two_devices_warns_and_still_resolves(tmp_path, monkeypatch, capsys):
+    from ftgspp.cli import main
+
+    config_path = tmp_path / "scene.yaml"
+    config_path.write_text("data:\n  root: scene\n", encoding="utf-8")
+    captured = {}
+
+    class Runner:
+        def __init__(self, config):
+            captured["config"] = config
+
+        def run(self):
+            return None
+
+    monkeypatch.setattr("ftgspp.training.runner.NativeRunner", Runner)
+    main(["train", "--config", str(config_path), "--devices", "0", "2"])
+    assert "two-device training is in development" in capsys.readouterr().err
+    config = captured["config"]
+    assert config.distributed.mode == "sync"
+    assert list(config.distributed.device_ids) == [0, 2]
+
+
+def test_train_cli_rejects_more_than_two_devices(tmp_path, monkeypatch):
+    from ftgspp.cli import main
+
+    config_path = tmp_path / "scene.yaml"
+    config_path.write_text("data:\n  root: scene\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "ftgspp.training.runner.NativeRunner",
+        lambda config: (_ for _ in ()).throw(AssertionError("should not train")),
+    )
+    with pytest.raises(SystemExit) as raised:
+        main(["train", "--config", str(config_path), "--devices", "0", "1", "2"])
+    assert raised.value.code == 2
+
+
 def test_failed_overwrite_keeps_existing_config(tmp_path):
     cfg = resolve_config(node(), base_dir=tmp_path).config
     cfg.run.output_path.mkdir(parents=True)

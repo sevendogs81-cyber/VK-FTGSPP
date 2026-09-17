@@ -1,3 +1,5 @@
+# Engineering NVIDIA acceptance, including in-development two-device pair
+# scripts. Not a supported user workflow for the first community release.
 name: Controlled NVIDIA acceptance
 on:
   workflow_dispatch:

@@ -8,6 +8,7 @@ data:
   scale: 0.5
 init:
   # auto keeps user PLYs when present and otherwise runs optional DA3.
+  # Default search path: <data.root>/points_stride<keyframe_stride>/fXXXXXX.ply
   backend: auto
   # Keep geometry initialization stable across training-seed sweeps.
   seed: 0

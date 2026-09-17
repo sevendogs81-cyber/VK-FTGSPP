@@ -48,6 +48,8 @@ def test_prepare_dataset_creates_manifest_and_resolvable_starter_config(tmp_path
     assert config.data.eval_cameras == [7]
     assert config.data.frames.start == 3
     assert config.data.frames.stop == 5
+    assert OmegaConf.load(config_path).init.seed == 0
+    assert config.init.seed == 0
 
 
 def test_manifest_only_supports_arbitrary_paths_and_explicit_timestamps(tmp_path):
@@ -91,3 +93,28 @@ def test_manifest_rejects_partial_timestamp_and_non_rectangular_grid(tmp_path):
     }), encoding="utf-8")
     with pytest.raises(ValueError, match="inconsistent camera coverage"):
         load_image_manifest(manifest, start=0, stop=2)
+
+
+def test_prepare_selfcap_starter_pins_init_seed(tmp_path):
+    from ftgspp.data.prepare_selfcap import write_data_config
+
+    path = tmp_path / "scene.yaml"
+    write_data_config(
+        path=path,
+        name="scene",
+        root=tmp_path,
+        video_path=tmp_path / "videos",
+        calibration_path=tmp_path,
+        extracted_path=tmp_path / "images",
+        fps=30.0,
+        scale=0.5,
+        start=0,
+        stop=30,
+        eval_cameras=[],
+        init_backend="da3",
+        keyframe_stride=10,
+        da3_cache_path=tmp_path / "points_da3_stride10",
+    )
+    node = OmegaConf.load(path)
+    assert node.init.seed == 0
+    assert node.init.backend == "da3"

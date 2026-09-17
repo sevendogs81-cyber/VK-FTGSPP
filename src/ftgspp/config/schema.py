@@ -297,7 +297,8 @@ class DistributedConfig:
     Each optimizer update consumes exactly one view per device.  Consequently
     the effective global batch is ``P`` in ``sync`` mode and one in ``off``
     mode; local gradient accumulation is intentionally not part of the public
-    training contract.
+    training contract. The first community release documents single-device
+    (``off``) training; two-device ``sync`` remains in development.
     ``sampling_policy`` controls view sampling for both single-device and
     synchronous modes. Both modes default to ``flat_epoch`` so every training
     view is consumed exactly once per randomized epoch.

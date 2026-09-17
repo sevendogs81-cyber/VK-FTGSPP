@@ -210,7 +210,10 @@ def _write_config(
     node = {
         "pipeline": {"mode": pipeline},
         "data": data,
-        "init": {"keyframe_stride": min(10, len(frames))},
+        "init": {
+            "seed": 0,
+            "keyframe_stride": min(10, len(frames)),
+        },
         "run": {"output_path": rel(output.parent / "runs" / name)},
     }
     OmegaConf.save(OmegaConf.create(node), output)
@@ -233,7 +236,10 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--pipeline", choices=("scene", "foreground"), default="scene")
     parser.add_argument("--calibration", type=Path)
     parser.add_argument("--train-cameras", type=int, nargs="+")
-    parser.add_argument("--eval-cameras", type=int, nargs="*")
+    parser.add_argument(
+        "--eval-cameras", type=int, nargs="*",
+        help="hold-out camera ids that exist in the grid; omit for no hold-out",
+    )
     parser.add_argument(
         "--mask-source", choices=("external", "alpha"), default="external",
     )

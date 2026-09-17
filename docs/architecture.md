@@ -4,11 +4,15 @@ The installed CLI resolves user YAML once, validates an immutable effective plan
 loads a shared Scene/Camera/View manifest, initializes or resumes explicit
 Gaussians, trains, then exports. This is a fixed sequence, not a configurable
 stage list. Evaluation and PLY export consume explicit model/state outputs.
+The first community release documents **one-device** training. Two-device pair
+transport remains in the tree (native collective, `tests/gpu/`, GPU workflow)
+but is in development and not a supported user path.
 
 - `src/ftgspp/config`: schema, path rules, immutable ResolvedRunPlan and validation.
 - `src/ftgspp/data`: preparation, calibration, timestamps, lazy pixel loading.
-- `src/ftgspp/training`: sampling, initialization, single/pair optimizer updates,
-  two phase schedules, evaluation and bounded image prefetch.
+- `src/ftgspp/training`: sampling, initialization, single-device optimizer
+  updates, two phase schedules, evaluation and bounded image prefetch. Pair
+  updates exist but are in development.
 - `src/ftgspp/io`: explicit NPZ models, V6 checkpoints, PLY.
 - `src/ftgspp/optional`: evaluation-only LPIPS and the lazy DA3 initializer; default
   imports do not load Torch or any upstream model package.
@@ -27,7 +31,9 @@ stage list. Evaluation and PLY export consume explicit model/state outputs.
 `Scene.from_config` scans the complete image grid before any model is allocated
 and checks for a complete EasyMocap calibration pair. With calibration, the
 existing camera/world geometry is retained; `init.backend=auto` first consumes a
-complete `f<frame>.ply` set and otherwise invokes pose-conditioned DA3. With no
+complete `f<frame>.ply` set under `init.points_path` (default
+`<data.root>/points_stride<keyframe_stride>/`, e.g. `points_stride10/f000000.ply`)
+and otherwise invokes pose-conditioned DA3. With no
 calibration, the loader creates provisional pinhole views, and `auto`/`da3`
 invokes DA3 on the first keyframe to estimate one static rig. Large rigs are
 processed in bounded chunks with shared anchor cameras; later keyframes are
@@ -55,20 +61,17 @@ identity. `init.seed` can pin this namespace independently of `train.seed`.
 
 ## One update
 
-Single GPU uses the fused backward/Adam path. A pair performs rank-local backward,
-exact sparse/dense exchange, rank-ordered FP32 mean and Adam on each GPU.
-The native pair state is Idle → LocalReady → GlobalReady → Idle.
-Duplicate backward/exchange/Adam calls are rejected; a forward loss is consumed
-exactly once, including the fused single-device path. Overflow rollback restores
+Single GPU uses the fused backward/Adam path. Duplicate backward/Adam calls are
+rejected; a forward loss is consumed exactly once. Overflow rollback restores
 relocation statistics and explicitly replays the same generation and views.
 
-The pair regularizer receives two scalar timestamps in rank order via push
-constants. Its mean, pixel reductions, cross-rank mean, Adam moments and
-relocation history are essential mathematics, not local gradient accumulation.
-
-Each run owns a PairSession. Mailbox and generation waits have finite configured
-timeouts. A worker error aborts peers before joining futures. No process-global
-collective owner is shared across independent runs.
+Two-device pair training is in development and is not part of the first-release
+supported surface. The implementation still performs rank-local backward, exact
+sparse/dense exchange, and rank-ordered FP32 mean plus Adam; native pair state
+is Idle → LocalReady → GlobalReady → Idle. The pair regularizer receives two
+scalar timestamps in rank order. Each run owns a PairSession with finite
+mailbox timeouts. Keep these contracts when changing collective code; do not
+document them as a user workflow.
 
 ## Phases and persistence
 
@@ -84,9 +87,11 @@ state. The saved effective YAML is loaded without rescaling LR or schedule lengt
 `train.checkpoint_interval` is the shared hold-out eval and optional checkpoint
 cadence; `train.save_checkpoints` decides whether optimizer snapshots are written.
 One numbered checkpoint is written and latest.json is atomically replaced when
-saving is enabled. One gaussians.npz is the standalone final model and comes from
-the best hold-out joint PSNR+SSIM score unless `train.export_best=false`; PLY is
-an explicit export. In-loop hold-out eval reduces PSNR and SSIM_2 on the GPU and
+saving is enabled. One `gaussians.npz` is the standalone final model and comes
+from the best hold-out joint PSNR+SSIM score unless `train.export_best=false`.
+Training also writes `run.export_filename` (default `gaussians_4dgs.ply`);
+`ftgspp export` writes another PLY path. In-loop hold-out eval reduces PSNR and
+SSIM_2 on the GPU and
 does not compute foreground morphology/ROI diagnostics. After the selected export
 is chosen, a foreground run always writes the diagnostic suite to
 `full_validation_metrics.jsonl` (and to `final_test_metrics.jsonl` when a locked
@@ -101,6 +106,10 @@ exit; resume appends a new session and fresh training replaces the file.
 
 ## Build
 
-PEP 517/scikit-build-core drives CMake and the shader compiler. The shader job
-manifest drives compilation and the installed resource manifest used at startup.
-All generated artifacts go to build directories or installed package resources.
+PEP 517/scikit-build-core drives CMake and the shader compiler. Wheel builds
+require Python 3.12 exactly, `slangc` from Slang 2026.10, Vulkan headers, and
+CMake 3.24+ (scikit-build-core may download CMake). The shader job manifest
+drives compilation and the installed resource manifest used at startup. All
+generated artifacts go to build directories or installed package resources.
+Examples stay in the git checkout and sdist; they are not installed by the
+wheel.

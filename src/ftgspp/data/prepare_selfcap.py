@@ -582,6 +582,7 @@ camera_split_source: null
     init_lines = [
         "init:",
         f"  backend: {init_backend}",
+        "  seed: 0",
         f"  keyframe_stride: {int(keyframe_stride)}",
     ]
     if da3_cache_path is not None:

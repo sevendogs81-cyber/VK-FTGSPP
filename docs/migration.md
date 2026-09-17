@@ -15,6 +15,8 @@ There is no implicit migration of old execution semantics.
   Numerical references and smoke helpers are tests, not installed public APIs.
 - The only synchronous backend is `pair_host` (`auto` resolves to it);
   the former `hierarchical_host` name and P≥3 implementations are removed.
+  Two-device sync is in development in this community release; the documented
+  first-release path is one GPU.
 - Native timestamps are two scalar arguments. There is no gradient finalizer,
   arbitrary batch-size setting, host gradient uploader or CPU gradient reducer.
   Unknown native configuration fields fail explicitly.
