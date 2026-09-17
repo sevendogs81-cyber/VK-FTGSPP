@@ -1,5 +1,6 @@
 #include "config.slang"
 #include "ftgspp_work_control.slang"
+#include "ftgspp_image_objective.slang"
 import utils;
 
 // Per-camera affine color correction: c' = c @ (mat + I) + vec.
@@ -15,6 +16,7 @@ struct ColorCorrectUniforms {
     uint height;
     uint camera_index;
     uint enabled;
+    uint objective_mode;
 };
 
 [numthreads(SUBGROUP_SIZE, 1, 1)]
@@ -38,11 +40,14 @@ void main(uint3 tid : SV_DispatchThreadID, uniform ColorCorrectUniforms u) {
     raw_rgb[pix+1u] = raw.y;
     raw_rgb[pix+2u] = raw.z;
     raw_rgb[pix+3u] = raw.w;
-    // Current FTGSPP applies Gaussians.forward(clamp=True) before the affine
-    // corrector.  The affine output itself remains unbounded for L1/SSIM.
-    float3 rgb = clamp(raw.xyz, float3(0.0f), float3(1.0f));
+    // composite_v1 extends the affine transform over premultiplied foreground:
+    // H=F@W+(1-T)b. scene_rgb_v1 corrects full-frame rendered RGB.
+    float3 rgb = ftgspp_is_composite_objective(u.objective_mode)
+        ? raw.xyz : clamp(raw.xyz, float3(0.0f), float3(1.0f));
+    float bias_scale = ftgspp_is_composite_objective(u.objective_mode)
+        ? (1.0f-raw.w) : 1.0f;
     // row-vector @ matrix  ==  mul(rgb, mat) in HLSL when mat columns are basis
-    float3 out_rgb = mul(rgb, mat) + bias;
+    float3 out_rgb = mul(rgb, mat) + bias_scale * bias;
     pixel_state[pix] = out_rgb.x;
     pixel_state[pix+1u] = out_rgb.y;
     pixel_state[pix+2u] = out_rgb.z;

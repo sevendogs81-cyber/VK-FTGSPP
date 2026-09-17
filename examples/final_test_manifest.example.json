@@ -1,0 +1,44 @@
+{
+  "schema": "ftgspp-final-test-v2",
+  "split": "final_test",
+  "independent_from_selection": true,
+  "training_dataset_fingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
+  "fps": 60.0,
+  "rgb_encoding": "straight",
+  "mask_source": "external",
+  "cameras": {
+    "4": {
+      "w2c": [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0]
+      ],
+      "intrinsic": [
+        [1200.0, 0.0, 960.0],
+        [0.0, 1200.0, 540.0],
+        [0.0, 0.0, 1.0]
+      ],
+      "source_intrinsic": [
+        [2400.0, 0.0, 1920.0],
+        [0.0, 2400.0, 1080.0],
+        [0.0, 0.0, 1.0]
+      ],
+      "distortion": [0.0, 0.0, 0.0, 0.0, 0.0],
+      "size": [1080, 1920],
+      "time_offset": 0.0
+    }
+  },
+  "views": [
+    {
+      "camera_id": 4,
+      "frame": 0,
+      "timestamp": 0.0,
+      "rgb_path": "../final_test/images/4/000000.png",
+      "rgb_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "mask_path": "../final_test/masks/4/000000.png",
+      "mask_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "original_size": [2160, 3840]
+    }
+  ]
+}

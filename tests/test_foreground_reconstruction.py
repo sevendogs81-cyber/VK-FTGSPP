@@ -1,0 +1,881 @@
+from __future__ import annotations
+
+import json
+import hashlib
+import tempfile
+from pathlib import Path
+from types import SimpleNamespace
+
+import cv2
+import numpy as np
+import pytest
+
+from ftgspp.data.scene import Scene, View, _read_mask_manifest, load_final_test_scene
+from ftgspp.optional.birefnet import _infer_probability, _view_inputs
+from ftgspp.optional.da3 import (
+    _conditioned_camera_diagnostics,
+    depth_to_points,
+    geometric_consistency_filter,
+)
+from ftgspp.optional.visual_hull import carve_visual_hull
+from ftgspp.optional.visual_hull import filter_points_by_visual_hull
+from ftgspp.optional.point_color import color_points_ibr
+from ftgspp.training.background import sample_background, sample_rank_backgrounds
+from ftgspp.training.foreground_metrics import boundary_fscore, foreground_metrics
+from ftgspp.training.objective import (
+    color_correct_composite_v1,
+    color_correct_composite_vjp,
+    composite_v1,
+    composite_v1_pixel_vjp,
+)
+from ftgspp.training.backend import NativeVulkanBackend
+from ftgspp.training.runner import NativeRunner, _background_context_audit
+
+
+def _gpu_holdout(
+    height: int,
+    width: int,
+    *,
+    prediction: np.ndarray,
+    reference: np.ndarray,
+    ssim: float = 0.0,
+    components: dict[str, np.ndarray] | None = None,
+    read_components: bool,
+) -> tuple[dict[str, float], dict[str, np.ndarray] | None]:
+    pred = np.asarray(prediction, np.float32)
+    ref = np.asarray(reference, np.float32)
+    pixels = height * width
+    windows = (height - 10) * (width - 10) if height > 10 and width > 10 else 0
+    se = float(np.sum((pred - ref) ** 2, dtype=np.float64))
+    return {
+        "squared_error_sum": se,
+        "ssim_sum": float(ssim) * float(windows) * 3.0,
+        "foreground_squared_error_sum": se,
+        "foreground_samples": float(pixels),
+        "valid_pixels": float(pixels),
+        "valid_windows": float(max(windows, 0)),
+    }, (components if read_components else None)
+
+
+def _background_options(**values):
+    defaults = dict(
+        mode="random_solid", color=[0.1, 0.2, 0.3], seed=7,
+        rank_policy="shared", hard_phase="inherit",
+    )
+    defaults.update(values)
+    return SimpleNamespace(**defaults)
+
+
+def test_background_sampler_replays_and_shared_policy_is_exact():
+    options = _background_options()
+    first = sample_rank_backgrounds(options, phase="main", logical_step=12, world_size=2)
+    second = sample_rank_backgrounds(options, phase="main", logical_step=12, world_size=2)
+    assert first == second
+    assert first[0].color == first[1].color
+    assert first[0].color != sample_background(
+        options, phase="main", logical_step=13,
+    ).color
+    independent = _background_options(rank_policy="independent")
+    colors = sample_rank_backgrounds(
+        independent, phase="main", logical_step=12, world_size=2,
+    )
+    assert colors[0].color != colors[1].color
+
+
+def test_hard_phase_background_override_is_black():
+    context = sample_background(
+        _background_options(hard_phase="fixed_black"),
+        phase="hard_separation", logical_step=99,
+    )
+    assert context.color == (0.0, 0.0, 0.0)
+
+
+def test_background_audit_records_exact_rank_phase_and_replay_key():
+    contexts = sample_rank_backgrounds(
+        _background_options(), phase="hard_separation",
+        logical_step=23, world_size=2,
+    )
+    audit = _background_context_audit(contexts)
+    assert audit["background_shared"] is True
+    assert audit["background_contexts"][0] == {
+        "rank": 0,
+        "color": list(contexts[0].color),
+        "sampler_version": contexts[0].version,
+        "phase": "hard_separation",
+        "logical_step": 23,
+        "rank_policy": "shared",
+        "sampled_rank": None,
+    }
+
+
+def test_composite_v1_transmittance_vjp_matches_finite_difference():
+    rng = np.random.default_rng(4)
+    foreground = rng.uniform(0.1, 0.4, (2, 3, 3))
+    transmittance = rng.uniform(0.2, 0.6, (2, 3))
+    reference = rng.uniform(0.1, 0.9, (2, 3, 3))
+    mask = rng.uniform(0.0, 1.0, (2, 3))
+    background = np.asarray([0.2, 0.4, 0.3])
+    upstream = rng.normal(size=(2, 3, 3))
+    _df, expected_dt = composite_v1_pixel_vjp(upstream, background)
+
+    def objective(value):
+        prediction, _target = composite_v1(
+            foreground, value, reference, mask, background,
+        )
+        return float(np.sum(prediction * upstream))
+
+    epsilon = 1e-6
+    numeric = np.zeros_like(transmittance)
+    for index in np.ndindex(transmittance.shape):
+        plus, minus = transmittance.copy(), transmittance.copy()
+        plus[index] += epsilon
+        minus[index] -= epsilon
+        numeric[index] = (objective(plus) - objective(minus)) / (2 * epsilon)
+    np.testing.assert_allclose(numeric, expected_dt, atol=1e-8, rtol=1e-7)
+
+
+def test_composite_color_correction_vjp_matches_finite_difference():
+    rng = np.random.default_rng(8)
+    foreground = rng.uniform(0.1, 0.7, (2, 2, 3))
+    transmittance = rng.uniform(0.1, 0.9, (2, 2))
+    matrix = np.eye(3) + rng.normal(0, 0.05, (3, 3))
+    bias = np.asarray([0.03, -0.04, 0.02])
+    background = np.asarray([0.8, 0.2, 0.5])
+    upstream = rng.normal(size=(2, 2, 3))
+    gradients = color_correct_composite_vjp(
+        foreground, transmittance, upstream, matrix, bias, background,
+    )
+
+    def objective(t):
+        return float(np.sum(color_correct_composite_v1(
+            foreground, t, matrix, bias, background,
+        ) * upstream))
+
+    epsilon = 1e-6
+    numeric = np.zeros_like(transmittance)
+    for index in np.ndindex(transmittance.shape):
+        plus, minus = transmittance.copy(), transmittance.copy()
+        plus[index] += epsilon
+        minus[index] -= epsilon
+        numeric[index] = (objective(plus) - objective(minus)) / (2 * epsilon)
+    np.testing.assert_allclose(numeric, gradients["transmittance"], atol=1e-8, rtol=1e-7)
+
+
+def test_foreground_eval_aggregates_fake_lpips_and_uses_separate_final_stream(
+    tmp_path, monkeypatch,
+):
+    height = width = 64
+    rgba = np.zeros((height, width, 4), np.uint8)
+    rgba[..., :3] = [120, 80, 40]
+    rgba[..., 3] = 255
+    intrinsic = np.asarray(
+        [[50, 0, width / 2], [0, 50, height / 2], [0, 0, 1]],
+        np.float32,
+    )
+    view = View(
+        path=tmp_path / "unused.png", frame=0, camera_id=9, timestamp=0.0,
+        w2c=np.eye(4, dtype=np.float32), source_intrinsic=intrinsic,
+        intrinsic=intrinsic, distortion=np.zeros(5, np.float32),
+        size=(height, width), mask_source="alpha",
+    )
+    dataset = Scene(
+        frames=[0], cameras=[9], train_cameras=[], eval_cameras=[9],
+        camera_split_source="locked final test", train_views=[],
+        eval_views=[view], fps=30.0,
+        evaluation_identity={"kind": "final_test", "manifest_sha256": "a" * 64},
+    )
+
+    class Backend:
+        native = SimpleNamespace()
+        def view_load_workers(self):
+            return 0
+        def view_cache_capacity(self):
+            return 1
+        def cached_view_image(self, *, is_train, index):
+            assert not is_train and index == 0
+            return rgba
+        def evaluate_holdout_view(
+            self, index, *, background, bind_validity, read_components,
+        ):
+            assert index == 0 and bind_validity and read_components
+            rgb = rgba[..., :3].astype(np.float32) / 255.0
+            foreground = rgb * np.float32(0.97)
+            components = {
+                "foreground": foreground,
+                "transmittance": np.zeros((height, width), np.float32),
+            }
+            return _gpu_holdout(
+                height, width, prediction=foreground, reference=rgb, ssim=0.9,
+                components=components, read_components=True,
+            )
+        def device_metadata(self):
+            return {"uuid": "fake-vulkan-device"}
+
+    captured = {}
+    def fake_lpips(pairs, **options):
+        captured["pairs"] = pairs
+        captured["options"] = options
+        return [0.375]
+
+    monkeypatch.setattr(
+        "ftgspp.optional.lpips.evaluate_lpips_vgg_unnormalized", fake_lpips,
+    )
+    runner = object.__new__(NativeRunner)
+    runner.config = SimpleNamespace(
+        pipeline=SimpleNamespace(
+            mode="foreground", eval_protocol="foreground_v1",
+        ),
+        run=SimpleNamespace(output_path=tmp_path),
+        train=SimpleNamespace(color_correction=False),
+        eval=SimpleNamespace(
+            frame_interval=1,
+            background_colors=[[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]],
+            opacity_threshold=0.5, lpips=True, lpips_min_roi_size=32,
+            lpips_device="cpu", lpips_batch_size=2,
+        ),
+    )
+    metrics = runner._evaluate(Backend(), dataset, 17)
+
+    assert metrics["foreground_roi_lpips"] == pytest.approx(0.375)
+    assert metrics["foreground_roi_lpips_views"] == 1
+    assert metrics["foreground_views"][0]["foreground_roi_lpips"] == pytest.approx(0.375)
+    assert metrics["evaluation_identity"]["kind"] == "final_test"
+    assert len(captured["pairs"]) == 1
+    assert captured["pairs"][0][0].shape == (64, 64, 3)
+    assert captured["options"]["device"] == "cpu"
+    assert (tmp_path / "final_test_metrics.jsonl").is_file()
+    assert not (tmp_path / "metrics.jsonl").exists()
+
+
+def test_scene_eval_scores_full_rgb_and_ignores_reference_alpha(tmp_path):
+    height = width = 16
+    rgba = np.zeros((height, width, 4), np.uint8)
+    intrinsic = np.asarray(
+        [[20, 0, width / 2], [0, 20, height / 2], [0, 0, 1]],
+        np.float32,
+    )
+    view = View(
+        path=tmp_path / "unused.png", frame=0, camera_id=4, timestamp=0.0,
+        w2c=np.eye(4, dtype=np.float32), source_intrinsic=intrinsic,
+        intrinsic=intrinsic, distortion=np.zeros(5, np.float32),
+        size=(height, width), mask_source="none",
+    )
+    dataset = Scene(
+        frames=[0], cameras=[4], train_cameras=[], eval_cameras=[4],
+        camera_split_source="test", train_views=[], eval_views=[view], fps=30.0,
+    )
+
+    class Backend:
+        native = SimpleNamespace()
+        def view_load_workers(self):
+            return 0
+        def view_cache_capacity(self):
+            return 1
+        def cached_view_image(self, *, is_train, index):
+            return rgba
+        def evaluate_holdout_view(
+            self, index, *, background, bind_validity, read_components,
+        ):
+            assert not bind_validity and not read_components
+            return _gpu_holdout(
+                height, width,
+                prediction=np.ones((height, width, 3), np.float32),
+                reference=np.zeros((height, width, 3), np.float32),
+                read_components=False,
+            )
+        def device_metadata(self):
+            return {"uuid": "fake-vulkan-device"}
+
+    runner = object.__new__(NativeRunner)
+    runner.config = SimpleNamespace(
+        pipeline=SimpleNamespace(mode="scene", eval_protocol="scene_rgb_v1"),
+        run=SimpleNamespace(output_path=tmp_path),
+        train=SimpleNamespace(color_correction=False),
+        eval=SimpleNamespace(
+            frame_interval=1, background_colors=[[0.0, 0.0, 0.0]],
+            opacity_threshold=0.5, lpips=False,
+        ),
+    )
+    metrics = runner._evaluate(Backend(), dataset, 3)
+    assert metrics["protocol"] == "scene_rgb_v1"
+    assert metrics["psnr"] == pytest.approx(0.0)
+
+
+def test_foreground_in_loop_eval_is_ranking_only(tmp_path):
+    height = width = 16
+    rgba = np.full((height, width, 4), 128, np.uint8)
+    rgba[..., 3] = 255
+    intrinsic = np.asarray(
+        [[20, 0, width / 2], [0, 20, height / 2], [0, 0, 1]],
+        np.float32,
+    )
+    view = View(
+        path=tmp_path / "unused.png", frame=0, camera_id=2, timestamp=0.0,
+        w2c=np.eye(4, dtype=np.float32), source_intrinsic=intrinsic,
+        intrinsic=intrinsic, distortion=np.zeros(5, np.float32),
+        size=(height, width), mask_source="alpha",
+    )
+    dataset = Scene(
+        frames=[0], cameras=[2], train_cameras=[], eval_cameras=[2],
+        camera_split_source="test", train_views=[], eval_views=[view], fps=30.0,
+    )
+    rgb = rgba[..., :3].astype(np.float32) / 255.0
+
+    class Backend:
+        native = SimpleNamespace()
+        def view_load_workers(self):
+            return 0
+        def view_cache_capacity(self):
+            return 1
+        def cached_view_image(self, *, is_train, index):
+            return rgba
+        def evaluate_holdout_view(
+            self, index, *, background, bind_validity, read_components,
+        ):
+            assert bind_validity and not read_components
+            return _gpu_holdout(
+                height, width, prediction=rgb, reference=rgb, ssim=0.8,
+                read_components=False,
+            )
+        def device_metadata(self):
+            return {"uuid": "fake-vulkan-device"}
+
+    runner = object.__new__(NativeRunner)
+    runner.config = SimpleNamespace(
+        pipeline=SimpleNamespace(
+            mode="foreground", eval_protocol="foreground_v1",
+        ),
+        run=SimpleNamespace(output_path=tmp_path),
+        train=SimpleNamespace(color_correction=False),
+        eval=SimpleNamespace(
+            frame_interval=1, background_colors=[[0.0, 0.0, 0.0]],
+            opacity_threshold=0.5, lpips=False, selector="foreground_psnr",
+        ),
+    )
+    metrics = runner._evaluate(Backend(), dataset, 9)
+    assert metrics["foreground_bundle"] == "ranking"
+    assert "foreground_views" not in metrics
+    assert "silhouette_iou" not in metrics
+    assert metrics["foreground_psnr"] is not None
+    assert metrics["ssim"] == pytest.approx(0.8)
+
+
+def test_external_16bit_mask_is_soft_and_rgb_is_not_premultiplied():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        rgb_path = root / "rgb.png"
+        mask_path = root / "mask.png"
+        cv2.imwrite(str(rgb_path), np.full((2, 2, 3), (10, 20, 30), np.uint8))
+        cv2.imwrite(str(mask_path), np.asarray([[0, 32768], [65535, 16384]], np.uint16))
+        view = View(
+            path=rgb_path, frame=0, camera_id=0, timestamp=0.0,
+            w2c=np.eye(4, dtype=np.float32),
+            source_intrinsic=np.eye(3, dtype=np.float32),
+            intrinsic=np.eye(3, dtype=np.float32),
+            distortion=np.zeros(5, np.float32), size=(2, 2),
+            mask_path=mask_path, mask_source="external",
+        )
+        rgba = view.load_rgb()
+        np.testing.assert_array_equal(rgba[..., :3], np.full((2, 2, 3), (30, 20, 10), np.uint8))
+        np.testing.assert_array_equal(rgba[..., 3], np.asarray([[0, 128], [255, 64]], np.uint8))
+
+
+def test_declared_premultiplied_rgb_is_unmultiplied_once():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        # BGR on disk corresponds to straight RGB=(100, 80, 60) times M=.5.
+        cv2.imwrite(str(root / "rgb.png"), np.full((1, 1, 3), (30, 40, 50), np.uint8))
+        cv2.imwrite(str(root / "mask.png"), np.full((1, 1), 128, np.uint8))
+        view = View(
+            path=root / "rgb.png", frame=0, camera_id=0, timestamp=0.0,
+            w2c=np.eye(4, dtype=np.float32),
+            source_intrinsic=np.eye(3, dtype=np.float32),
+            intrinsic=np.eye(3, dtype=np.float32),
+            distortion=np.zeros(5, np.float32), size=(1, 1),
+            mask_path=root / "mask.png", mask_source="external",
+            rgb_encoding="premultiplied",
+        )
+        rgba = view.load_rgb()
+        np.testing.assert_allclose(rgba[0, 0, :3], [100, 80, 60], atol=1)
+        assert rgba[0, 0, 3] == 128
+
+
+def test_birefnet_view_manifest_supports_arbitrary_source_names():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        image = root / "capture" / "left-subject.take.png"
+        image.parent.mkdir()
+        cv2.imwrite(str(image), np.zeros((2, 3, 3), np.uint8))
+        manifest = root / "views.json"
+        manifest.write_text(json.dumps({"views": [{
+            "camera_id": 17,
+            "frame": 42,
+            "rgb_path": "capture/left-subject.take.png",
+        }]}), encoding="utf-8")
+
+        rows = _view_inputs(root, manifest)
+
+        assert rows == [(image.resolve(), 17, 42, Path("17/000042.png"))]
+
+
+def test_birefnet_activation_and_preprocessing_are_explicit():
+    torch = pytest.importorskip("torch")
+
+    class ConstantModel:
+        def __init__(self, value: float):
+            self.value = value
+            self.input = None
+        def __call__(self, value):
+            self.input = value.detach().cpu().numpy()
+            return torch.full(
+                (value.shape[0], 1, value.shape[2], value.shape[3]),
+                self.value, device=value.device,
+            )
+
+    rgb = np.full((3, 5, 3), 255, np.uint8)
+    model = ConstantModel(0.25)
+    probability = _infer_probability(
+        model, torch, "cpu", rgb, 4, output_activation="probability",
+        preprocessing_profile="unit_square_v1",
+    )
+    np.testing.assert_allclose(probability, 0.25, atol=1e-7)
+    np.testing.assert_allclose(model.input, 1.0, atol=1e-7)
+    logits = _infer_probability(
+        ConstantModel(0.25), torch, "cpu", rgb, 4,
+        output_activation="sigmoid_logits",
+        preprocessing_profile="birefnet_imagenet_square_v1",
+    )
+    np.testing.assert_allclose(logits, 1.0 / (1.0 + np.exp(-0.25)), atol=1e-7)
+    with pytest.raises(RuntimeError, match="outside"):
+        _infer_probability(
+            ConstantModel(1.1), torch, "cpu", rgb, 4,
+            output_activation="probability",
+        )
+
+
+def test_birefnet_manifest_requires_completed_hashed_matching_content():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        rgb = root / "rgb.png"
+        mask = root / "mask.png"
+        cv2.imwrite(str(rgb), np.zeros((4, 5, 3), np.uint8))
+        cv2.imwrite(str(mask), np.full((4, 5), 255, np.uint8))
+        manifest = root / "masks.json"
+        completed = root / "completed.json"
+        payload = {
+            "schema": "ftgspp-birefnet-mask-v1",
+            "completion_marker": "completed.json",
+            "views": [{
+                "camera_id": 0, "frame": 0,
+                "rgb_path": "rgb.png", "mask_path": "mask.png",
+                "rgb_sha256": hashlib.sha256(rgb.read_bytes()).hexdigest(),
+                "mask_sha256": hashlib.sha256(mask.read_bytes()).hexdigest(),
+                "original_size": [4, 5],
+            }],
+        }
+        manifest.write_text(json.dumps(payload), encoding="utf-8")
+        with pytest.raises(ValueError, match="completion"):
+            _read_mask_manifest(manifest, root)
+        completed.write_text(json.dumps({
+            "schema": "ftgspp-birefnet-mask-v1",
+            "manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
+            "views": 1,
+        }), encoding="utf-8")
+        parsed = _read_mask_manifest(manifest, root)
+        assert parsed.strict and set(parsed.rows) == {(0, 0)}
+        cv2.imwrite(str(mask), np.zeros((4, 5), np.uint8))
+        with pytest.raises(ValueError, match="mask_sha256 mismatch"):
+            _read_mask_manifest(manifest, root)
+
+
+def test_da3_conditioned_camera_check_rejects_a_second_coordinate_system():
+    conditioned = np.repeat(np.eye(4, dtype=np.float32)[None], 2, axis=0)
+    conditioned[1, 0, 3] = -1.0
+    predicted = conditioned.copy()
+    predicted[0, 1, 3] = -1e-3
+    diagnostics = _conditioned_camera_diagnostics(predicted, conditioned)
+    assert diagnostics["max_center_error_over_baseline"] < 0.02
+
+    predicted[0, 1, 3] = -0.1
+    with pytest.raises(RuntimeError, match="inconsistent"):
+        _conditioned_camera_diagnostics(predicted, conditioned)
+
+
+def test_confidence_percentile_is_computed_inside_foreground():
+    depth = np.ones((2, 3), np.float32)
+    confidence = np.asarray([[100, 100, 100], [0.1, 0.2, 0.9]], np.float32)
+    foreground = np.asarray([[0, 0, 0], [1, 1, 1]], np.float32)
+    xyz, _rgb = depth_to_points(
+        depth, np.eye(3, dtype=np.float32), np.eye(4, dtype=np.float32),
+        np.zeros((2, 3, 3), np.uint8), confidence=confidence,
+        confidence_percentile=50, foreground_mask=foreground,
+    )
+    assert len(xyz) == 2
+
+
+def test_geometric_consistency_distinguishes_support_occlusion_and_conflict():
+    points = np.asarray([[0, 0, 1], [1, 0, 2], [0, 0, 0.5]], np.float32)
+    depth = np.asarray([[1.0, 1.0, 1.0]], np.float32)
+    intrinsic = np.eye(3, dtype=np.float32)
+    intrinsic[0, 0] = intrinsic[1, 1] = 1.0
+    keep, support, conflict = geometric_consistency_filter(
+        points, source_index=0, depths=[depth, depth],
+        extrinsics=np.repeat(np.eye(4, dtype=np.float32)[None], 2, axis=0),
+        intrinsics=np.repeat(intrinsic[None], 2, axis=0),
+        foreground_masks=[np.ones_like(depth), np.ones_like(depth)],
+        validities=[np.ones_like(depth), np.ones_like(depth)],
+        min_consistent_views=2, relative_tolerance=0.01, absolute_tolerance=0.01,
+    )
+    assert support[0] == 2 and keep[0]
+    assert support[1] == 1 and not keep[1]  # behind the observed surface: occluded
+    assert conflict[2] == 1 and not keep[2]  # in front: contradictory
+
+
+def test_foreground_metrics_expose_background_opacity_leakage():
+    mask = np.zeros((16, 16), np.float32)
+    mask[5:11, 5:11] = 1.0
+    alpha = mask.copy()
+    alpha[:2, :] = 0.25
+    report = foreground_metrics(
+        np.zeros((16, 16, 3), np.float32), 1.0 - alpha,
+        np.zeros((16, 16, 3), np.float32), mask,
+    )
+    assert report["background_opacity_leakage"] > 0.0
+    assert report["silhouette_iou"] == 1.0
+    assert report["foreground_roi"] == {
+        "y0": 4, "y1": 12, "x0": 4, "x1": 12,
+        "pixels": 64, "padding_pixels": 1,
+        "defined_by": "reference_mask_and_validity",
+    }
+
+
+def test_boundary_fscore_does_not_create_a_boundary_at_invalid_pixels():
+    target = np.zeros((24, 24), bool)
+    target[4:20, 4:20] = True
+    prediction = target.copy()
+    # The prediction differs only inside the ignored band. Masking before
+    # extracting boundaries would manufacture a vertical contour at x=12.
+    prediction[:, 12:15] = False
+    validity = np.ones_like(target)
+    validity[:, 10:15] = False
+    score = boundary_fscore(prediction, target, 1, validity)
+    assert score == pytest.approx(1.0)
+
+
+def test_visual_hull_carves_mask_supported_voxels():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        views = []
+        intrinsic = np.asarray([[8, 0, 4], [0, 8, 4], [0, 0, 1]], np.float32)
+        for camera in range(2):
+            rgb_path = root / f"rgb{camera}.png"
+            mask_path = root / f"mask{camera}.png"
+            cv2.imwrite(str(rgb_path), np.zeros((8, 8, 3), np.uint8))
+            mask = np.zeros((8, 8), np.uint8)
+            mask[2:6, 2:6] = 255
+            cv2.imwrite(str(mask_path), mask)
+            views.append(View(
+                path=rgb_path, frame=0, camera_id=camera, timestamp=0,
+                w2c=np.eye(4, dtype=np.float32),
+                source_intrinsic=intrinsic, intrinsic=intrinsic,
+                distortion=np.zeros(5, np.float32), size=(8, 8),
+                mask_path=mask_path, mask_source="external",
+            ))
+        points, diagnostics = carve_visual_hull(
+            views, np.asarray([[-0.4, -0.4, 1.5], [0.4, 0.4, 2.5]]),
+            resolution=12, min_views=2, support_fraction=1.0,
+        )
+        assert len(points) > 0
+        assert diagnostics["output_count"] == len(points)
+
+
+def _synthetic_view(
+    root: Path, camera: int, rgb: tuple[int, int, int], *,
+    w2c: np.ndarray | None = None,
+) -> View:
+    rgb_path = root / f"color-{camera}.png"
+    mask_path = root / f"color-mask-{camera}.png"
+    cv2.imwrite(str(rgb_path), np.full((9, 9, 3), rgb[::-1], np.uint8))
+    cv2.imwrite(str(mask_path), np.full((9, 9), 255, np.uint8))
+    intrinsic = np.asarray([[10, 0, 4], [0, 10, 4], [0, 0, 1]], np.float32)
+    return View(
+        path=rgb_path, frame=0, camera_id=camera, timestamp=0,
+        w2c=np.eye(4, dtype=np.float32) if w2c is None else w2c,
+        source_intrinsic=intrinsic, intrinsic=intrinsic,
+        distortion=np.zeros(5, np.float32), size=(9, 9),
+        mask_path=mask_path, mask_source="external",
+    )
+
+
+def test_ibr_depth_rank_top3_and_neighbor_z_buffer_are_explicit():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        views = []
+        for camera, value in enumerate((10, 20, 30, 200)):
+            w2c = np.eye(4, dtype=np.float32)
+            w2c[2, 3] = float(camera)
+            views.append(_synthetic_view(root, camera, (value, value, value), w2c=w2c))
+        ranked = color_points_ibr(
+            np.asarray([[0, 0, 4]], np.float32), views,
+            mode="depth_rank_top3", depth_rank_views=3,
+            source_search_radius=0,
+        )
+        assert ranked.keep.tolist() == [True]
+        np.testing.assert_array_equal(ranked.rgb[0], [20, 20, 20])
+
+        one_view = views[:1]
+        points = np.asarray([[0, 0, 2], [0.6, 0, 4]], np.float32)
+        strict = color_points_ibr(
+            points, one_view, z_buffer_radius=0, source_search_radius=0,
+        )
+        robust = color_points_ibr(
+            points, one_view, z_buffer_radius=1, source_search_radius=0,
+        )
+        assert strict.keep.tolist() == [True, True]
+        assert robust.keep.tolist() == [True, False]
+
+
+def test_visual_hull_surface_thickness_and_existing_cloud_filter():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        views = [
+            _synthetic_view(root, camera, (50, 60, 70))
+            for camera in range(2)
+        ]
+        bounds = np.asarray([[-0.2, -0.2, 2.0], [0.2, 0.2, 2.4]])
+        thin, thin_diag = carve_visual_hull(
+            views, bounds, resolution=8, surface_band_layers=1,
+        )
+        thick, thick_diag = carve_visual_hull(
+            views, bounds, resolution=8, surface_band_layers=2,
+        )
+        assert len(thick) > len(thin)
+        assert thick_diag["surface_band_layers"] == 2
+        candidates = np.asarray([[0, 0, 2.2], [100, 0, 2.2], [0, 0, -1]], np.float32)
+        keep, diagnostics = filter_points_by_visual_hull(candidates, views)
+        assert keep.tolist() == [True, False, False]
+        assert diagnostics["kept_count"] == 1
+
+
+def test_visual_hull_rejects_all_points_behind_cameras():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        views = [
+            _synthetic_view(root, camera, (0, 0, 0))
+            for camera in range(2)
+        ]
+        with pytest.raises(RuntimeError, match="empty volume"):
+            carve_visual_hull(
+                views, np.asarray([[-1, -1, -3], [1, 1, -1]], float),
+                resolution=8,
+            )
+
+
+def test_locked_final_test_manifest_uses_training_identity_and_explicit_time():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        cv2.imwrite(str(root / "rgb.png"), np.full((4, 5, 3), 64, np.uint8))
+        cv2.imwrite(str(root / "mask.png"), np.full((4, 5), 255, np.uint8))
+        training = SimpleNamespace(
+            fps=30.0,
+            time_offsets={0: 0.0},
+            checkpoint_metadata=lambda: {"fingerprint": "locked-training"},
+        )
+        manifest = {
+            "schema": "ftgspp-final-test-v1",
+            "training_dataset_fingerprint": "locked-training",
+            "fps": 30.0,
+            "rgb_encoding": "straight",
+            "cameras": {
+                "9": {
+                    "w2c": np.eye(4).tolist(),
+                    "intrinsic": [[4, 0, 2.5], [0, 4, 2], [0, 0, 1]],
+                    "size": [4, 5],
+                },
+            },
+            "views": [{
+                "camera_id": 9,
+                "frame": 3,
+                "timestamp": 0.125,
+                "rgb_path": "rgb.png",
+                "mask_path": "mask.png",
+                "rgb_sha256": hashlib.sha256((root / "rgb.png").read_bytes()).hexdigest(),
+                "mask_sha256": hashlib.sha256((root / "mask.png").read_bytes()).hexdigest(),
+                "original_size": [4, 5],
+            }],
+        }
+        path = root / "final_test.json"
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        scene = load_final_test_scene(training, path)
+
+        assert scene.train_views == []
+        assert scene.eval_cameras == [9]
+        assert scene.eval_views[0].timestamp == 0.125
+        np.testing.assert_array_equal(scene.eval_views[0].load_mask(), 1.0)
+        assert scene.evaluation_identity["manifest_sha256"]
+        assert scene.evaluation_identity["content_sha256"]
+
+        (root / "mask.png").write_bytes(b"tampered")
+        with pytest.raises(ValueError, match="hash mismatch"):
+            load_final_test_scene(training, path)
+        cv2.imwrite(str(root / "mask.png"), np.full((4, 5), 255, np.uint8))
+
+        manifest["training_dataset_fingerprint"] = "wrong"
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        try:
+            load_final_test_scene(training, path)
+        except ValueError as exc:
+            assert "fingerprint" in str(exc)
+        else:  # pragma: no cover - makes the security boundary explicit
+            raise AssertionError("mismatched final test identity was accepted")
+
+
+def test_locked_final_test_rejects_content_used_by_checkpoint_selection(tmp_path):
+    source = tmp_path / "selection.png"
+    duplicate = tmp_path / "final.png"
+    assert cv2.imwrite(
+        str(source), np.full((4, 5, 3), 64, np.uint8),
+    )
+    duplicate.write_bytes(source.read_bytes())
+    training = SimpleNamespace(
+        fps=30.0,
+        time_offsets={},
+        train_views=[SimpleNamespace(frame=0, camera_id=0, path=source)],
+        eval_views=[],
+        checkpoint_metadata=lambda: {"fingerprint": "locked-training"},
+    )
+    manifest = {
+        "schema": "ftgspp-final-test-v2",
+        "split": "final_test",
+        "independent_from_selection": True,
+        "training_dataset_fingerprint": "locked-training",
+        "fps": 30.0,
+        "mask_source": "alpha",
+        "cameras": {
+            "9": {
+                "w2c": np.eye(4).tolist(),
+                "intrinsic": [[4, 0, 2.5], [0, 4, 2], [0, 0, 1]],
+                "size": [4, 5],
+            },
+        },
+        "views": [{
+            "camera_id": 9,
+            "frame": 3,
+            "timestamp": 0.1,
+            "rgb_path": duplicate.name,
+            "rgb_sha256": hashlib.sha256(duplicate.read_bytes()).hexdigest(),
+            "original_size": [4, 5],
+        }],
+    }
+    path = tmp_path / "final.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="content overlaps"):
+        load_final_test_scene(training, path)
+
+
+def test_locked_final_test_cli_uses_selected_model_identity_without_mutation(
+    tmp_path, monkeypatch,
+):
+    from ftgspp import cli as cli_module
+
+    run = tmp_path / "run"
+    run.mkdir()
+    model_path = run / "gaussians.npz"
+    model_path.write_bytes(b"locked-model")
+    model_hash = hashlib.sha256(model_path.read_bytes()).hexdigest()
+    selection_path = run / "export_selection.json"
+    selection_path.write_text(json.dumps({
+        "step": 7,
+        "model_sha256": model_hash,
+        "training_dataset_fingerprint": "locked-training",
+        # A final-test camera must not consume this training-camera state.
+        "color_correction": {"artifact": "must-not-be-opened.npz"},
+    }), encoding="utf-8")
+    selection_before = selection_path.read_bytes()
+    test_manifest = tmp_path / "locked-test.json"
+    test_manifest.write_text("{}", encoding="utf-8")
+    config = SimpleNamespace(
+        run=SimpleNamespace(
+            output_path=run, view_rgb_cache=1, view_load_workers=0,
+        ),
+        train=SimpleNamespace(
+            iterations=20, color_correction=True,
+        ),
+        data=SimpleNamespace(test_manifest=None),
+    )
+    training_scene = SimpleNamespace(
+        name="training",
+        checkpoint_metadata=lambda: {"fingerprint": "locked-training"},
+    )
+    locked_scene = SimpleNamespace(evaluation_identity={
+        "kind": "final_test",
+        "schema": "ftgspp-final-test-v2",
+        "manifest_path": str(test_manifest),
+        "manifest_sha256": "b" * 64,
+    })
+    observed = {}
+
+    class Runner:
+        def __init__(self, actual_config):
+            assert actual_config is config
+        def _preflight(self):
+            return training_scene
+        def _evaluate(self, backend, dataset, step):
+            observed["dataset"] = dataset
+            observed["step"] = step
+            observed["color_correction"] = config.train.color_correction
+
+    class Backend:
+        def __init__(self, device, *, honor_device_env):
+            observed["device"] = device
+            assert honor_device_env is False
+        def configure(self, actual_config, extent):
+            assert actual_config is config and extent == 1.0
+        def upload_dataset(self, dataset, **options):
+            assert dataset is locked_scene
+        def upload_model(self, model):
+            assert model == "model"
+        def restore_optimizer(self, _state):
+            raise AssertionError("final test must not restore training optimizer")
+        def set_color_params(self, _params):
+            raise AssertionError("final test must not install learned camera rows")
+        def close(self):
+            observed["closed"] = True
+
+    monkeypatch.setattr(cli_module, "load_run_config", lambda path: config)
+    monkeypatch.setattr("ftgspp.training.runner.NativeRunner", Runner)
+    monkeypatch.setattr("ftgspp.training.backend.NativeVulkanBackend", Backend)
+    monkeypatch.setattr("ftgspp.training.backend.camera_extent", lambda scene: 1.0)
+    monkeypatch.setattr(
+        "ftgspp.data.scene.load_final_test_scene",
+        lambda scene, path: (
+            locked_scene
+            if scene is training_scene and Path(path) == test_manifest
+            else (_ for _ in ()).throw(AssertionError("wrong final-test inputs"))
+        ),
+    )
+    monkeypatch.setattr("ftgspp.io.checkpoint.load_model", lambda path: "model")
+    monkeypatch.setattr(
+        "ftgspp.io.checkpoint.latest_checkpoint",
+        lambda path: (_ for _ in ()).throw(
+            AssertionError("final test must not load a training checkpoint")
+        ),
+    )
+    cli_module.main([
+        "eval", "--run", str(run), "--device", "2",
+        "--test-manifest", str(test_manifest),
+    ])
+
+    identity = locked_scene.evaluation_identity
+    assert observed == {
+        "device": 2,
+        "dataset": locked_scene,
+        "step": 7,
+        "color_correction": False,
+        "closed": True,
+    }
+    assert identity["model_sha256"] == model_hash
+    assert identity["model_step"] == 7
+    assert identity["selection_manifest"] == str(selection_path.resolve())
+    assert identity["color_correction"] == "disabled_for_novel_final_test_cameras"
+    assert selection_path.read_bytes() == selection_before

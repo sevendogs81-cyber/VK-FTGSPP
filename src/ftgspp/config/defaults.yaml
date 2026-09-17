@@ -1,0 +1,157 @@
+pipeline:
+  # Choose once at startup: scene reconstructs full-frame RGB; foreground
+  # applies the coordinated mask/initializer/objective/evaluation profile.
+  mode: scene
+model:
+  marginal_gating: false
+  max_duration: 0.0
+  marginal_threshold: 0.05
+  gate_init_logit: -1.0
+data:
+  name: scene
+  fps: 60.0
+  strict_time_offsets: true
+  root: ???
+  video_path: ${data.root}
+  calibration_path: ${data.root}
+  extracted_path: ${data.root}/images
+  # Optional ftgspp-dataset-v1 JSON for arbitrary image filenames/locations.
+  view_manifest: null
+  scale: 0.5
+  frames:
+    start: 0
+    stop: 300
+  train_cameras: null
+  eval_cameras: null
+  camera_split_source: null
+  test_manifest: null
+  masks:
+    source: none
+    root: null
+    manifest_path: null
+    validity_root: null
+    required: false
+    rgb_encoding: straight
+    fingerprint: null
+init:
+  # Use existing RGB PLYs when complete; otherwise invoke optional DA3.
+  # DA3 sizing follows num_gaussians, keyframe_stride, the frame span, and
+  # native image size. Users do not need to set process_res / max_points.
+  backend: auto
+  points_path: ${data.root}/points_stride${init.keyframe_stride}
+  keyframe_stride: 10
+  num_gaussians: 2000000
+  # Null preserves the historical train.seed-coupled initialization. Set a
+  # fixed value to reuse one DA3/L3 cache across multiple training seeds.
+  seed: null
+  num_velocity_nns: 0
+  sh_degree: 3
+  opacity: 0.1
+  scale: 0.1
+  # Initial temporal sigma in seconds; null derives keyframe_stride / fps.
+  duration: null
+  duration_multiplier: 1.0
+  da3:
+    model_name: depth-anything/DA3-BASE
+    model_path: null
+    device: auto
+    quality: auto
+    # null = auto from resolved quality + native long side; never upscales.
+    process_res: null
+    process_res_method: upper_bound_resize
+    depth_type: camera_z
+    # DA3 forward batch; this is not the number of cameras fused.
+    max_views: null
+    # null = every camera on small rigs; a spread subset on dense arrays.
+    fusion_views: null
+    # null = auto from num_gaussians // keyframes (3-NN cache, not Gaussian count).
+    max_points: null
+    # null infers fusion voxel from median neighbor spacing of the concatenated views.
+    voxel_size: null
+    confidence_percentile: 20.0
+    # null = sky mask on for one fused view, off when a second view exists.
+    use_sky_mask: null
+    use_ray_pose: false
+    ref_view_strategy: saddle_balanced
+    input_cameras: train
+    cache_path: ${data.root}/points_da3_stride${init.keyframe_stride}
+    foreground_only: false
+    mask_threshold: 0.5
+    # null = one view for monocular fusion, two views otherwise.
+    min_consistent_views: null
+    sync_tolerance_fraction: 0.25
+    relative_depth_tolerance: 0.02
+    absolute_depth_tolerance: null
+    absolute_depth_tolerance_ratio: 0.002
+    consistency_scale_mode: median_depth
+    fusion_voxel_ratio: 0.002
+    fusion_voxel_mode: spacing
+    target_bounds: null
+    pixel_transform_convention: source_index_scale
+train:
+  iterations: 30000
+  background:
+    mode: fixed
+    color: [0.0, 0.0, 0.0]
+    seed: 0
+    rank_policy: shared
+    hard_phase: inherit
+  color_correction: false
+  color_correction_start: 3000
+  color_corrector_weight: 0.001
+  hard_separation: false
+  seed: 0
+  resume: false
+  resume_checkpoint: null
+  checkpoint_interval: 2000
+  save_checkpoints: true
+  log_interval: 2000
+  export_best: true
+  relocation:
+    start: 500
+    stop: ${ftgspp_min:29000,${train.iterations}}
+    every: 100
+    opacity_threshold: 0.005
+    mode: 3d_mcmc
+    score_mode: default
+    score_mode_start: 3000
+  lrs:
+    means: 0.00016
+    quats: 0.001
+    scales: 0.005
+    opacities: 0.05
+    sh_0: 0.0025
+    sh_n: 0.000125
+    durations: 0.005
+    times: 0.00016
+    velocity_model: 0.00016
+    marginal_gates: 0.001
+    color_correctors: 0.001
+  lr_schedules:
+    means: 0.01
+    velocity_model: 0.01
+eval:
+  frame_interval: 10
+  background_colors: [[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]]
+  # Task PSNR identity for the joint PSNR+SSIM hold-out score.
+  selector: psnr
+  opacity_threshold: 0.5
+  selector_min_silhouette_iou: null
+  selector_max_background_opacity_leakage: null
+  selector_max_foreground_holes: null
+  selector_min_boundary_fscore: null
+  candidate_max_views: 32
+  temporal_cutoffs: [0.0, 0.005, 0.01, 0.02, 0.05]
+  lpips: false
+  lpips_device: auto
+  lpips_batch_size: 4
+  lpips_min_roi_size: 64
+run:
+  runtime: native
+  gpu: 0
+  experiment_root: runs
+  output_path: runs/scene
+  export_filename: gaussians_4dgs.ply
+  overwrite_completed: false
+  view_rgb_cache: 64
+  view_load_workers: 8

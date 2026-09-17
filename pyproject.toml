@@ -1,12 +1,11 @@
 [project]
 name = "ftgspp-vulkan-community"
 version = "0.1.0"
-description = "Community FTGSPP pipeline with native Vulkan training and optional hard separation"
+description = "Community FTGSPP pipeline with native Vulkan training and optional DA3 initialization"
 readme = "README.md"
 license = {file = "LICENSE"}
 requires-python = "==3.12.*"
 dependencies = [
-    "hydra-core>=1.3.2,<1.4",
     "numpy>=2.0",
     "omegaconf>=2.3,<2.4",
     "opencv-python-headless==4.12.0.88",
@@ -16,37 +15,56 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-build = ["cmake>=3.24", "ninja>=1.11", "pybind11>=2.11"]
-# Optional Torch LPIPS host plugin for native training/eval.  TorchMetrics'
+dev = ["pytest>=8", "pytest-subtests>=0.14", "build>=1.2"]
+tensorboard = ["tensorboard>=2.18"]
+# The upstream depth-anything-3 package is installed from its own repository;
+# this extra supplies the compatible runtime family without making Torch core.
+da3 = ["torch>=2.5", "torchvision>=0.20"]
+# Optional Torch dependencies for eval-time LPIPS. TorchMetrics'
 # learned-perceptual implementation imports torchvision model definitions.
 lpips = ["torch>=2.5", "torchvision>=0.20", "torchmetrics>=1.6"]
-# Optional legacy .pt/.npz → explicit-only V5 checkpoint conversion.
-convert = [
-    "torch>=2.5",
-    "torchvision>=0.20",
+birefnet = ["torch>=2.5", "transformers>=4.45", "safetensors>=0.4"]
+foreground = [
+    "torch>=2.5", "torchvision>=0.20", "torchmetrics>=1.6",
+    "transformers>=4.45", "safetensors>=0.4",
 ]
-flow = [
-    "torch>=2.5",
-    "av>=14.0.0",
-    "imageio>=2.37",
-    "msgspec>=0.19",
-    "pillow>=11",
-    "pycolmap>=3.12,<3.13",
-]
-eval = ["flip-evaluator>=1.6"]
 
 [project.scripts]
-ftgspp-vulkan = "ftgspp.run:main"
-ftgspp-prepare-selfcap = "ftgspp.data.prepare_selfcap:main"
-ftgspp-build-vulkan = "ftgspp.build_native:main"
-ftgspp-convert-checkpoint = "ftgspp.checkpoint_convert:main"
+ftgspp = "ftgspp.cli:main"
 
 [build-system]
-requires = ["setuptools>=80"]
-build-backend = "setuptools.build_meta"
+requires = ["scikit-build-core>=0.11", "pybind11==3.0.1"]
+build-backend = "scikit_build_core.build"
 
-[tool.setuptools.packages.find]
-include = ["ftgspp*"]
+[tool.scikit-build]
+cmake.source-dir = "native"
+cmake.version = ">=3.24"
+cmake.args = ["-DCMAKE_POLICY_VERSION_MINIMUM=3.5", "-DBUILD_TESTING=OFF"]
+wheel.packages = ["src/ftgspp"]
+wheel.license-files = ["LICENSE", "LICENSES/*", "THIRD_PARTY.md", "native/shaders/radix_sort/LICENSE"]
+sdist.include = [
+    "native/**/*.cpp", "native/**/*.h", "native/**/*.slang",
+    "native/**/*.comp", "native/**/*.glsl", "native/*.py", "native/CMakeLists.txt",
+    "native/shaders/radix_sort/LICENSE", "src/**/*.py", "src/**/*.yaml",
+    "tests/**/*.py", "tools/*.py", "tools/README.md",
+    "docs/architecture.md", "docs/migration.md",
+    "examples/*.yaml", "examples/*.json",
+    ".github/workflows/*.yml", "LICENSE", "LICENSES/*", "THIRD_PARTY.md",
+    "CONTRIBUTING.md", "uv.lock",
+]
+sdist.exclude = [
+    "**/__pycache__/**", "**/*.pyc", "**/*.pyo", ".pytest_cache/**",
+    "build/**", ".venv/**", "runs/**", "**/*.spv", "**/*.so",
+    "native/shader/**", "src/ftgspp/shaders/**",
+    "docs/foreground_reconstruction_plan.md",
+    "docs/initialization_pipeline_improvement_plan.md",
+    "docs/validation.md",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+markers = ["gpu: requires a compatible NVIDIA Vulkan GPU"]
 
 [tool.pyright]
 pythonVersion = "3.12"

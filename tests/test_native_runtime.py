@@ -6,13 +6,13 @@ from pathlib import Path
 
 import numpy as np
 
-from ftgspp.native_runtime.checkpoint import load_model, save_model
-from ftgspp.native_runtime.backend import NativeVulkanBackend
-from ftgspp.native_runtime.dataset import route_camera_split
-from ftgspp.native_runtime.model import NativeGaussians
-from ftgspp.native_runtime.ply import export_4dgs
-from ftgspp.native_runtime.runner import _pair_exchange_log_fields
-from ftgspp.checkpoint_convert import convert
+from ftgspp.io.checkpoint import load_model, save_model
+from ftgspp.training.backend import NativeVulkanBackend, _shader_dir
+from tests.reference.gradients import GradientLayoutReference
+from ftgspp.data.scene import route_camera_split
+from ftgspp.io.model import NativeGaussians
+from ftgspp.io.ply import export_4dgs
+from ftgspp.training.runner import _EvalSsimWorkspace, _pair_exchange_log_fields
 
 
 def make_model(n: int = 3) -> NativeGaussians:
@@ -33,6 +33,14 @@ def make_model(n: int = 3) -> NativeGaussians:
 
 
 class NativeRuntimeTests(unittest.TestCase):
+    def test_holdout_eval_uses_ssim2_data_range(self):
+        prediction = np.zeros((13, 15, 3), dtype=np.float32)
+        reference = np.ones_like(prediction)
+        actual = _EvalSsimWorkspace().ssim(prediction, reference)
+        c1 = (0.01 * 2.0) ** 2
+        expected = c1 / (1.0 + c1)
+        self.assertAlmostEqual(actual, expected, places=7)
+
     def test_pair_exchange_codec_fields_are_ready_for_train_jsonl(self):
         timing, metadata = _pair_exchange_log_fields({
             "pair_exchange": {
@@ -93,12 +101,9 @@ class NativeRuntimeTests(unittest.TestCase):
             ).astype(np.float32),
             "quaternions": rng.standard_normal((num_gaussians, 4)).astype(np.float32),
         }
-        backend = object.__new__(NativeVulkanBackend)
-        backend.packed_gradient_layout = lambda: layout
-        packed = backend.canonical_gradient_to_packed(canonical)
-        backend.packed_gradient_state = lambda: packed
-
-        restored = backend.canonical_gradient_state()
+        reference = GradientLayoutReference(layout)
+        packed = reference.canonical_gradient_to_packed(canonical)
+        restored = GradientLayoutReference(layout, packed).canonical_gradient_state()
 
         for name, expected in canonical.items():
             np.testing.assert_array_equal(restored[name], expected, err_msg=name)
@@ -124,17 +129,6 @@ class NativeRuntimeTests(unittest.TestCase):
         self.assertEqual(route_camera_split(5, set(range(17)), set()), "train")
         self.assertIsNone(route_camera_split(5, {2}, {19}))
 
-    def test_no_marginal_gating_clamps_gate_on_npz_convert(self):
-        model = make_model()
-        model.gate_raw[:] = -1.0
-        with tempfile.TemporaryDirectory() as directory:
-            source = Path(directory) / "source.npz"
-            destination = Path(directory) / "destination.npz"
-            save_model(source, model)
-            convert(source, destination, marginal_gating=False)
-            restored = load_model(destination)
-        np.testing.assert_array_equal(restored.gate_raw, np.full_like(restored.gate_raw, -100.0))
-
     def test_color_camera_map_is_dense(self):
         """Sparse camera IDs must map to 0..N-1 for ColorCorrectors compatibility."""
         cameras = [2, 5, 19]
@@ -144,7 +138,7 @@ class NativeRuntimeTests(unittest.TestCase):
         self.assertEqual(len(camera_ids), 3)
 
     def test_color_correct_numpy_matches_torch_affine(self):
-        from ftgspp.reference.color_correct import NativeColorCorrectors
+        from tests.reference.color_correct import NativeColorCorrectors
         cc = NativeColorCorrectors.create(2)
         cc.params[1, :9] = np.array([0.1, 0, 0, 0, -0.05, 0, 0, 0, 0.02], np.float32)
         cc.params[1, 9:] = np.array([0.01, -0.02, 0.03], np.float32)
@@ -155,7 +149,7 @@ class NativeRuntimeTests(unittest.TestCase):
         np.testing.assert_allclose(out.reshape(-1, 3), expected, atol=1e-6)
 
     def test_color_correct_adam_uses_sum_of_squares_derivative(self):
-        from ftgspp.reference.color_correct import NativeColorCorrectors
+        from tests.reference.color_correct import NativeColorCorrectors
 
         cc = NativeColorCorrectors.create(1, reg=0.25)
         cc.params[:] = 2.0
@@ -317,17 +311,6 @@ class NativeRuntimeTests(unittest.TestCase):
         np.testing.assert_array_equal(restored.means, model.means)
         np.testing.assert_array_equal(restored.velocities, model.velocities)
 
-    def test_torch_free_native_checkpoint_conversion(self):
-        model = make_model()
-        with tempfile.TemporaryDirectory() as directory:
-            source = Path(directory) / "source.npz"
-            destination = Path(directory) / "destination.npz"
-            save_model(source, model)
-            convert(source, destination)
-            restored = load_model(destination)
-        for key, expected in model.arrays().items():
-            np.testing.assert_array_equal(restored.arrays()[key], expected)
-
     def test_export_contains_ftgspp_temporal_and_motion_fields(self):
         with tempfile.TemporaryDirectory() as directory:
             path = export_4dgs(Path(directory) / "gaussians.ply", make_model(1))
@@ -337,30 +320,31 @@ class NativeRuntimeTests(unittest.TestCase):
         self.assertIn("property float motion_2", header)
 
     def test_native_runtime_sources_do_not_import_torch_or_cuda(self):
-        root = Path(__file__).resolve().parents[1] / "ftgspp" / "native_runtime"
-        # Optional Torch plugins may import torch lazily; core orchestration must not.
-        allowed = {"lpips_plugin.py"}
-        for path in root.glob("*.py"):
-            if path.name in allowed:
-                continue
+        root = Path(__file__).resolve().parents[1] / "src" / "ftgspp"
+        # Optional LPIPS/DA3 plugins may import Torch lazily; the core must not.
+        paths = [
+            path for path in root.rglob("*.py")
+            if "optional" not in path.relative_to(root).parts
+        ]
+        self.assertTrue(paths, f"no core Python sources found under {root}")
+        for path in paths:
             source = path.read_text(encoding="utf-8")
-            self.assertNotIn("import torch", source, path.name)
-            self.assertNotIn("from torch", source, path.name)
-            self.assertNotIn(".cuda", source, path.name)
+            relative = str(path.relative_to(root))
+            self.assertNotIn("import torch", source, relative)
+            self.assertNotIn("from torch", source, relative)
+            self.assertNotIn(".cuda", source, relative)
 
     def test_nonzero_cc_affects_train_render_only(self):
         """GPU: non-zero CC changes train RGB, leaves eval RGB identical."""
         import os
 
         try:
-            from _ftgspp_vk import FTGSPPVulkan
+            from ftgspp._ftgspp_vk import FTGSPPVulkan
         except ImportError:
             self.skipTest("native extension _ftgspp_vk is unavailable")
 
         device = int(os.environ.get("FTGSPP_TEST_DEVICE", "0"))
-        shader_dir = (
-            Path(__file__).resolve().parents[1] / "native" / "shader"
-        )
+        shader_dir = _shader_dir()
         native = FTGSPPVulkan()
         native.initialize(str(shader_dir.resolve()) + "/", device)
         try:
@@ -407,12 +391,14 @@ class NativeRuntimeTests(unittest.TestCase):
                 np.float32,
             )
             native.clear_dynamic_views()
-            native.add_dynamic_view(
-                reference, w2c, intrinsic, 0.5, 0, 0, True, False
+            native.add_dynamic_view_meta(
+                height, width, w2c, intrinsic, 0.5, 0, 0, True
             )
-            native.add_dynamic_view(
-                reference, w2c, intrinsic, 0.5, 0, 0, False, False
+            native.add_dynamic_view_meta(
+                height, width, w2c, intrinsic, 0.5, 0, 0, False
             )
+            native.bind_dynamic_view_image(0, True, reference)
+            native.bind_dynamic_view_image(0, False, reference)
             native.configure_ftgspp(
                 {
                     "color_correction": True,
@@ -459,8 +445,110 @@ class NativeRuntimeTests(unittest.TestCase):
             native.render_dynamic_val_view(0)
             eval_cc = np.asarray(native.pixel_state)[..., :3].copy()
 
+            native.render_dynamic_val_view(0, True)
+            eval_cc_enabled = np.asarray(native.pixel_state)[..., :3].copy()
+
             self.assertFalse(np.allclose(train_cc, train_zero, atol=1e-6))
             np.testing.assert_array_equal(eval_cc, eval_zero)
+            self.assertFalse(np.allclose(eval_cc_enabled, eval_zero, atol=1e-6))
+
+            native.begin_eval_val_view(0, True)
+            gpu = dict(native.complete_eval_metrics((0.0, 0.0, 0.0)))
+            self.assertIn("squared_error_sum", gpu)
+            self.assertIn("ssim_sum", gpu)
+            self.assertIn("foreground_squared_error_sum", gpu)
+            self.assertGreater(float(gpu["valid_pixels"]), 0.0)
+            native.submit_eval_rgb_readback()
+            eval_components = np.asarray(
+                native.complete_eval_components(), dtype=np.float32,
+            )
+            self.assertEqual(eval_components.shape, (height, width, 4))
+            np.testing.assert_allclose(
+                eval_components[..., :3], eval_cc_enabled, rtol=0.0, atol=1e-6,
+            )
+        finally:
+            native.cleanup()
+
+    def test_composite_gpu_pixel_gradient_preserves_transmittance_chain(self):
+        """GPU: native loss emits dT=sum(dS*background) for composite_v1."""
+        import os
+
+        try:
+            from ftgspp._ftgspp_vk import FTGSPPVulkan
+        except ImportError:
+            self.skipTest("native extension _ftgspp_vk is unavailable")
+
+        device = int(os.environ.get("FTGSPP_TEST_DEVICE", "0"))
+        native = FTGSPPVulkan()
+        native.initialize(str(_shader_dir().resolve()) + "/", device)
+        try:
+            height = width = 32
+            native.set_dynamic_gaussians(
+                np.array([[0.0, 0.0, 3.0]], np.float32),
+                np.full((1, 3), -2.0, np.float32),
+                np.array([[1.0, 0.0, 0.0, 0.0]], np.float32),
+                np.array([[2.0]], np.float32),
+                np.pad(
+                    np.array([[[0.35, 0.2, 0.1]]], np.float32),
+                    ((0, 0), (0, 15), (0, 0)),
+                ),
+                np.array([[0.5]], np.float32),
+                np.zeros((1, 1), np.float32),
+                np.zeros((1, 3), np.float32),
+                np.full((1, 1), -100.0, np.float32),
+            )
+            native.configure_ftgspp(
+                {
+                    "max_steps": 1,
+                    "scene_scale": 1.0,
+                    "ssim_lambda": 0.0,
+                    "image_objective": 1,
+                    "max_duration": -1.0,
+                    "marginal_threshold": 0.05,
+                }
+            )
+            intrinsic = np.asarray(
+                [
+                    [24.0, 0.0, width / 2],
+                    [0.0, 24.0, height / 2],
+                    [0.0, 0.0, 1.0],
+                ],
+                np.float32,
+            )
+            native.clear_dynamic_views()
+            native.add_dynamic_view_meta(
+                height, width, np.eye(4, dtype=np.float32), intrinsic,
+                0.5, 0, 0, True,
+            )
+            # An all-background target makes opacity leakage visible without
+            # relying on a particular reference foreground color.
+            native.bind_dynamic_view_image(
+                0, True, np.zeros((height, width, 4), np.uint8)
+            )
+            validity = np.zeros((height, width), np.uint8)
+            validity[height // 2, width // 2] = 1
+            native.bind_dynamic_view_validity(0, True, validity)
+            # Avoid exact sign-weight cancellation in dT=sum(dS*background).
+            background = np.array([0.2, 0.4, 0.65], np.float32)
+            native.train_dynamic_view_to_loss(0, 0, True, background.tolist())
+            pixel_gradient = np.asarray(native.v_pixel_state).reshape(
+                height, width, 4
+            ).copy()
+
+            self.assertGreater(float(np.max(np.abs(pixel_gradient[..., 3]))), 0.0)
+            active_pixels = np.any(np.abs(pixel_gradient) > 1e-9, axis=-1)
+            np.testing.assert_array_equal(active_pixels, validity.astype(bool))
+            np.testing.assert_allclose(
+                pixel_gradient[..., 3],
+                np.sum(pixel_gradient[..., :3] * background, axis=-1),
+                rtol=2e-5,
+                atol=2e-7,
+            )
+            loss = native.get_last_loss()
+            self.assertAlmostEqual(float(loss["ssim"]), 0.0, places=7)
+            # Consume the pending loss state so cleanup also covers the real
+            # raster backward path rather than abandoning an in-flight step.
+            native.backward_dynamic_view_from_loss_raw(0, 0)
         finally:
             native.cleanup()
 

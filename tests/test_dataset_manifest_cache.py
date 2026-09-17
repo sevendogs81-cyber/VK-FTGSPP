@@ -1,31 +1,35 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
-from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import cv2
 import numpy as np
 
 from ftgspp.data.prepare_selfcap import write_time_offsets
-from ftgspp.native_runtime.backend import SharedRgbViewCache
-from ftgspp.native_runtime.dataset import (
-    NativeDataset,
-    NativeView,
+from ftgspp.training.backend import SharedRgbViewCache
+from ftgspp.data.scene import (
+    Scene,
+    VIEW_HASH_CACHE_RELATIVE,
+    View,
     _colmap_undistort_maps,
     _colmap_undistorted_geometry,
+    _file_sha256,
+    _file_sha256_many,
     _scan_images,
     _time_offsets,
     clear_undistort_cache,
 )
 
 
-def _view(path: Path, *, frame: int, camera: int, timestamp: float) -> NativeView:
-    return NativeView(
+def _view(path: Path, *, frame: int, camera: int, timestamp: float, **kwargs) -> View:
+    return View(
         path=path,
         frame=frame,
         camera_id=camera,
@@ -35,6 +39,31 @@ def _view(path: Path, *, frame: int, camera: int, timestamp: float) -> NativeVie
         intrinsic=np.eye(3, dtype=np.float32),
         distortion=np.zeros(5, dtype=np.float32),
         size=(8, 12),
+        **kwargs,
+    )
+
+
+def _tiny_scene(root: Path, paths: list[Path], *, masks: list[Path] | None = None) -> Scene:
+    views = []
+    for index, path in enumerate(paths):
+        extra = {}
+        if masks is not None:
+            extra["mask_path"] = masks[index]
+            extra["mask_source"] = "external"
+        views.append(
+            _view(path, frame=index, camera=7, timestamp=index / 60.0, **extra)
+        )
+    return Scene(
+        frames=list(range(len(paths))),
+        cameras=[7],
+        train_cameras=[7],
+        eval_cameras=[],
+        camera_split_source="test",
+        train_views=views,
+        eval_views=[],
+        fps=60.0,
+        source_root=root,
+        time_offsets={7: 0.0},
     )
 
 
@@ -103,7 +132,7 @@ class DatasetManifestAndCacheTests(unittest.TestCase):
             target_k = undist_k.copy()
             target_k[0] *= np.float32(target_w / undist_w)
             target_k[1] *= np.float32(target_h / undist_h)
-            view = NativeView(
+            view = View(
                 path=path,
                 frame=0,
                 camera_id=3,
@@ -174,6 +203,22 @@ class DatasetManifestAndCacheTests(unittest.TestCase):
                 (root / name).write_bytes(b"image")
             with self.assertRaisesRegex(ValueError, "inconsistent camera coverage"):
                 _scan_images(root, 0, 2)
+
+    def test_directory_scan_ignores_hidden_sidecar_dirs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            camera = root / "c007"
+            camera.mkdir()
+            (camera / "000000.jpg").write_bytes(b"seven")
+            sidecar = root / ".ftgspp"
+            sidecar.mkdir()
+            (sidecar / "view_sha256_v1.json").write_text("{}", encoding="utf-8")
+
+            frames, cameras, paths = _scan_images(root, 0, 1)
+
+        self.assertEqual(frames, [0])
+        self.assertEqual(cameras, [7])
+        self.assertEqual(paths[0][0].name, "000000.jpg")
 
     def test_directory_scan_preserves_sparse_ids_real_paths_and_frame_offset(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -294,7 +339,7 @@ class DatasetManifestAndCacheTests(unittest.TestCase):
             root = Path(directory)
             path = root / "000000.jpg"
             path.write_bytes(b"not-decoded")
-            dataset = NativeDataset(
+            dataset = Scene(
                 frames=[0], cameras=[7, 21], train_cameras=[7],
                 eval_cameras=[], camera_split_source="incomplete-test",
                 train_views=[_view(path, frame=0, camera=7, timestamp=0.0)],
@@ -310,7 +355,7 @@ class DatasetManifestAndCacheTests(unittest.TestCase):
             paths = [root / "c007.jpg", root / "c021.jpg"]
             for path in paths:
                 path.write_bytes(b"not-decoded")
-            dataset = NativeDataset(
+            dataset = Scene(
                 frames=[0], cameras=[7, 21], train_cameras=[7],
                 eval_cameras=[21], camera_split_source="test",
                 train_views=[
@@ -340,7 +385,7 @@ class DatasetManifestAndCacheTests(unittest.TestCase):
             paths = [root / f"{index:06d}.jpg" for index in range(2)]
             for path in paths:
                 path.write_bytes(b"not-decoded-by-manifest")
-            dataset = NativeDataset(
+            dataset = Scene(
                 frames=[0, 1], cameras=[7], train_cameras=[7],
                 eval_cameras=[], camera_split_source="test",
                 train_views=[
@@ -364,6 +409,76 @@ class DatasetManifestAndCacheTests(unittest.TestCase):
             paths[1].unlink()
             with self.assertRaises(FileNotFoundError):
                 dataset.validate_view_manifest()
+
+    def test_parallel_view_hashes_match_serial_sha256(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = [root / f"{index:06d}.jpg" for index in range(4)]
+            masks = [root / f"{index:06d}_mask.png" for index in range(4)]
+            for index, path in enumerate(paths):
+                path.write_bytes(f"rgb-{index}".encode())
+                masks[index].write_bytes(f"mask-{index}".encode())
+            with patch.dict(os.environ, {"FTGSPP_HASH_WORKERS": "4"}):
+                hashes = _file_sha256_many(
+                    [*paths, *masks], cache_root=root,
+                )
+            for path in (*paths, *masks):
+                self.assertEqual(hashes[path.as_posix()], _file_sha256(path))
+            cache = json.loads(
+                (root / VIEW_HASH_CACHE_RELATIVE).read_text(encoding="utf-8"),
+            )
+            self.assertEqual(cache["schema"], "ftgspp-view-sha256-v1")
+            self.assertEqual(len(cache["entries"]), 8)
+
+    def test_view_hash_cache_sits_beside_images_not_inside_grid(self):
+        with tempfile.TemporaryDirectory() as directory:
+            scene = Path(directory)
+            images = scene / "images"
+            images.mkdir()
+            path = images / "000000.jpg"
+            path.write_bytes(b"payload")
+            _tiny_scene(images, [path]).checkpoint_metadata()
+            self.assertTrue((scene / VIEW_HASH_CACHE_RELATIVE).is_file())
+            self.assertFalse((images / ".ftgspp").exists())
+
+    def test_view_hash_disk_cache_avoids_reread_and_keeps_fingerprint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = [root / f"{index:06d}.jpg" for index in range(3)]
+            for index, path in enumerate(paths):
+                path.write_bytes(f"payload-{index}".encode())
+            with patch.dict(os.environ, {"FTGSPP_HASH_WORKERS": "3"}):
+                first = _tiny_scene(root, paths).checkpoint_metadata()
+            cache_path = root / VIEW_HASH_CACHE_RELATIVE
+            self.assertTrue(cache_path.is_file())
+            with (
+                patch.dict(os.environ, {"FTGSPP_HASH_WORKERS": "8"}),
+                patch("ftgspp.data.scene._file_sha256") as hashed,
+            ):
+                hashed.side_effect = AssertionError("disk cache should not reread bytes")
+                second = _tiny_scene(root, paths).checkpoint_metadata()
+            self.assertEqual(first["fingerprint"], second["fingerprint"])
+            hashed.assert_not_called()
+            cache_path.unlink()
+            third = _tiny_scene(root, paths).checkpoint_metadata()
+            self.assertEqual(first["fingerprint"], third["fingerprint"])
+
+    def test_view_content_change_invalidates_cached_fingerprint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "000000.jpg"
+            path.write_bytes(b"payload-a")
+            first = _tiny_scene(root, [path]).checkpoint_metadata()
+            path.write_bytes(b"payload-b")
+            second = _tiny_scene(root, [path]).checkpoint_metadata()
+            self.assertNotEqual(first["fingerprint"], second["fingerprint"])
+            cached = json.loads(
+                (root / VIEW_HASH_CACHE_RELATIVE).read_text(encoding="utf-8"),
+            )
+            self.assertEqual(
+                cached["entries"][path.resolve().as_posix()]["sha256"],
+                _file_sha256(path),
+            )
 
     def test_shared_cache_prefetch_is_ordered_and_deduplicates_rank_views(self):
         cache = SharedRgbViewCache(capacity=4)
@@ -415,118 +530,6 @@ class DatasetManifestAndCacheTests(unittest.TestCase):
             cache.prefetch([(True, 2, future)], workers=1)
         self.assertEqual(list(cache._items), [(True, 1), (True, 2)])
         self.assertEqual((current.calls, future.calls), (1, 1))
-
-    def test_pinned_prefill_does_not_evict_and_is_once_only(self):
-        cache = SharedRgbViewCache(capacity=2, pin=True)
-        first = np.full((2, 3, 3), 1, np.uint8)
-        second = np.full((2, 3, 3), 2, np.uint8)
-        third = np.full((2, 3, 3), 3, np.uint8)
-        self.assertTrue(cache.prefill_arrays([
-            (True, 0, first),
-            (True, 1, second),
-            (False, 0, third),
-        ]))
-        self.assertTrue(cache.is_prefilled)
-        self.assertEqual(cache.capacity, 3)
-        self.assertFalse(cache.prefill_arrays([(True, 9, first)]))
-        self.assertEqual(list(cache._items), [(True, 0), (True, 1), (False, 0)])
-        # Extra stores under pin must not drop the resident set.
-        cache._store((True, 2), np.full((2, 3, 3), 4, np.uint8))
-        self.assertIn((True, 0), cache._items)
-        self.assertIn((True, 1), cache._items)
-        self.assertIn((False, 0), cache._items)
-        self.assertIn((True, 2), cache._items)
-
-    def test_shared_resident_upload_decodes_once_across_replicas(self):
-        from unittest.mock import MagicMock, patch
-
-        from ftgspp.native_runtime.backend import NativeVulkanBackend
-
-        train = []
-        for i in range(3):
-            view = _DecodedView(10 + i)
-            view.camera_id = 0
-            train.append(view)
-        eval_views = []
-        for i in range(2):
-            view = _DecodedView(100 + i)
-            view.camera_id = 0
-            eval_views.append(view)
-        dataset = SimpleNamespace(
-            train_views=train,
-            eval_views=eval_views,
-            cameras=[SimpleNamespace(camera_id=0)],
-        )
-        shared = SharedRgbViewCache(capacity=len(train) + len(eval_views), pin=True)
-        decode_counts = {"n": 0}
-
-        def fake_decode(self, views, *, workers, label):
-            decode_counts["n"] += 1
-            return [
-                np.ascontiguousarray(view.load_rgb(), dtype=np.uint8)
-                for view in views
-            ]
-
-        def fake_add_meta(self, view, is_train, *, camera_index):
-            return None
-
-        def fake_finish(self, camera_ids):
-            return None
-
-        def fake_camera_map(self, dataset_arg):
-            return {0: 0}, [0]
-
-        backends = []
-        for _ in range(2):
-            backend = NativeVulkanBackend.__new__(NativeVulkanBackend)
-            backend.native = MagicMock()
-            backend.native.num_train = len(train)
-            backend.native.num_val = len(eval_views)
-            backend.native.clear_dynamic_views = MagicMock()
-            backend._dataset = None
-            backend._bound_train_index = None
-            backend._bound_train_images = OrderedDict()
-            backend._device_image_cache_capacity = 0
-            backend._view_load_mode = "lazy"
-            backend._shared_host_resident = False
-            backend._rgb_cache = SharedRgbViewCache(1)
-            backend._view_load_workers = 0
-            backends.append(backend)
-
-        with (
-            patch.object(NativeVulkanBackend, "_decode_views", fake_decode),
-            patch.object(NativeVulkanBackend, "_add_view_meta", fake_add_meta),
-            patch.object(NativeVulkanBackend, "_finish_color_cameras", fake_finish),
-            patch.object(NativeVulkanBackend, "_camera_index_map", fake_camera_map),
-        ):
-            for backend in backends:
-                backend.upload_dataset(
-                    dataset,
-                    view_load_mode="resident",
-                    cache_on_device=False,
-                    workers=2,
-                    shared_rgb_cache=shared,
-                )
-
-        # One train decode + one eval decode on the first replica only.
-        self.assertEqual(decode_counts["n"], 2)
-        self.assertTrue(shared.is_prefilled)
-        self.assertEqual(len(shared._items), 5)
-        for backend in backends:
-            self.assertTrue(backend._shared_host_resident)
-            self.assertIs(backend._rgb_cache, shared)
-            self.assertTrue(backend._binds_rgb_per_step())
-
-        # Bind path must pull from the shared pin-set without re-decoding.
-        before = [view.calls for view in train]
-        backends[0]._dataset = dataset
-        backends[0].native.bind_dynamic_view_image = MagicMock()
-        backends[0].native.release_dynamic_view_image = MagicMock()
-        rgb = backends[0]._bind_train_rgb(1)
-        np.testing.assert_array_equal(rgb, _rgba8(11))
-        backends[0].native.bind_dynamic_view_image.assert_called_once()
-        self.assertEqual([view.calls for view in train], before)
-
 
 if __name__ == "__main__":
     unittest.main()

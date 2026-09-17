@@ -8,15 +8,25 @@
 /outputs/
 /multirun/
 /runs/
+/reports/
+/dist/
+.pytest_cache/
 __pycache__/
 **/__pycache__/
 *.py[cod]
-native/shader/checksum.json
-/reports/
-native/shader/generated/*.bak*
+*.spv
+*.so
+*.pyd
 
-# Invalid cold-readback diagnostics; keep only the explicitly warmed reruns.
-/analysis/new_experiment_diagnosis/fixed_15view_eval/
-/analysis/new_experiment_diagnosis/legacy_15view_eval/
-/analysis/new_experiment_diagnosis/fixed_15view_per_view_metrics.json
-/analysis/new_experiment_diagnosis/fixed_cam0_contact_sheet.jpg
+/src/ftgspp/*.so
+/src/ftgspp/*.pyd
+/src/ftgspp/shaders/
+
+native/shader/checksum.json
+native/shader/generated/*.bak*
+native/shaders/**/checksum.json
+
+# Local design/QA notes. Not part of the public snapshot.
+/docs/foreground_reconstruction_plan.md
+/docs/initialization_pipeline_improvement_plan.md
+/docs/validation.md

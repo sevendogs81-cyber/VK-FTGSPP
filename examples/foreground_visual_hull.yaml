@@ -1,0 +1,31 @@
+# Research control: calibrated visual-hull + IBR (not the default foreground path).
+# Prepare the PLY set first, replacing WORLD_* with locked training-only bounds:
+#   ftgspp prepare points --config examples/foreground_visual_hull.yaml \
+#     --output data/my_scene/points_vhull_ibr_stride10 \
+#     --bounds WORLD_XMIN WORLD_YMIN WORLD_ZMIN WORLD_XMAX WORLD_YMAX WORLD_ZMAX \
+#     --resolution 192 --coarse-resolution 48 --sampling surface_band \
+#     --surface-band-layers 2 --max-points 250000
+# The same YAML then trains from that integrity-checked PLY/manifest directory.
+pipeline:
+  mode: foreground
+data:
+  name: my_foreground_visual_hull
+  root: ../data/my_scene
+  frames: {start: 0, stop: 300}
+  scale: 0.5
+  train_cameras: [0, 1, 2]
+  eval_cameras: [3]
+  masks:
+    source: external
+    manifest_path: ../data/my_scene/manifests/masks.json
+init:
+  backend: points
+  points_path: ../data/my_scene/points_vhull_ibr_stride10
+  # Keep geometry initialization stable across training-seed sweeps.
+  seed: 0
+  num_gaussians: 2000000
+  keyframe_stride: 10
+train:
+  iterations: 30000
+run:
+  output_path: ../runs/my_foreground_visual_hull

@@ -178,7 +178,7 @@ void main(uint3 tid : SV_DispatchThreadID, uniform FTGSPPBackwardUniforms unifor
     }
 
     const float3 grad_mean = grad_mean_t;
-    const float3 grad_velocity = grad_mean_t * dt;
+    float3 grad_velocity = grad_mean_t * dt;
     float grad_time = -dot(grad_mean_t, p.velocity);
     float3 grad_log_scale = grad_scale * mg.scale;
     float grad_opacity_logit = 0.0f;
@@ -271,7 +271,8 @@ void main(uint3 tid : SV_DispatchThreadID, uniform FTGSPPBackwardUniforms unifor
         g_times_durations[m1] = m;
         g_times_durations[m2] = v;
     }
-    {
+    // The hard-phase optimizer does not own velocity/gate parameters or moments.
+    if (uniforms.reserved0 < 0.5f) {
         float4 x = velocities_gates[idx];
         float4 m = g_velocities_gates[m1];
         float4 v = g_velocities_gates[m2];

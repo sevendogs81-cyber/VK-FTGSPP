@@ -1,0 +1,37 @@
+name: Controlled NVIDIA acceptance
+on:
+  workflow_dispatch:
+    inputs:
+      devices:
+        description: "Two Vulkan device IDs on the controlled runner"
+        required: true
+        default: "0 2"
+permissions:
+  contents: read
+jobs:
+  gpu:
+    runs-on: [self-hosted, linux, x64, nvidia, vulkan]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and install
+        run: |
+          uv build
+          uv venv --python 3.12 "$RUNNER_TEMP/ftgspp-gpu"
+          uv pip install --python "$RUNNER_TEMP/ftgspp-gpu/bin/python" dist/*.whl
+      - name: GPU contracts
+        env:
+          DEVICES: ${{ inputs.devices }}
+        run: |
+          set -- $DEVICES
+          cd "$RUNNER_TEMP"
+          PYTHONPATH="$GITHUB_WORKSPACE" "$RUNNER_TEMP/ftgspp-gpu/bin/python" -m unittest tests.test_gpu_foreground_numeric -v
+          cd "$GITHUB_WORKSPACE"
+          "$RUNNER_TEMP/ftgspp-gpu/bin/python" tests/gpu/smoke_native.py --device "$1"
+          "$RUNNER_TEMP/ftgspp-gpu/bin/python" tests/gpu/check_pair_equivalence.py --devices $DEVICES
+          "$RUNNER_TEMP/ftgspp-gpu/bin/python" tests/gpu/check_composite_overflow_replay.py --devices $DEVICES
+          for codec in auto_exact dense sorted_sparse; do
+            for mode in partial_copy exact_copy 3d_mcmc; do
+              "$RUNNER_TEMP/ftgspp-gpu/bin/python" tests/gpu/smoke_sync_multi_gpu.py --devices $DEVICES --codec "$codec" --relocation-mode "$mode"
+            done
+          done
+          "$RUNNER_TEMP/ftgspp-gpu/bin/python" tests/gpu/run_pipeline_acceptance.py --devices $DEVICES --steps 100 --output "$RUNNER_TEMP/ftgspp-run-$GITHUB_RUN_ID"

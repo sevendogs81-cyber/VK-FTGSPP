@@ -1,0 +1,72 @@
+name: Build release candidates (no publishing)
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  artifacts:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.29"
+      - run: uv python install 3.12
+      - run: sudo apt-get update && sudo apt-get install -y libvulkan-dev libglm-dev
+      - name: Pinned Slang
+        run: |
+          curl -fsSL https://github.com/shader-slang/slang/releases/download/v2026.10/slang-2026.10-linux-x86_64-glibc-2.27.tar.gz -o "$RUNNER_TEMP/slang.tgz"
+          echo "beddadd9b48151aa2d7b556056ea02b9826bde59d4d4fa827b33c5184e42a983  $RUNNER_TEMP/slang.tgz" | sha256sum -c -
+          mkdir "$RUNNER_TEMP/slang"
+          tar -xzf "$RUNNER_TEMP/slang.tgz" -C "$RUNNER_TEMP/slang"
+          echo "$RUNNER_TEMP/slang/bin" >> "$GITHUB_PATH"
+      - run: uv build --python 3.12
+      - name: Clean wheel import outside checkout
+        run: |
+          uv venv --python 3.12 "$RUNNER_TEMP/installed"
+          uv pip install --python "$RUNNER_TEMP/installed/bin/python" dist/*.whl
+          cd "$RUNNER_TEMP"
+          installed/bin/ftgspp --help
+          installed/bin/ftgspp prepare masks --help
+          installed/bin/ftgspp prepare points --help
+          installed/bin/ftgspp eval --help
+          installed/bin/python -c 'from ftgspp import _ftgspp_vk; from importlib.resources import files; import importlib.util; assert files("ftgspp").joinpath("shaders/manifest.json").is_file(); assert importlib.util.find_spec("torch") is None'
+      - name: Check distribution contents and notices
+        run: |
+          uv run --no-project --python 3.12 python - <<'PY'
+          import tarfile, zipfile
+          from pathlib import Path
+          with tarfile.open(next(Path("dist").glob("*.tar.gz"))) as archive:
+              names = archive.getnames()
+              assert not any(n.endswith((".pyc", ".so", ".spv")) or "__pycache__" in n
+                             for n in names)
+              for suffix in (
+                  "src/ftgspp/training/background.py",
+                  "src/ftgspp/optional/birefnet.py",
+                  "src/ftgspp/optional/visual_hull.py",
+                  "native/slang/ftgspp_image_objective.slang",
+                  "docs/architecture.md",
+                  "docs/migration.md",
+                  "tests/test_gpu_foreground_numeric.py",
+                  "examples/foreground_scene.yaml",
+                  "examples/foreground_fixed_black.yaml",
+                  "examples/foreground_visual_hull.yaml",
+                  "examples/final_test_manifest.example.json",
+              ):
+                  assert any(n.endswith(suffix) for n in names), suffix
+              forbidden = (
+                  "docs/foreground_reconstruction_plan.md",
+                  "docs/initialization_pipeline_improvement_plan.md",
+                  "docs/validation.md",
+              )
+              for suffix in forbidden:
+                  assert not any(n.endswith(suffix) for n in names), suffix
+          with zipfile.ZipFile(next(Path("dist").glob("*.whl"))) as archive:
+              names = archive.namelist()
+              for suffix in ("VKSPLAT-APACHE-2.0.txt", "GLM.txt", "PYBIND11-BSD-3-CLAUSE.txt", "radix_sort/LICENSE"):
+                  assert any(n.endswith(suffix) for n in names), suffix
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64-python312-candidates
+          path: dist/

@@ -20,8 +20,8 @@ import json
 class CompileConfig:
     """Configuration for shader compilation"""
     slang_src_path: Path = Path("./native/slang")
-    shader_dst_path: Path = Path("./native/shader")
-    generated_dst_path: Path = Path("./native/shader/generated")
+    shader_dst_path: Path = Path("./build/native/shaders")
+    generated_dst_path: Path = Path("./build/native/shaders/generated")
     # slangc_compile_args: str = "-stage compute -O3 -fp-mode fast -line-directive-mode none"
     slangc_compile_args: str = "-stage compute -O -fp-mode fast -line-directive-mode none"
     glslc_compile_args: str = "-O --target-spv=spv1.5 --target-env=vulkan1.2"
@@ -56,13 +56,6 @@ class ShaderCompiler:
         if slangc:
             return Path(slangc)
         
-        common_paths = [
-            Path.home() / ".local/lib/python3.10/site-packages/slangtorch/bin/slangc",
-        ]
-        for path in common_paths:
-            if path.exists():
-                return path
-        
         raise RuntimeError("slangc not found. Please install Slang or specify path with --slangc")
 
     def _find_glslc(self) -> Path:
@@ -91,7 +84,7 @@ class ShaderCompiler:
         files_expanded = []
         for path in files:
             if '.' not in path:
-                path = os.path.join(self.config.shader_dst_path, path)
+                path = os.path.join(Path(__file__).parent / 'shaders', path)
             if os.path.isdir(path):
                 for root, _, files in os.walk(path):
                     for file in files:
@@ -149,9 +142,10 @@ class ShaderCompiler:
         return output
 
     def _compile_shader_glsl(self, source_file: Path, job: ShaderJob, target: Literal["glsl", "spirv"], ext: Literal["comp", "spv"]) -> Tuple[bool, str]:
-        source_path = self.config.shader_dst_path / source_file / job.name
+        source_path = Path(__file__).parent / 'shaders' / source_file / job.name
         job_name = Path(job.name).with_suffix('.'+ext)
         output_file = self.config.shader_dst_path / source_file / job_name
+        output_file.parent.mkdir(parents=True, exist_ok=True)
         if self.glsl_via_slangc:
             cmd = [str(self.glslc), str(source_path)]
             for define, value in job.defines.items():
@@ -233,7 +227,6 @@ class ShaderCompiler:
         jobs.append(("ftgspp_sparse_gradient.slang", [
             ShaderJob("ftgspp_sparse_flag", {"SPARSE_GRADIENT_PHASE": 0}),
             ShaderJob("ftgspp_sparse_pack", {"SPARSE_GRADIENT_PHASE": 1}),
-            ShaderJob("ftgspp_sparse_prepare", {"SPARSE_GRADIENT_PHASE": 2}),
             ShaderJob("ftgspp_sparse_scatter", {"SPARSE_GRADIENT_PHASE": 3}),
         ], ["config.slang"]))
         jobs.append(("ftgspp_regularizer_mean.slang", [
@@ -260,13 +253,18 @@ class ShaderCompiler:
         ], ["config.slang"]))
         jobs.append(("ftgspp_loss_reduce.slang", [
             ShaderJob("ftgspp_loss_reduce", {}),
-        ], ["config.slang", "ftgspp_work_control.slang"]))
+        ], ["config.slang", "ftgspp_work_control.slang", "ftgspp_image_objective.slang"]))
+        jobs.append(("ftgspp_eval_metrics.slang", [
+            ShaderJob("ftgspp_eval_metrics", {}),
+        ], ["config.slang", "ftgspp_work_control.slang", "ftgspp_image_objective.slang"]))
         jobs.append(("ftgspp_color_correct_forward.slang", [
             ShaderJob("ftgspp_color_correct_forward", {}),
-        ], ["config.slang", "utils.slang", "ftgspp_work_control.slang"]))
+        ], ["config.slang", "utils.slang", "ftgspp_work_control.slang",
+             "ftgspp_image_objective.slang"]))
         jobs.append(("ftgspp_color_correct_backward.slang", [
             ShaderJob("ftgspp_color_correct_backward", {}),
-        ], ["config.slang", "utils.slang", "ftgspp_work_control.slang"]))
+        ], ["config.slang", "utils.slang", "ftgspp_work_control.slang",
+             "ftgspp_image_objective.slang"]))
         jobs.append(("ftgspp_color_adam.slang", [
             ShaderJob("ftgspp_color_adam", {}),
         ], ["config.slang", "ftgspp_work_control.slang"]))
@@ -274,7 +272,7 @@ class ShaderCompiler:
         jobs.append(("ssim.slang", [
             ShaderJob("ssim_forward", {"EXPORT_MODE": forward}),
             ShaderJob("ssim_backward", {"EXPORT_MODE": backward}),
-        ], ["config.slang", "ftgspp_work_control.slang"]))
+        ], ["config.slang", "ftgspp_work_control.slang", "ftgspp_image_objective.slang"]))
 
         # Prefix Sum
         jobs.append(("cumsum.slang", [
@@ -402,6 +400,16 @@ class ShaderCompiler:
                 if not success:
                     all_successful = False
 
+        if all_successful:
+            manifest = [
+                ("generated/" + job.name + ".spv") if "." in source
+                else str(Path(source) / Path(job.name).with_suffix(".spv"))
+                for source, jobs, _ in job_groups for job in jobs
+            ]
+            (self.config.shader_dst_path / "manifest.json").write_text(
+                json.dumps({"schema": 1, "files": sorted(manifest)}, indent=2) + "\n",
+                encoding="utf-8",
+            )
         return all_successful
 
 
@@ -411,7 +419,7 @@ def main():
     parser.add_argument("--glslc", type=Path, help="Path to glslc executable")
     parser.add_argument("--src", type=Path, default="./native/slang",
                        help="Source directory for Slang files")
-    parser.add_argument("--dst", type=Path, default="./native/shader",
+    parser.add_argument("--dst", type=Path, default="./build/native/shaders",
                        help="Destination directory for compiled shaders")
     parser.add_argument("-j", "--jobs", type=int, help="Number of parallel jobs")
     parser.add_argument("--force", action="store_true", help="Force recompilation of all shaders")

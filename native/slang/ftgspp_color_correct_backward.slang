@@ -1,5 +1,6 @@
 #include "config.slang"
 #include "ftgspp_work_control.slang"
+#include "ftgspp_image_objective.slang"
 import utils;
 
 // Backward of c' = c @ (mat+I) + vec:
@@ -21,6 +22,7 @@ struct ColorCorrectUniforms {
     uint height;
     uint camera_index;
     uint enabled;
+    uint objective_mode;
 };
 
 [ForceInline]
@@ -42,6 +44,8 @@ void main(uint3 tid : SV_DispatchThreadID, uniform ColorCorrectUniforms u) {
         color_params[base+0]+1.0f, color_params[base+1],       color_params[base+2],
         color_params[base+3],      color_params[base+4]+1.0f,  color_params[base+5],
         color_params[base+6],      color_params[base+7],       color_params[base+8]+1.0f);
+    float3 bias = float3(
+        color_params[base+9], color_params[base+10], color_params[base+11]);
     const uint pix = tid.x * 4u;
     const bool valid = tid.x < n;
     float3 g = float3(0.0f);
@@ -52,7 +56,9 @@ void main(uint3 tid : SV_DispatchThreadID, uniform ColorCorrectUniforms u) {
             v_pixel_state[pix+2u]);
         raw_c = float3(raw_rgb[pix], raw_rgb[pix+1u], raw_rgb[pix+2u]);
     }
-    const float3 c = clamp(raw_c, float3(0.0f), float3(1.0f));
+    const bool composite = ftgspp_is_composite_objective(u.objective_mode);
+    const float3 c = composite
+        ? raw_c : clamp(raw_c, float3(0.0f), float3(1.0f));
     // dc = g @ M^T
     float3 dc = mul(g, transpose(mat));
     // Chain through the renderer's [0,1] clamp. torch.clamp propagates at
@@ -61,11 +67,15 @@ void main(uint3 tid : SV_DispatchThreadID, uniform ColorCorrectUniforms u) {
         raw_c.x >= 0.0f && raw_c.x <= 1.0f ? 1.0f : 0.0f,
         raw_c.y >= 0.0f && raw_c.y <= 1.0f ? 1.0f : 0.0f,
         raw_c.z >= 0.0f && raw_c.z <= 1.0f ? 1.0f : 0.0f);
-    dc *= clamp_derivative;
+    if (!composite)
+        dc *= clamp_derivative;
     if (valid) {
         v_pixel_state[pix] = dc.x;
         v_pixel_state[pix+1u] = dc.y;
         v_pixel_state[pix+2u] = dc.z;
+        if (composite)
+            // Loss has already contributed dot(h,background) to dT.
+            v_pixel_state[pix+3u] -= dot(g, bias);
     }
     // enabled=2 is hard separation's input-Jacobian-only path. The affine
     // transform remains in the chain, but its frozen parameters have no
@@ -75,6 +85,9 @@ void main(uint3 tid : SV_DispatchThreadID, uniform ColorCorrectUniforms u) {
         add_grad(base+0u, c.x*g.x); add_grad(base+1u, c.x*g.y); add_grad(base+2u, c.x*g.z);
         add_grad(base+3u, c.y*g.x); add_grad(base+4u, c.y*g.y); add_grad(base+5u, c.y*g.z);
         add_grad(base+6u, c.z*g.x); add_grad(base+7u, c.z*g.y); add_grad(base+8u, c.z*g.z);
-        add_grad(base+9u, g.x); add_grad(base+10u, g.y); add_grad(base+11u, g.z);
+        const float bias_scale = composite ? (1.0f-raw_rgb[pix+3u]) : 1.0f;
+        add_grad(base+9u, bias_scale*g.x);
+        add_grad(base+10u, bias_scale*g.y);
+        add_grad(base+11u, bias_scale*g.z);
     }
 }

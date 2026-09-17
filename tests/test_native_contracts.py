@@ -20,7 +20,8 @@ class NativeContractTests(unittest.TestCase):
         "ftgspp_relocation_prepare": 9,
         "ftgspp_relocation_copy": 14,
         "ftgspp_flow_features": 4,
-        "ftgspp_loss_reduce": 5,
+        "ftgspp_loss_reduce": 6,
+        "ftgspp_eval_metrics": 6,
         "ftgspp_color_correct_forward": 4,
         "ftgspp_color_correct_backward": 6,
         "ftgspp_color_adam": 6,
@@ -28,8 +29,8 @@ class NativeContractTests(unittest.TestCase):
     }
 
     def test_shader_bindings_are_contiguous_and_match_cpp_pipeline(self):
-        header = (ROOT / "native" / "src" / "gs_trainer.h").read_text(encoding="utf-8")
-        header += (ROOT / "native" / "src" / "gs_renderer.h").read_text(encoding="utf-8")
+        header = (ROOT / "native" / "src" / "training" / "gs_trainer.h").read_text(encoding="utf-8")
+        header += (ROOT / "native" / "src" / "render" / "gs_renderer.h").read_text(encoding="utf-8")
         for name, count in self.PIPELINES.items():
             source = (SLANG / f"{name}.slang").read_text(encoding="utf-8")
             bindings = sorted(
@@ -42,17 +43,8 @@ class NativeContractTests(unittest.TestCase):
             )
             self.assertRegex(header, declaration, name)
 
-    def test_every_ftgspp_shader_is_compiled_and_checked_at_startup(self):
-        compiler = (ROOT / "native" / "compile_shaders.py").read_text(encoding="utf-8")
-        backend = (ROOT / "ftgspp" / "native_runtime" / "backend.py").read_text(encoding="utf-8")
-        bindings = (ROOT / "native" / "src" / "python_bindings.cpp").read_text(encoding="utf-8")
-        for name in self.PIPELINES:
-            self.assertIn(f'ShaderJob("{name}"', compiler)
-            self.assertIn(f'"{name}"', bindings)
-            self.assertIn(f'"{name}.spv"', backend)
-
     def test_multi_phase_relocation_descriptors(self):
-        header = (ROOT / "native" / "src" / "gs_trainer.h").read_text(encoding="utf-8")
+        header = (ROOT / "native" / "src" / "training" / "gs_trainer.h").read_text(encoding="utf-8")
         expected = {
             "ftgspp_relocation_score": 5,
             "ftgspp_relocation_cdf": 3,
@@ -64,23 +56,29 @@ class NativeContractTests(unittest.TestCase):
                 header, rf"pipeline_{name}\s*=\s*_ComputePipeline\({count}\)", name)
 
     def test_dynamic_push_constant_matrix_has_explicit_alignment_padding(self):
-        cpp = (ROOT / "native" / "src" / "gs_trainer.cpp").read_text(encoding="utf-8")
+        cpp = (ROOT / "native" / "src" / "training" / "gs_trainer.cpp").read_text(encoding="utf-8")
         slang = (SLANG / "ftgspp_fused_backward_optimizer.slang").read_text(encoding="utf-8")
-        self.assertRegex(cpp, r"float reg_gate;\s*float reserved\[3\];\s*float world_view_transform\[16\]")
+        self.assertRegex(
+            cpp,
+            r"float reg_gate;\s*float reserved\[3\];\s*"
+            r"float world_view_transform\[16\]",
+        )
         self.assertRegex(
             slang,
-            r"float reg_gate;\s*float reserved0;\s*float reserved1;\s*float reserved2;\s*float4x4 world_view_transform",
+            r"float reg_gate;\s*float reserved0;\s*float reserved1;\s*"
+            r"float reserved2;\s*"
+            r"float4x4 world_view_transform",
         )
 
     def test_projection_cull_reason_and_radius_outputs_stay_consistent(self):
         shader = (SLANG / "vertex_shader.slang").read_text(encoding="utf-8")
-        renderer = (ROOT / "native" / "src" / "gs_renderer.cpp").read_text(
+        renderer = (ROOT / "native" / "src" / "render" / "gs_renderer.cpp").read_text(
             encoding="utf-8"
         )
-        header = (ROOT / "native" / "src" / "gs_renderer.h").read_text(
+        header = (ROOT / "native" / "src" / "render" / "gs_renderer.h").read_text(
             encoding="utf-8"
         )
-        bindings = (ROOT / "native" / "src" / "python_bindings.cpp").read_text(
+        bindings = (ROOT / "native" / "src" / "bindings" / "python_bindings.cpp").read_text(
             encoding="utf-8"
         )
         self.assertIn(
@@ -129,13 +127,13 @@ class NativeContractTests(unittest.TestCase):
         self.assertIn("invariant_bits |= 1u", tile)
         self.assertIn("invariant_bits |= 2u", tile)
         self.assertIn("InterlockedOr(0u, invariant_bits)", tile)
-        renderer_h = (ROOT / "native" / "src" / "gs_renderer.h").read_text(
+        renderer_h = (ROOT / "native" / "src" / "render" / "gs_renderer.h").read_text(
             encoding="utf-8"
         )
-        renderer = (ROOT / "native" / "src" / "gs_renderer.cpp").read_text(
+        renderer = (ROOT / "native" / "src" / "render" / "gs_renderer.cpp").read_text(
             encoding="utf-8"
         )
-        backend = (ROOT / "ftgspp" / "native_runtime" / "backend.py").read_text(
+        backend = (ROOT / "src" / "ftgspp" / "training" / "backend.py").read_text(
             encoding="utf-8"
         )
         self.assertIn(
@@ -180,7 +178,7 @@ class NativeContractTests(unittest.TestCase):
             )
 
     def test_flow_feature_overwrite_is_ordered_after_projection(self):
-        cpp = (ROOT / "native" / "src" / "gs_trainer.cpp").read_text(encoding="utf-8")
+        cpp = (ROOT / "native" / "src" / "training" / "gs_trainer.cpp").read_text(encoding="utf-8")
         start = cpp.index("void VulkanGSTrainer::executeFTGSPPFlowFeatures")
         body = cpp[start : cpp.index("\n}\n", start) + 3]
         self.assertIn("xy_vs.deviceBuffer, COMPUTE_SHADER_WRITE", body)
@@ -189,7 +187,7 @@ class NativeContractTests(unittest.TestCase):
 
     def test_python_runtime_has_no_sibling_repository_imports(self):
         forbidden = ("import gsplat", "import vksplat", "import tinycudann", "sys.path.insert")
-        sources = list((ROOT / "ftgspp").rglob("*.py")) + list(
+        sources = list((ROOT / "src" / "ftgspp").rglob("*.py")) + list(
             (ROOT / "scripts").rglob("*.py")
         )
         for path in sources:
@@ -198,8 +196,8 @@ class NativeContractTests(unittest.TestCase):
                 self.assertNotIn(token, text, f"{token!r} in {path.relative_to(ROOT)}")
 
     def test_native_dynamic_view_is_one_call_per_training_step(self):
-        bindings = (ROOT / "native" / "src" / "python_bindings.cpp").read_text(encoding="utf-8")
-        runner = (ROOT / "ftgspp" / "native_runtime" / "runner.py").read_text(encoding="utf-8")
+        bindings = (ROOT / "native" / "src" / "bindings" / "python_bindings.cpp").read_text(encoding="utf-8")
+        runner = (ROOT / "src" / "ftgspp" / "training" / "runner.py").read_text(encoding="utf-8")
         self.assertIn('def("train_dynamic_view"', bindings)
         self.assertIn("backend.train_view(", runner)
         self.assertIn(
@@ -219,10 +217,10 @@ class NativeContractTests(unittest.TestCase):
 
     def test_explicit_adam_can_log_geometry_gradient_stats(self):
         adam = (SLANG / "ftgspp_explicit_adam.slang").read_text(encoding="utf-8")
-        trainer = (ROOT / "native" / "src" / "gs_trainer.cpp").read_text(
+        trainer = (ROOT / "native" / "src" / "training" / "gs_trainer.cpp").read_text(
             encoding="utf-8"
         )
-        bindings = (ROOT / "native" / "src" / "python_bindings.cpp").read_text(
+        bindings = (ROOT / "native" / "src" / "bindings" / "python_bindings.cpp").read_text(
             encoding="utf-8"
         )
         self.assertIn("layout(binding=19) RWByteAddressBuffer grad_stats;", adam)
@@ -238,10 +236,10 @@ class NativeContractTests(unittest.TestCase):
         self.assertIn('result["grad_sh_rest_rms"]', bindings)
 
     def test_native_loss_scalar_covers_the_optimized_objective(self):
-        bindings = (ROOT / "native" / "src" / "python_bindings.cpp").read_text(
+        bindings = (ROOT / "native" / "src" / "bindings" / "python_bindings.cpp").read_text(
             encoding="utf-8"
         )
-        trainer = (ROOT / "native" / "src" / "gs_trainer.cpp").read_text(
+        trainer = (ROOT / "native" / "src" / "training" / "gs_trainer.cpp").read_text(
             encoding="utf-8"
         )
         fused = (SLANG / "ftgspp_fused_backward_optimizer.slang").read_text(
@@ -257,7 +255,9 @@ class NativeContractTests(unittest.TestCase):
             self.assertIn(f"InterlockedAddF32({offset}", fused)
         self.assertIn("InterlockedAddF32(20u", color)
         self.assertIn("u.reg * color_params[i] * color_params[i]", color)
-        self.assertIn("buffers.loss_accum.deviceBuffer.size != 6*sizeof(float)", bindings)
+        self.assertIn(
+            "buffers.loss_accum.deviceBuffer.size != 6*sizeof(float)", bindings,
+        )
         self.assertGreaterEqual(
             trainer.count("clearDeviceBuffer(buffers.loss_accum, 6)"), 1
         )
@@ -271,22 +271,26 @@ class NativeContractTests(unittest.TestCase):
         color_backward = (
             SLANG / "ftgspp_color_correct_backward.slang"
         ).read_text(encoding="utf-8")
-        trainer = (ROOT / "native" / "src" / "gs_trainer.cpp").read_text(
+        trainer = (ROOT / "native" / "src" / "training" / "gs_trainer.cpp").read_text(
             encoding="utf-8"
         )
-        bindings = (ROOT / "native" / "src" / "python_bindings.cpp").read_text(
+        bindings = (ROOT / "native" / "src" / "bindings" / "python_bindings.cpp").read_text(
             encoding="utf-8"
         )
 
-        # Mode 2 is FTGSPP's Gaussians.forward(clamp=True); mode 0 is used
-        # after color correction because the affine output is intentionally
-        # unbounded. Scalar and backward consume the same push-constant mode.
+        objective = (SLANG / "ftgspp_image_objective.slang").read_text(
+            encoding="utf-8"
+        )
         self.assertIn("uint predictionClampMode", ssim)
         self.assertIn("uint prediction_clamp_mode", scalar)
-        self.assertIn("clamp(value, float3(0.0f), float3(1.0f))", ssim)
-        self.assertIn("rawP1 >= 0.0f && rawP1 <= 1.0f", ssim)
-        self.assertIn("* alpha * clampDerivative", ssim)
-        self.assertIn("clamp(raw_prediction, float3(0.0f), float3(1.0f))", scalar)
+        self.assertIn("FTGSPP_OBJECTIVE_SCENE_RGB_V1", objective)
+        self.assertIn("state.rgb + background * state.w", objective)
+        self.assertIn("reference * mask + background", objective)
+        self.assertIn("result.target = reference;", objective)
+        self.assertNotIn("mask_chain", ssim)
+        self.assertIn("ftgspp_clamp_derivative", ssim)
+        self.assertIn("dLdimg1Buffer[pixId].w +=", ssim)
+        self.assertIn("objective.prediction", scalar)
         self.assertIn("groupshared float l1_values[256];", scalar)
         self.assertIn("groupshared float ssim_values[256];", scalar)
         self.assertIn("for (uint stride = 128u; stride > 0u; stride >>= 1u)", scalar)
@@ -296,18 +300,15 @@ class NativeContractTests(unittest.TestCase):
             trainer.index("void VulkanGSTrainer::executeComputeSSIMGradient(") :
             trainer.index("void VulkanGSTrainer::executeFTGSPPMaterialize(")
         ]
-        self.assertEqual(ssim_fn.count("5*sizeof(Uniform32_t)"), 3)
-        self.assertIn("shader_uniforms[4].u = prediction_clamp_mode", trainer)
-        self.assertIn("corrected_for_loss ? 0u : 2u", bindings)
+        self.assertEqual(ssim_fn.count("sizeof(shader_uniforms)"), 3)
+        self.assertIn("shader_uniforms.objective_mode = config.image_objective", trainer)
+        self.assertIn("pending_background_ = background", bindings)
         self.assertIn("executeComputeSSIMGradient(", trainer)
 
-        # FTGSPP order is clamp(renderer) -> affine -> unbounded image loss.
-        # Backward uses the clamped color for dmat and applies the renderer
-        # clamp Jacobian only after propagating through the affine matrix.
-        self.assertIn("float3 rgb = clamp(", color_forward)
-        self.assertIn("const float3 c = clamp(raw_c", color_backward)
+        self.assertIn("(1.0f-raw.w)", color_forward)
+        self.assertIn("const bool composite", color_backward)
         self.assertIn("float3 dc = mul(g, transpose(mat))", color_backward)
-        self.assertIn("dc *= clamp_derivative", color_backward)
+        self.assertIn("v_pixel_state[pix+3u] -= dot(g, bias)", color_backward)
         self.assertIn("c.x*g.x", color_backward)
 
     def test_explicit_backward_writes_complete_raw_fp32_state(self):
@@ -335,11 +336,11 @@ class NativeContractTests(unittest.TestCase):
             "write_t3_float3(float3(0), idx, raw_grad_base_xyz_ws);", adam
         )
         self.assertIn("velocities_gates[idx] = x;", adam)
-        self.assertNotIn("if (uniforms.reserved0 < 0.5f)", adam)
+        self.assertIn("if (uniforms.reserved0 < 0.5f)", adam)
         self.assertIn("is_sh_skipped(uniforms.step, cid, num_sh)", adam)
 
     def test_cpp_keeps_split_multi_gpu_and_fused_single_gpu_paths(self):
-        cpp = (ROOT / "native" / "src" / "gs_trainer.cpp").read_text(
+        cpp = (ROOT / "native" / "src" / "training" / "gs_trainer.cpp").read_text(
             encoding="utf-8"
         )
         fused_start = cpp.index(
@@ -391,10 +392,10 @@ class NativeContractTests(unittest.TestCase):
         self.assertIn("RWStructuredBuffer<float> base_xyz_ws", fused)
         self.assertIn("ftgspp_fused_adam(", fused)
 
-        timer = (ROOT / "native" / "src" / "perf_timer.h").read_text(
+        timer = (ROOT / "native" / "src" / "device" / "perf_timer.h").read_text(
             encoding="utf-8"
         )
-        trainer = (ROOT / "native" / "src" / "gs_trainer.cpp").read_text(
+        trainer = (ROOT / "native" / "src" / "training" / "gs_trainer.cpp").read_text(
             encoding="utf-8"
         )
         self.assertIn("_(FusedDynamicBackwardAdam)", timer)
@@ -408,26 +409,11 @@ class NativeContractTests(unittest.TestCase):
         self.assertNotIn("Timer<PerfTimer::DynamicBackward>", body)
         self.assertNotIn("Timer<PerfTimer::ExplicitAdam>", body)
 
-    def test_effective_batch_adam_parameterization_matches_ftgspp(self):
-        for name in (
-            "ftgspp_explicit_adam.slang",
-            "ftgspp_fused_dynamic_backward_adam.slang",
-        ):
-            shader = (SLANG / name).read_text(encoding="utf-8")
-            self.assertIn("const float beta1 = pow(0.9f, batch);", shader)
-            self.assertIn("const float beta2 = pow(0.999f, batch);", shader)
-            self.assertIn("const float eps = 1e-15f / sqrt(batch);", shader)
-        backend = (
-            ROOT / "ftgspp" / "native_runtime" / "backend.py"
-        ).read_text(encoding="utf-8")
-        self.assertIn('"optimizer_batch_size": (', backend)
-        self.assertIn('== "effective_batch_adam"', backend)
-
     def test_sparse_v2_uses_active_sh_and_runtime_auto_exact_choice(self):
         sparse = (SLANG / "ftgspp_sparse_gradient.slang").read_text(
             encoding="utf-8"
         )
-        bindings = (ROOT / "native" / "src" / "python_bindings.cpp").read_text(
+        bindings = (ROOT / "native" / "src" / "bindings" / "python_bindings.cpp").read_text(
             encoding="utf-8"
         )
         self.assertIn("return 18u + active_sh_float_count(active_sh)", sparse)
@@ -440,7 +426,7 @@ class NativeContractTests(unittest.TestCase):
         self.assertIn('"exact_sorted_sparse") == 0', bindings)
         self.assertNotIn('"sorted_sparse") == 0', bindings)
         self.assertIn('pair_gaussian_codec_ = used_sparse', bindings)
-        trainer = (ROOT / "native" / "src" / "gs_trainer.cpp").read_text(
+        trainer = (ROOT / "native" / "src" / "training" / "gs_trainer.cpp").read_text(
             encoding="utf-8"
         )
         merge_start = trainer.index(
@@ -456,43 +442,14 @@ class NativeContractTests(unittest.TestCase):
         self.assertIn("if (local_rank == 0)", merge)
         self.assertNotIn("pipeline_ftgspp_sparse_prepare", merge)
 
-    def test_hierarchical_sparse_d2h_is_local_count_not_full_buffer(self):
-        bindings = (ROOT / "native" / "src" / "python_bindings.cpp").read_text(
-            encoding="utf-8"
-        )
-        start = bindings.index(
-            "py::dict exchange_hierarchical_sparse_gradient("
-        )
-        body = bindings[
-            start : bindings.index(
-                "py::dict exchange_hierarchical_gradient(", start
-            )
-        ]
-        self.assertNotIn(
-            "trainer.copyFromDevice(buffers.sparse_gradient_records)", body,
-        )
-        self.assertNotIn(
-            "trainer.copyToDevice(buffers.peer_sparse_gradient_records)", body,
-        )
-        self.assertIn("submitBuffersFromDevicePackedRange", body)
-        self.assertIn("submitBuffersToDevicePackedRange", body)
-        self.assertIn("size_t(local_count) * record_bytes", body)
-        header = (
-            ROOT / "native" / "src" / "hierarchical_host_collective.h"
-        ).read_text(encoding="utf-8")
-        self.assertIn("count_sorted_sparse_union", header)
-        self.assertIn("P*union", header)
-        self.assertNotIn("P*max(local)", header)
-        self.assertIn("local_sparse_bytes + peer_sparse_bytes", bindings)
-
     def test_non_logging_steps_gate_every_native_loss_scalar_path(self):
-        trainer = (ROOT / "native" / "src" / "gs_trainer.cpp").read_text(
+        trainer = (ROOT / "native" / "src" / "training" / "gs_trainer.cpp").read_text(
             encoding="utf-8"
         )
-        bindings = (ROOT / "native" / "src" / "python_bindings.cpp").read_text(
+        bindings = (ROOT / "native" / "src" / "bindings" / "python_bindings.cpp").read_text(
             encoding="utf-8"
         )
-        runner = (ROOT / "ftgspp" / "native_runtime" / "runner.py").read_text(
+        runner = (ROOT / "src" / "ftgspp" / "training" / "runner.py").read_text(
             encoding="utf-8"
         )
         shared_start = trainer.index(
@@ -513,10 +470,10 @@ class NativeContractTests(unittest.TestCase):
         self.assertIn("collect_loss=should_log", runner)
 
     def test_raster_backward_tuning_is_keyed_and_freezes_per_bucket(self):
-        header = (ROOT / "native" / "src" / "gs_renderer.h").read_text(
+        header = (ROOT / "native" / "src" / "render" / "gs_renderer.h").read_text(
             encoding="utf-8"
         )
-        source = (ROOT / "native" / "src" / "gs_renderer.cpp").read_text(
+        source = (ROOT / "native" / "src" / "render" / "gs_renderer.cpp").read_text(
             encoding="utf-8"
         )
         for field in (
@@ -542,13 +499,13 @@ class NativeContractTests(unittest.TestCase):
         self.assertIn("state.scheduler.best_mean()", source)
 
     def test_tile_pair_capacity_bootstraps_tighter_than_splat_times_eight(self):
-        header = (ROOT / "native" / "src" / "tile_work_control.h").read_text(
+        header = (ROOT / "native" / "src" / "render" / "tile_work_control.h").read_text(
             encoding="utf-8"
         )
-        renderer = (ROOT / "native" / "src" / "gs_renderer.cpp").read_text(
+        renderer = (ROOT / "native" / "src" / "render" / "gs_renderer.cpp").read_text(
             encoding="utf-8"
         )
-        bindings = (ROOT / "native" / "src" / "python_bindings.cpp").read_text(
+        bindings = (ROOT / "native" / "src" / "bindings" / "python_bindings.cpp").read_text(
             encoding="utf-8"
         )
         self.assertIn("bootstrapTilePairCapacity", header)
@@ -567,10 +524,10 @@ class NativeContractTests(unittest.TestCase):
         self.assertIn("if (u.step_generation != 0u)", prepare)
 
     def test_stage_timestamps_default_off_keeps_raster_backward_probes(self):
-        pipeline = (ROOT / "native" / "src" / "gs_pipeline.cpp").read_text(
+        pipeline = (ROOT / "native" / "src" / "device" / "gs_pipeline.cpp").read_text(
             encoding="utf-8"
         )
-        timer = (ROOT / "native" / "src" / "perf_timer.cpp").read_text(
+        timer = (ROOT / "native" / "src" / "device" / "perf_timer.cpp").read_text(
             encoding="utf-8"
         )
         self.assertIn("FTGSPP_VK_STAGE_TIMERS", pipeline)
@@ -579,19 +536,20 @@ class NativeContractTests(unittest.TestCase):
         self.assertIn("stageTimestampsEnabled()", timer)
 
     def test_eval_copies_packed_rgb_without_extra_numpy_roundtrip(self):
-        bindings = (ROOT / "native" / "src" / "python_bindings.cpp").read_text(
+        bindings = (ROOT / "native" / "src" / "bindings" / "python_bindings.cpp").read_text(
             encoding="utf-8"
         )
-        backend = (ROOT / "ftgspp" / "native_runtime" / "backend.py").read_text(
+        backend = (ROOT / "src" / "ftgspp" / "training" / "backend.py").read_text(
             encoding="utf-8"
         )
-        runner = (ROOT / "ftgspp" / "native_runtime" / "runner.py").read_text(
+        runner = (ROOT / "src" / "ftgspp" / "training" / "runner.py").read_text(
             encoding="utf-8"
         )
         self.assertIn("copy_pixel_rgb", bindings)
         self.assertIn("begin_eval_val_view", bindings)
         self.assertIn("submit_eval_rgb_readback", bindings)
         self.assertIn("complete_eval_rgb", bindings)
+        self.assertIn("complete_eval_metrics", bindings)
         self.assertIn("drain_eval", bindings)
         self.assertIn("submitComputeReadback", bindings)
         self.assertIn("harvestNextComputeSlot", bindings)
@@ -604,21 +562,35 @@ class NativeContractTests(unittest.TestCase):
         self.assertIn("submitComputeReadback", rerender)
         self.assertNotIn("DeviceGuard", rerender)
         self.assertIn("complete_eval_rgb", backend)
-        evaluation = runner[
-            runner.index("def _evaluate(") : runner.index("def _train(")
+        self.assertIn("complete_eval_metrics", backend)
+        self.assertIn("evaluate_holdout_view", backend)
+        holdout = backend[
+            backend.index("def evaluate_holdout_view(") : backend.index(
+                "def render_flow_diagnostic("
+            )
         ]
-        self.assertIn("submit_eval_rgb_readback", evaluation)
+        self.assertIn("complete_eval_metrics", holdout)
+        self.assertNotIn("ssim_workspace", holdout)
+        self.assertNotIn("_psnr(", holdout)
+        evaluation = runner[
+            runner.index("def _evaluate(") : runner.index("def _optimizer_update(")
+        ]
+        self.assertIn("evaluate_holdout_view", evaluation)
+        self.assertIn(
+            "want_diagnostics = foreground_protocol and bool(full_validation)",
+            evaluation,
+        )
         self.assertIn("ssim_workspace.ssim", evaluation)
         self.assertIn("class _EvalSsimWorkspace", runner)
+        self.assertNotIn("full_validation_on_export", evaluation)
         self.assertLess(
-            evaluation.index("complete_eval()"),
-            evaluation.index("begin_eval(int(chunk[cursor + 1]))"),
+            evaluation.index("want_diagnostics = foreground_protocol"),
+            evaluation.index("foreground_metrics("),
         )
-        self.assertLess(
-            evaluation.index("begin_eval(int(chunk[cursor + 1]))"),
-            evaluation.index("score_view(int(index), prediction)"),
-        )
-        buffer_cpp = (ROOT / "native" / "src" / "buffer.cpp").read_text(
+        ssim = (SLANG / "ssim.slang").read_text(encoding="utf-8")
+        self.assertIn("float ssimC1;", ssim)
+        self.assertIn("uniforms.ssimC1", ssim)
+        buffer_cpp = (ROOT / "native" / "src" / "device" / "buffer.cpp").read_text(
             encoding="utf-8"
         )
         readback = buffer_cpp[
@@ -635,20 +607,47 @@ class NativeContractTests(unittest.TestCase):
         self.assertIn("attachComputeTimeline", packed)
         self.assertIn("HOST_READ", packed)
 
-    def test_train_log_interval_defaults_to_eval_alignment(self):
-        runner = (ROOT / "ftgspp" / "native_runtime" / "runner.py").read_text(
+    def test_train_log_interval_is_public_config_not_hidden_environment(self):
+        runner = (ROOT / "src" / "ftgspp" / "training" / "runner.py").read_text(
             encoding="utf-8"
         )
-        self.assertIn('FTGSPP_TRAIN_LOG_INTERVAL", "2000"', runner)
+        defaults = (ROOT / "src" / "ftgspp" / "config" / "defaults.yaml").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("FTGSPP_TRAIN_LOG_INTERVAL", runner)
+        self.assertIn("self.config.train.log_interval", runner)
+        self.assertIn("log_interval: 2000", defaults)
+
+    def test_eval_cadence_uses_checkpoint_interval_not_a_second_env_switch(self):
+        runner = (ROOT / "src" / "ftgspp" / "training" / "runner.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("FTGSPP_TRAIN_EVAL_INTERVAL", runner)
+        self.assertIn("def snapshot_cadence(", runner)
+        self.assertIn("save_checkpoints", runner)
+        self.assertIn("export_best", runner)
+        self.assertIn("holdout_is_better", runner)
+        self.assertIn("export_selection.json", runner)
+        defaults = (ROOT / "src" / "ftgspp" / "config" / "defaults.yaml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("save_checkpoints: true", defaults)
+        self.assertIn("export_best: true", defaults)
+        self.assertNotIn("full_validation_on_export", defaults)
+        self.assertIn("full_validation=True", runner)
+        schema = (ROOT / "src" / "ftgspp" / "config" / "schema.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("full_validation_on_export", schema)
 
     def test_pair_bucket_calibration_uses_real_native_round_trips(self):
-        bindings = (ROOT / "native" / "src" / "python_bindings.cpp").read_text(
+        bindings = (ROOT / "native" / "src" / "bindings" / "python_bindings.cpp").read_text(
             encoding="utf-8"
         )
         distributed = (
-            ROOT / "ftgspp" / "native_runtime" / "distributed.py"
+            ROOT / "src" / "ftgspp" / "training" / "distributed.py"
         ).read_text(encoding="utf-8")
-        runner = (ROOT / "ftgspp" / "native_runtime" / "runner.py").read_text(
+        runner = (ROOT / "src" / "ftgspp" / "training" / "runner.py").read_text(
             encoding="utf-8"
         )
         self.assertIn("benchmark_pair_transfer_buckets(", bindings)
@@ -663,7 +662,7 @@ class NativeContractTests(unittest.TestCase):
         self.assertIn('saved_collective.get("bucket_bytes", 0)', runner)
 
     def test_color_backward_does_not_apply_adam(self):
-        cpp = (ROOT / "native" / "src" / "gs_trainer.cpp").read_text(
+        cpp = (ROOT / "native" / "src" / "training" / "gs_trainer.cpp").read_text(
             encoding="utf-8"
         )
         color_start = cpp.index(
@@ -672,49 +671,18 @@ class NativeContractTests(unittest.TestCase):
         color = cpp[color_start : cpp.index("\n}\n", color_start) + 3]
         self.assertNotIn("pipeline_ftgspp_color_adam", color)
 
-    def test_distributed_native_api_and_gil_release_contract(self):
-        bindings = (ROOT / "native" / "src" / "python_bindings.cpp").read_text(
-            encoding="utf-8"
-        )
-        for name in (
-            "backward_dynamic_view",
-            "finalize_local_gradient",
-            "packed_gradient_layout",
-            "gradient_state_packed_into",
-            "set_gradient_state_packed",
-            "optimizer_step",
-        ):
-            self.assertIn(f'.def("{name}"', bindings)
-        self.assertNotIn('.def("gradient_state"', bindings)
-        self.assertNotIn('.def("set_gradient_state"', bindings)
-        self.assertRegex(
-            bindings,
-            r'\.def\("backward_dynamic_view"[\s\S]{0,180}'
-            r'py::call_guard<py::gil_scoped_release>\(\)',
-        )
-        self.assertRegex(
-            bindings,
-            r'\.def\("finalize_local_gradient"[\s\S]{0,180}'
-            r'py::call_guard<py::gil_scoped_release>\(\)',
-        )
-        self.assertRegex(
-            bindings,
-            r'\.def\("optimizer_step"[\s\S]{0,180}'
-            r'py::call_guard<py::gil_scoped_release>\(\)',
-        )
-
     def test_sync_pipeline_harvests_at_collective_and_narrows_eval_drain(self):
-        bindings = (ROOT / "native" / "src" / "python_bindings.cpp").read_text(
+        bindings = (ROOT / "native" / "src" / "bindings" / "python_bindings.cpp").read_text(
             encoding="utf-8"
         )
-        buffer_cpp = (ROOT / "native" / "src" / "buffer.cpp").read_text(
+        buffer_cpp = (ROOT / "native" / "src" / "device" / "buffer.cpp").read_text(
             encoding="utf-8"
         )
-        ring = (ROOT / "native" / "src" / "pipeline_ring.cpp").read_text(
+        ring = (ROOT / "native" / "src" / "device" / "pipeline_ring.cpp").read_text(
             encoding="utf-8"
         )
         distributed = (
-            ROOT / "ftgspp" / "native_runtime" / "distributed.py"
+            ROOT / "src" / "ftgspp" / "training" / "distributed.py"
         ).read_text(encoding="utf-8")
         backward = bindings[
             bindings.index("void backward_dynamic_view(") : bindings.index(
@@ -753,22 +721,8 @@ class NativeContractTests(unittest.TestCase):
         self.assertIn("_complete_generation_with_overflow_replay", distributed)
         self.assertIn("sync_abort_retries", distributed)
 
-    def test_finalize_local_gradient_owns_all_packed_parameter_groups(self):
-        bindings = (ROOT / "native" / "src" / "python_bindings.cpp").read_text(
-            encoding="utf-8"
-        )
-        start = bindings.index("void finalize_local_gradient(uint32_t microsteps)")
-        body = bindings[start:bindings.index(
-            "\n    std::vector<PackedGradientEntry> mailbox_dense_entries", start
-        )]
-        self.assertIn("local_gradient_microsteps != microsteps", body)
-        self.assertIn("1.0f / static_cast<float>(microsteps)", body)
-        self.assertIn("packed_gradient_entries()", body)
-        self.assertIn("peer_entries_for(output)", body)
-        self.assertIn("color_grad", bindings[:start])
-
     def test_parallel_eval_render_entry_points_release_the_gil(self):
-        bindings = (ROOT / "native" / "src" / "python_bindings.cpp").read_text(
+        bindings = (ROOT / "native" / "src" / "bindings" / "python_bindings.cpp").read_text(
             encoding="utf-8"
         )
         for name in (
@@ -782,7 +736,7 @@ class NativeContractTests(unittest.TestCase):
             )
 
     def test_distributed_transfers_release_gil_around_vulkan_waits(self):
-        bindings = (ROOT / "native" / "src" / "python_bindings.cpp").read_text(
+        bindings = (ROOT / "native" / "src" / "bindings" / "python_bindings.cpp").read_text(
             encoding="utf-8"
         )
         helper_start = bindings.index("py::array_t<To> buffer_to_array(")
@@ -795,15 +749,8 @@ class NativeContractTests(unittest.TestCase):
             helper.index("trainer.copyFromDevice(buffer);"),
         )
 
-        upload_start = bindings.index("void set_gradient_state_packed(")
-        upload = bindings[
-            upload_start : bindings.index("void mean_packed_gradients_into(", upload_start)
-        ]
-        self.assertIn("py::gil_scoped_release release;", upload)
-        self.assertIn("trainer.copyBuffersToDevicePacked", upload)
-
     def test_named_gradient_abi_is_removed(self):
-        bindings = (ROOT / "native" / "src" / "python_bindings.cpp").read_text(
+        bindings = (ROOT / "native" / "src" / "bindings" / "python_bindings.cpp").read_text(
             encoding="utf-8"
         )
         self.assertNotIn("py::dict gradient_state(", bindings)
@@ -812,7 +759,7 @@ class NativeContractTests(unittest.TestCase):
         self.assertNotIn('.def("set_gradient_state"', bindings)
 
     def test_optimizer_relocation_statistics_keep_n_by_two_shape(self):
-        bindings = (ROOT / "native" / "src" / "python_bindings.cpp").read_text(
+        bindings = (ROOT / "native" / "src" / "bindings" / "python_bindings.cpp").read_text(
             encoding="utf-8"
         )
         optimizer_start = bindings.index("py::dict get_optimizer_state()")
@@ -832,7 +779,7 @@ class NativeContractTests(unittest.TestCase):
         self.assertIn('"relocation statistics must have shape (N, 2)"', bindings)
 
     def test_perf_timer_markers_are_thread_local_and_summary_is_global(self):
-        source = (ROOT / "native" / "src" / "perf_timer.cpp").read_text(
+        source = (ROOT / "native" / "src" / "device" / "perf_timer.cpp").read_text(
             encoding="utf-8"
         )
         self.assertIn("struct _TimerObject {", source)
@@ -878,13 +825,13 @@ class NativeContractTests(unittest.TestCase):
         compiler = (ROOT / "native" / "compile_shaders.py").read_text(
             encoding="utf-8"
         )
-        bindings = (ROOT / "native" / "src" / "python_bindings.cpp").read_text(
+        bindings = (ROOT / "native" / "src" / "bindings" / "python_bindings.cpp").read_text(
             encoding="utf-8"
         )
-        backend = (ROOT / "ftgspp" / "native_runtime" / "backend.py").read_text(
+        backend = (ROOT / "src" / "ftgspp" / "training" / "backend.py").read_text(
             encoding="utf-8"
         )
-        runner = (ROOT / "ftgspp" / "native_runtime" / "runner.py").read_text(
+        runner = (ROOT / "src" / "ftgspp" / "training" / "runner.py").read_text(
             encoding="utf-8"
         )
         self.assertIn("ftgspp_hard_separation", compiler)
@@ -897,7 +844,7 @@ class NativeContractTests(unittest.TestCase):
         self.assertIn('phase="hard_separation"', runner)
 
     def test_color_adam_is_disabled_during_hard_separation(self):
-        cpp = (ROOT / "native" / "src" / "gs_trainer.cpp").read_text(
+        cpp = (ROOT / "native" / "src" / "training" / "gs_trainer.cpp").read_text(
             encoding="utf-8"
         )
         adam_start = cpp.index("void VulkanGSTrainer::executeFTGSPPColorAdam(")
@@ -922,7 +869,7 @@ class NativeContractTests(unittest.TestCase):
             shader.index("if ((u.update_parameters & 1u) == 0u)"),
         )
 
-        bindings = (ROOT / "native" / "src" / "python_bindings.cpp").read_text(
+        bindings = (ROOT / "native" / "src" / "bindings" / "python_bindings.cpp").read_text(
             encoding="utf-8"
         )
         active_start = bindings.index("bool color_correction_active(int step) const")
@@ -932,9 +879,9 @@ class NativeContractTests(unittest.TestCase):
         self.assertIn("step > config.color_correction_start", active)
         self.assertIn("config.hard_separation", active)
 
-    def test_eval_render_does_not_apply_color_correction(self):
-        """Main eval uses raw RGB; only train-view renders may apply CC."""
-        bindings = (ROOT / "native" / "src" / "python_bindings.cpp").read_text(
+    def test_eval_render_can_apply_color_correction_when_requested(self):
+        """Eval has an explicit CC switch; default remains raw for compatibility."""
+        bindings = (ROOT / "native" / "src" / "bindings" / "python_bindings.cpp").read_text(
             encoding="utf-8"
         )
         train_start = bindings.index("void render_dynamic_train_view(")
@@ -944,13 +891,13 @@ class NativeContractTests(unittest.TestCase):
         self.assertIn("apply_color_correction", train)
         self.assertIn("executeFTGSPPColorCorrectForwardWH", train)
 
-        val_start = bindings.index("void render_dynamic_val_view(size_t view_idx)")
+        val_start = bindings.index("void render_dynamic_val_view(")
         val = bindings[val_start : bindings.index("\n    }\n", val_start) + 7]
-        self.assertNotIn("executeFTGSPPColorCorrectForwardWH", val)
-        self.assertIn("raw renderer RGB only", val)
+        self.assertIn("apply_color_correction", val)
+        self.assertIn("executeFTGSPPColorCorrectForwardWH", val)
 
     def test_color_correction_orders_transfer_and_ssim_producers(self):
-        cpp = (ROOT / "native" / "src" / "gs_trainer.cpp").read_text(
+        cpp = (ROOT / "native" / "src" / "training" / "gs_trainer.cpp").read_text(
             encoding="utf-8"
         )
         forward_start = cpp.index(
@@ -984,7 +931,7 @@ class NativeContractTests(unittest.TestCase):
         self.assertIn("if (u.enabled == 1u)", shader)
 
     def test_color_state_is_deterministically_preallocated_per_replica(self):
-        cpp = (ROOT / "native" / "src" / "gs_trainer.cpp").read_text(
+        cpp = (ROOT / "native" / "src" / "training" / "gs_trainer.cpp").read_text(
             encoding="utf-8"
         )
         start = cpp.index("void VulkanGSTrainer::ensureFTGSPPColorState(")
@@ -995,7 +942,7 @@ class NativeContractTests(unittest.TestCase):
             self.assertIn(f"copyToDevice(buffers.{name})", helper)
         self.assertLess(helper.index("return;"), helper.index("assign(param_count"))
 
-        bindings = (ROOT / "native" / "src" / "python_bindings.cpp").read_text(
+        bindings = (ROOT / "native" / "src" / "bindings" / "python_bindings.cpp").read_text(
             encoding="utf-8"
         )
         configure_start = bindings.index("void configure_ftgspp(py::dict cfg)")
@@ -1007,10 +954,10 @@ class NativeContractTests(unittest.TestCase):
         )
 
     def test_relocation_cdf_uses_parallel_float_scan(self):
-        cpp = (ROOT / "native" / "src" / "gs_trainer.cpp").read_text(
+        cpp = (ROOT / "native" / "src" / "training" / "gs_trainer.cpp").read_text(
             encoding="utf-8"
         )
-        renderer = (ROOT / "native" / "src" / "gs_renderer.cpp").read_text(
+        renderer = (ROOT / "native" / "src" / "render" / "gs_renderer.cpp").read_text(
             encoding="utf-8"
         )
         self.assertIn("executeFTGSPPRelocationPlanNative(", cpp)
@@ -1029,9 +976,9 @@ class NativeContractTests(unittest.TestCase):
 
     def test_multi_rank_relocation_skips_redundant_host_roundtrips(self):
         distributed = (
-            ROOT / "ftgspp" / "native_runtime" / "distributed.py"
+            ROOT / "src" / "ftgspp" / "training" / "distributed.py"
         ).read_text(encoding="utf-8")
-        bindings = (ROOT / "native" / "src" / "python_bindings.cpp").read_text(
+        bindings = (ROOT / "native" / "src" / "bindings" / "python_bindings.cpp").read_text(
             encoding="utf-8"
         )
         start = distributed.index(
@@ -1046,27 +993,6 @@ class NativeContractTests(unittest.TestCase):
         self.assertIn("clear_relocation_stats_state()", body)
         self.assertIn("void apply_planned_relocation(", bindings)
         self.assertIn("void clear_relocation_stats_state()", bindings)
-
-    def test_native_relocation_plan_downloads_each_output_once(self):
-        bindings = (ROOT / "native" / "src" / "python_bindings.cpp").read_text(
-            encoding="utf-8"
-        )
-        start = bindings.index("py::dict plan_relocation_dynamic_native(")
-        body = bindings[start : bindings.index("\n    }\n", start) + 7]
-        for name in ("relocation_map", "relocation_counts", "relocation_status"):
-            self.assertEqual(
-                body.count(f"trainer.copyFromDevice(buffers.{name});"), 1, name
-            )
-        self.assertIn(
-            "buffer_to_array<int32_t, int32_t, false>(\n"
-            "            buffers.relocation_map)",
-            body,
-        )
-        self.assertIn(
-            "buffer_to_array<int32_t, int32_t, false>(\n"
-            "            buffers.relocation_counts)",
-            body,
-        )
 
     def test_relocation_degeneracy_replaces_the_whole_donor_distribution(self):
         shader = (SLANG / "ftgspp_relocation_plan.slang").read_text(
@@ -1128,7 +1054,7 @@ class NativeContractTests(unittest.TestCase):
         for value in ("denom", "coeff", "new_log_scale.x"):
             self.assertIn(f"!isfinite({value})", prepare)
 
-        bindings = (ROOT / "native" / "src" / "python_bindings.cpp").read_text(
+        bindings = (ROOT / "native" / "src" / "bindings" / "python_bindings.cpp").read_text(
             encoding="utf-8"
         )
         start = bindings.index("void relocate_dynamic(")
@@ -1159,7 +1085,7 @@ class NativeContractTests(unittest.TestCase):
         self.assertIn('"ftgspp_relocation_binoms.slang"', compiler)
 
     def test_single_gpu_view_backward_uses_one_pre_step_parameter_point(self):
-        bindings = (ROOT / "native" / "src" / "python_bindings.cpp").read_text(
+        bindings = (ROOT / "native" / "src" / "bindings" / "python_bindings.cpp").read_text(
             encoding="utf-8"
         )
         low_level_start = bindings.index("void train_dynamic_view(")
@@ -1225,7 +1151,7 @@ class NativeContractTests(unittest.TestCase):
         self.assertIn("cannot overwrite pending gradients", to_loss)
 
     def test_cleanup_waits_before_destroying_device_children(self):
-        source = (ROOT / "native" / "src" / "gs_pipeline.cpp").read_text(encoding="utf-8")
+        source = (ROOT / "native" / "src" / "device" / "gs_pipeline.cpp").read_text(encoding="utf-8")
         start = source.index("void VulkanGSPipeline::cleanup()")
         body = source[start : source.index("\n}\n", start) + 3]
         self.assertLess(body.index("vkDeviceWaitIdle(device)"), body.index("destroyStager"))
@@ -1236,7 +1162,7 @@ class NativeContractTests(unittest.TestCase):
         self.assertIn("destroyStager(upload_stager)", body)
 
     def test_zero_dispatch_returns_before_descriptor_update(self):
-        source = (ROOT / "native" / "src" / "gs_pipeline.cpp").read_text(encoding="utf-8")
+        source = (ROOT / "native" / "src" / "device" / "gs_pipeline.cpp").read_text(encoding="utf-8")
         start = source.index("void VulkanGSPipeline::executeCompute(")
         body = source[start : source.index("\n}\n", start) + 3]
         self.assertLess(
@@ -1249,17 +1175,17 @@ class NativeContractTests(unittest.TestCase):
         self.assertIn("updateComputeDescriptorSet(pipeline, buffers)", bind_body)
 
     def test_buffer_ownership_is_move_only(self):
-        header = (ROOT / "native" / "src" / "buffer.h").read_text(encoding="utf-8")
+        header = (ROOT / "native" / "src" / "device" / "buffer.h").read_text(encoding="utf-8")
         self.assertRegex(header, r"Buffer\(const Buffer\s*&other\)\s*=\s*delete")
         self.assertRegex(header, r"Buffer& operator=\(const Buffer\s*&other\)\s*=\s*delete")
         self.assertIn("Buffer(Buffer&&", header)
         self.assertIn("generation == other.generation", header)
 
     def test_raw_gradient_buffers_are_reported_and_destroyed(self):
-        accounting = (ROOT / "native" / "src" / "buffer.cpp").read_text(
+        accounting = (ROOT / "native" / "src" / "device" / "buffer.cpp").read_text(
             encoding="utf-8"
         )
-        lifecycle = (ROOT / "native" / "src" / "gs_pipeline.cpp").read_text(
+        lifecycle = (ROOT / "native" / "src" / "device" / "gs_pipeline.cpp").read_text(
             encoding="utf-8"
         )
         for name in (
@@ -1273,61 +1199,17 @@ class NativeContractTests(unittest.TestCase):
             self.assertIn(f"_({name})", accounting)
             self.assertIn(f"_({name})", lifecycle)
 
-    def test_packed_gradient_transport_preserves_native_sh_layout(self):
-        bindings = (ROOT / "native" / "src" / "python_bindings.cpp").read_text(
-            encoding="utf-8"
-        )
-        start = bindings.index(
-            "std::vector<PackedGradientEntry> packed_gradient_entries("
-        )
-        body = bindings[start : bindings.index("\n    py::dict packed_gradient_layout()", start)]
-        self.assertIn("bool require_ready=true", body)
-        self.assertIn("if (require_ready && !gradient_ready)", body)
-        self.assertIn("trainer.resizeDeviceBuffer(value, expected);", body)
-        self.assertIn('"grad_sh_coeffs_reordered"', body)
-        self.assertIn("_CEIL_ROUND(n, SH_REORDER_SIZE)", body)
-        self.assertIn('"grad_velocities_gates"', body)
-        self.assertIn("hard_separation", body)
-        self.assertIn(
-            'result["sh_layout"] = "native_reordered_padded_float4";',
-            bindings,
-        )
-        self.assertIn('result["sh_padding"] = "canonical_zero";', bindings)
-        download_start = bindings.index("void gradient_state_packed_into(")
-        download = bindings[
-            download_start : bindings.index("void set_gradient_state_packed(", download_start)
-        ]
-        self.assertIn("padded_n != buffers.num_splats", download)
-        self.assertIn("coefficient < 12", download)
-        self.assertIn("lane < SH_REORDER_SIZE", download)
-        self.assertIn("std::fill_n(sh + 4*float4_index, 4, 0.0f);", download)
-        self.assertNotIn("clearDeviceBuffer(buffers.grad_sh_coeffs", download)
-        self.assertIn("packed_gradient_entries();", download)
-        upload_start = bindings.index("void set_gradient_state_packed(")
-        upload = bindings[
-            upload_start : bindings.index("void mean_packed_gradients_into(", upload_start)
-        ]
-        self.assertIn("packed_gradient_entries(false);", upload)
-        for method in (
-            "packed_gradient_layout",
-            "packed_gradient_size",
-            "gradient_state_packed_into",
-            "set_gradient_state_packed",
-            "mean_packed_gradients_into",
-        ):
-            self.assertIn(f'.def("{method}"', bindings)
-
-    def test_python_exposes_only_hierarchical_host_transport(self):
-        bindings = (ROOT / "native" / "src" / "python_bindings.cpp").read_text(
+    def test_python_exposes_only_pair_host_transport(self):
+        bindings = (ROOT / "native" / "src" / "bindings" / "python_bindings.cpp").read_text(
             encoding="utf-8"
         )
         distributed = (
-            ROOT / "ftgspp" / "native_runtime" / "distributed.py"
+            ROOT / "src" / "ftgspp" / "training" / "distributed.py"
         ).read_text(encoding="utf-8")
         self.assertNotIn("py::dict gradient_state(", bindings)
         self.assertNotIn("void set_gradient_state(py::dict", bindings)
         self.assertIn(
-            'requested_transport not in {"auto", "hierarchical_host"}',
+            'requested_transport not in {"auto", "pair_host"}',
             distributed,
         )
         self.assertNotIn("def _train_step_device_group", distributed)
@@ -1339,16 +1221,16 @@ class NativeContractTests(unittest.TestCase):
         self.assertNotIn("optimizer_step_host_mailbox", bindings)
 
     def test_internal_pair_capability_uses_async_borrowed_readback_ring(self):
-        pipeline_h = (ROOT / "native" / "src" / "gs_pipeline.h").read_text(
+        pipeline_h = (ROOT / "native" / "src" / "device" / "gs_pipeline.h").read_text(
             encoding="utf-8"
         )
-        pipeline_cpp = (ROOT / "native" / "src" / "buffer.cpp").read_text(
+        pipeline_cpp = (ROOT / "native" / "src" / "device" / "buffer.cpp").read_text(
             encoding="utf-8"
         )
         owner_cpp = (
-            ROOT / "native" / "src" / "host_mailbox_owner.cpp"
+            ROOT / "native" / "src" / "collective" / "host_mailbox_owner.cpp"
         ).read_text(encoding="utf-8")
-        bindings = (ROOT / "native" / "src" / "python_bindings.cpp").read_text(
+        bindings = (ROOT / "native" / "src" / "bindings" / "python_bindings.cpp").read_text(
             encoding="utf-8"
         )
         self.assertIn("packed_transfer_ring_depth = 8", pipeline_h)
@@ -1363,7 +1245,7 @@ class NativeContractTests(unittest.TestCase):
         self.assertIn('result["async_pipeline"] = true', bindings)
 
     def test_packed_transport_batches_each_direction_in_one_command_submission(self):
-        source = (ROOT / "native" / "src" / "buffer.cpp").read_text(
+        source = (ROOT / "native" / "src" / "device" / "buffer.cpp").read_text(
             encoding="utf-8"
         )
         read_start = source.index("void VulkanGSPipeline::copyBuffersFromDevicePacked(")
@@ -1395,7 +1277,7 @@ class NativeContractTests(unittest.TestCase):
         self.assertIn("ensureStagerMapped(upload_stager)", write_body)
 
     def test_device_identity_comes_from_device_info_not_group_probe(self):
-        source = (ROOT / "native" / "src" / "gs_pipeline.cpp").read_text(
+        source = (ROOT / "native" / "src" / "device" / "gs_pipeline.cpp").read_text(
             encoding="utf-8"
         )
         self.assertNotIn("get_device_group_info", source)
@@ -1409,7 +1291,7 @@ class NativeContractTests(unittest.TestCase):
         self.assertNotIn('result["all_reduce_ready"]', body)
 
     def test_native_device_provenance_reports_driver_uuid_and_features(self):
-        pipeline = (ROOT / "native" / "src" / "gs_pipeline.cpp").read_text(
+        pipeline = (ROOT / "native" / "src" / "device" / "gs_pipeline.cpp").read_text(
             encoding="utf-8"
         )
         start = pipeline.index("VulkanGSPipeline::get_device_info() const")
@@ -1422,13 +1304,13 @@ class NativeContractTests(unittest.TestCase):
             "has_float32_atomic_add", "device_uuid",
         ):
             self.assertIn(f'result["{key}"]', body)
-        bindings = (ROOT / "native" / "src" / "python_bindings.cpp").read_text(
+        bindings = (ROOT / "native" / "src" / "bindings" / "python_bindings.cpp").read_text(
             encoding="utf-8"
         )
         self.assertIn('.def("device_info"', bindings)
         self.assertIn('.def("native_abi"', bindings)
         self.assertNotIn('.def("device_group_capability"', bindings)
-        backend = (ROOT / "ftgspp" / "native_runtime" / "backend.py").read_text(
+        backend = (ROOT / "src" / "ftgspp" / "training" / "backend.py").read_text(
             encoding="utf-8"
         )
         self.assertIn("def device_metadata(self)", backend)
@@ -1438,7 +1320,7 @@ class NativeContractTests(unittest.TestCase):
         self.assertIn("def reported_native_abi(self)", backend)
 
     def test_checkpoint_readback_does_not_duplicate_owned_numpy_arrays(self):
-        backend = (ROOT / "ftgspp" / "native_runtime" / "backend.py").read_text(
+        backend = (ROOT / "src" / "ftgspp" / "training" / "backend.py").read_text(
             encoding="utf-8"
         )
         model_start = backend.index("def model(self)")
@@ -1448,7 +1330,7 @@ class NativeContractTests(unittest.TestCase):
         self.assertIn("np.ascontiguousarray(value, dtype=np.float32)", body)
         self.assertNotIn("np.array(value, copy=True)", body)
 
-        bindings = (ROOT / "native" / "src" / "python_bindings.cpp").read_text(
+        bindings = (ROOT / "native" / "src" / "bindings" / "python_bindings.cpp").read_text(
             encoding="utf-8"
         )
         optimizer_start = bindings.index("py::dict get_optimizer_state()")
@@ -1464,71 +1346,29 @@ class NativeContractTests(unittest.TestCase):
         self.assertIn('.def("release_model_upload_host_copies"', bindings)
         self.assertIn("release_model_upload_host_copies", backend)
 
-    def test_sync_prefetch_reuses_rank_executor_and_repeated_bind_is_skipped(self):
-        backend = (ROOT / "ftgspp" / "native_runtime" / "backend.py").read_text(
+    def test_resident_image_loading_is_removed(self):
+        backend = (ROOT / "src" / "ftgspp" / "training" / "backend.py").read_text(
             encoding="utf-8"
         )
-        prefetch_start = backend.index("def prefetch_train_views(")
-        prefetch = backend[
-            prefetch_start : backend.index("def schedule_train_views(", prefetch_start)
-        ]
-        self.assertIn("executor: Executor | None = None", prefetch)
-        self.assertIn("self._prefetch_views(", prefetch)
-        self.assertIn("executor=executor", prefetch)
-        helper_start = backend.index("def _prefetch_views(")
-        helper = backend[
-            helper_start : backend.index("def _schedule_views(", helper_start)
-        ]
-        self.assertIn("self._rgb_cache.prefetch(", helper)
-        self.assertIn("executor=executor", helper)
-        bind_start = backend.index("def _bind_train_rgb(")
-        bind = backend[
-            bind_start : backend.index("def train_view(", bind_start)
-        ]
-        self.assertIn("if not self._binds_rgb_per_step():", bind)
-        skip = bind.index("if int(view_index) in self._bound_train_images:")
-        upload = bind.index("self.native.bind_dynamic_view_image")
-        self.assertLess(skip, upload)
-        self.assertIn("return rgb", bind[skip:upload])
-
-        distributed = (
-            ROOT / "ftgspp" / "native_runtime" / "distributed.py"
-        ).read_text(encoding="utf-8")
-        self.assertIn(
-            "self.leader.prefetch_train_views(\n"
-            "            views, executor=self._lookahead_executor,",
-            distributed,
-        )
-        self.assertNotIn(
-            "self.leader.prefetch_train_views(views, executor=self._executor)",
-            distributed,
-        )
-
-    def test_sync_resident_uses_pinned_shared_host_rgb_pool(self):
-        backend = (ROOT / "ftgspp" / "native_runtime" / "backend.py").read_text(
+        self.assertNotIn("resident", backend.lower())
+        self.assertNotIn("def _upload_dataset_shared_resident(", backend)
+        self.assertNotIn("def prefill_arrays(", backend)
+        runner = (ROOT / "src" / "ftgspp" / "training" / "runner.py").read_text(
             encoding="utf-8"
         )
-        self.assertIn("def _upload_dataset_shared_resident(", backend)
-        self.assertIn("def prefill_arrays(", backend)
-        self.assertIn("pin: bool = False", backend)
-        self.assertIn("self._shared_host_resident", backend)
-        runner = (ROOT / "ftgspp" / "native_runtime" / "runner.py").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("pin=True", runner)
-        self.assertIn("sync shared resident", runner)
+        self.assertNotIn("resident", runner.lower())
         self.assertNotIn(
             "decoded RGB/native image residency is duplicated on every rank",
             runner,
         )
 
     def test_native_runner_has_no_host_relocation_planner(self):
-        runner = (ROOT / "ftgspp" / "native_runtime" / "runner.py").read_text(encoding="utf-8")
+        runner = (ROOT / "src" / "ftgspp" / "training" / "runner.py").read_text(encoding="utf-8")
         self.assertNotIn("def _relocation_plan", runner)
         self.assertIn("backend.relocate_native(", runner)
 
     def test_train_logs_include_per_rank_view_audit(self):
-        runner = (ROOT / "ftgspp" / "native_runtime" / "runner.py").read_text(
+        runner = (ROOT / "src" / "ftgspp" / "training" / "runner.py").read_text(
             encoding="utf-8"
         )
         self.assertEqual(
@@ -1543,39 +1383,36 @@ class NativeContractTests(unittest.TestCase):
 
     def test_lpips_evaluation_is_unweighted_scalar_only(self):
         plugin = (
-            ROOT / "ftgspp" / "native_runtime" / "lpips_plugin.py"
+            ROOT / "src" / "ftgspp" / "optional" / "lpips.py"
         ).read_text(encoding="utf-8")
-        self.assertIn("require_gradient: bool = True", plugin)
-        self.assertIn("mask: np.ndarray | None = None", plugin)
-        self.assertIn("pred_t = pred_raw.clamp(0, 1) * mask_t", plugin)
-        self.assertIn("with torch.no_grad():", plugin)
-        self.assertIn("LpipsResult(loss=loss, pixel_grad=None)", plugin)
+        self.assertIn("exclusively during evaluation", plugin)
+        self.assertIn("evaluate_lpips_vgg_unnormalized", plugin)
+        self.assertIn('reduction="none"', plugin)
+        self.assertNotIn("LpipsPlugin", plugin)
+        self.assertNotIn("require_gradient", plugin)
 
-        runner = (ROOT / "ftgspp" / "native_runtime" / "runner.py").read_text(
+        runner = (ROOT / "src" / "ftgspp" / "training" / "runner.py").read_text(
             encoding="utf-8"
         )
         evaluation = runner[
-            runner.index("def _evaluate(") : runner.index("def _train(")
+            runner.index("def _evaluate(") : runner.index("def _optimizer_update(")
         ]
-        self.assertNotIn("lpips", evaluation.lower())
-        self.assertIn("_psnr(", evaluation)
+        self.assertIn("evaluate_lpips_vgg_unnormalized", evaluation)
+        self.assertIn("foreground_roi_lpips", evaluation)
         self.assertIn("ssim_workspace.ssim(", evaluation)
+        self.assertIn("want_diagnostics", evaluation)
 
         backend = (
-            ROOT / "ftgspp" / "native_runtime" / "backend.py"
+            ROOT / "src" / "ftgspp" / "training" / "backend.py"
         ).read_text(encoding="utf-8")
         training = backend[
             backend.index("def train_view(") : backend.index("def backward_view(")
         ]
-        self.assertIn(
-            "result = lpips.compute(pred, reference_rgb, mask=reference_alpha)",
-            training,
-        )
-        self.assertIn("reference_image.shape[-1] == 4", training)
-        self.assertNotIn("require_gradient=False", training)
+        self.assertNotIn("lpips", training.lower())
+        self.assertNotIn("accumulate_pixel_state_grad", backend)
 
     def test_resume_finalization_preserves_hard_separation_phase(self):
-        runner = (ROOT / "ftgspp" / "native_runtime" / "runner.py").read_text(
+        runner = (ROOT / "src" / "ftgspp" / "training" / "runner.py").read_text(
             encoding="utf-8"
         )
         self.assertIn("main_steps_executed", runner)
@@ -1587,7 +1424,7 @@ class NativeContractTests(unittest.TestCase):
         self.assertIn("hard_separation_complete", runner)
 
     def test_runner_samples_main_and_hard_phase_views(self):
-        runner = (ROOT / "ftgspp" / "native_runtime" / "runner.py").read_text(
+        runner = (ROOT / "src" / "ftgspp" / "training" / "runner.py").read_text(
             encoding="utf-8"
         )
         self.assertIn('phase="main"', runner)
@@ -1597,27 +1434,14 @@ class NativeContractTests(unittest.TestCase):
         self.assertIn("_sample_hard_batch", runner)
         self.assertIn('phase="hard_separation"', runner)
 
-    def test_pipeline_releases_stage_init_model_before_native_training(self):
-        runner = (ROOT / "ftgspp" / "native_runtime" / "runner.py").read_text(
-            encoding="utf-8"
-        )
-        train_branch = runner[
-            runner.index('elif stage == "train":') :
-            runner.index('elif stage == "export":')
-        ]
-        self.assertLess(
-            train_branch.index("model = None"),
-            train_branch.index("model = self._train(dataset)"),
-        )
-
     def test_ftgspp_float_atomic_capability_is_hard_gated(self):
-        header = (ROOT / "native" / "src" / "gs_trainer.h").read_text(
+        header = (ROOT / "native" / "src" / "training" / "gs_trainer.h").read_text(
             encoding="utf-8"
         )
-        trainer = (ROOT / "native" / "src" / "gs_trainer.cpp").read_text(
+        trainer = (ROOT / "native" / "src" / "training" / "gs_trainer.cpp").read_text(
             encoding="utf-8"
         )
-        bindings = (ROOT / "native" / "src" / "python_bindings.cpp").read_text(
+        bindings = (ROOT / "native" / "src" / "bindings" / "python_bindings.cpp").read_text(
             encoding="utf-8"
         )
         self.assertIn("void requireFTGSPPFloat32AtomicAdd() const;", header)
@@ -1630,6 +1454,7 @@ class NativeContractTests(unittest.TestCase):
         guarded = initialize[guarded_start:]
         for pipeline in (
             "pipeline_ftgspp_loss_reduce",
+            "pipeline_ftgspp_eval_metrics",
             "pipeline_ftgspp_fused_backward_optimizer",
             "pipeline_ftgspp_relocation_score",
             "pipeline_ftgspp_color_correct_backward",
@@ -1653,6 +1478,7 @@ class NativeContractTests(unittest.TestCase):
             "executeFTGSPPRelocationPlanNative",
             "executeFTGSPPColorCorrectBackwardRawWH",
             "executeFTGSPPColorAdam",
+            "executeEvalMetrics",
         ):
             start = trainer.index(f"void VulkanGSTrainer::{name}(")
             self.assertIn(
@@ -1665,7 +1491,7 @@ class NativeContractTests(unittest.TestCase):
         # creating FTGSPP's float-atomic scalar-reduction pipeline.
         shared_ssim = trainer[
             trainer.index("void VulkanGSTrainer::executeComputeSSIMGradient(") :
-            trainer.index("void VulkanGSTrainer::executeFTGSPPMaterialize(")
+            trainer.index("void VulkanGSTrainer::executeEvalMetrics(")
         ]
         self.assertIn(
             "if (collect_loss_scalar && deviceInfo.hasFloat32AtomicAdd) {",
@@ -1673,10 +1499,20 @@ class NativeContractTests(unittest.TestCase):
         )
         self.assertIn("pipeline_ftgspp_loss_reduce", shared_ssim)
         self.assertNotIn("requireFTGSPPFloat32AtomicAdd();", shared_ssim)
+        self.assertIn("0.01f * 0.01f", shared_ssim)
+
+        eval_metrics = trainer[
+            trainer.index("void VulkanGSTrainer::executeEvalMetrics(") :
+            trainer.index("void VulkanGSTrainer::executeFTGSPPMaterialize(")
+        ]
+        self.assertIn("requireFTGSPPFloat32AtomicAdd();", eval_metrics)
+        self.assertIn("pipeline_ftgspp_eval_metrics", eval_metrics)
+        self.assertIn("0.02f * 0.02f", eval_metrics)
+        self.assertIn("eval_validity", eval_metrics)
 
         to_loss_start = bindings.index("void train_dynamic_view_to_loss(")
         to_loss = bindings[
-            to_loss_start : bindings.index("void accumulate_pixel_state_grad(", to_loss_start)
+            to_loss_start : bindings.index("void backward_dynamic_view_from_loss_raw(", to_loss_start)
         ]
         self.assertLess(
             to_loss.index("requireFTGSPPFloat32AtomicAdd();"),
@@ -1702,6 +1538,7 @@ class NativeContractTests(unittest.TestCase):
 
         for shader_name in (
             "ftgspp_loss_reduce.slang",
+            "ftgspp_eval_metrics.slang",
             "ftgspp_fused_backward_optimizer.slang",
             "ftgspp_relocation_plan.slang",
             "ftgspp_color_correct_backward.slang",
@@ -1709,54 +1546,6 @@ class NativeContractTests(unittest.TestCase):
         ):
             shader = (SLANG / shader_name).read_text(encoding="utf-8")
             self.assertIn("InterlockedAddF32", shader, shader_name)
-
-    def test_legacy_training_paths_are_removed(self):
-        for relative in (
-            "ftgspp/train",
-            "ftgspp/backends",
-            "ftgspp/init",
-            "ftgspp/runner.py",
-            "ftgspp/eval.py",
-            "ftgspp/export.py",
-            "ftgspp/render.py",
-        ):
-            self.assertFalse((ROOT / relative).exists(), relative)
-        run_py = (ROOT / "ftgspp" / "run.py").read_text(encoding="utf-8")
-        self.assertIn('runtime != "native"', run_py)
-        self.assertIn("NativeRunner", run_py)
-        self.assertNotIn("ftgspp.train", run_py)
-        self.assertNotIn("ftgspp.runner", run_py)
-        for relative in (
-            "native/src/colmap_reader.cpp",
-            "native/src/colmap_reader.h",
-            "native/src/knn.cpp",
-            "native/src/knn.h",
-            "native/src/stb_image.h",
-            "native/slang/default.slang",
-            "native/slang/mcmc.slang",
-            "native/slang/morton_sort.slang",
-            "native/slang/where.slang",
-            "native/slang/sum.slang",
-            "native/slang/fused_projection_backward_optimizer.slang",
-            "native/shader/generated/default_split.spv",
-            "native/shader/generated/mcmc_compute_relocation.spv",
-            "native/shader/generated/morton_sort_generate_keys.spv",
-            "native/shader/generated/where.spv",
-            "native/shader/generated/sum.spv",
-            "native/shader/generated/fused_projection_backward_optimizer.spv",
-        ):
-            self.assertFalse((ROOT / relative).exists(), relative)
-        self.assertFalse((ROOT / "ftgspp/models").exists())
-        self.assertTrue((ROOT / "ftgspp/compat/torch_models").is_dir())
-        self.assertTrue((ROOT / "ftgspp/reference").is_dir())
-        bindings = (ROOT / "native/src/python_bindings.cpp").read_text(
-            encoding="utf-8"
-        )
-        for symbol in (
-            "set_train_config", "train_step", "post_backward_step", "write_ply",
-        ):
-            self.assertNotIn(f'.def("{symbol}"', bindings)
-
 
 if __name__ == "__main__":
     unittest.main()

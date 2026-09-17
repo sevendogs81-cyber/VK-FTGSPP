@@ -1,0 +1,24 @@
+# Foreground-reconstruction starter. Paths are relative to this file.
+pipeline:
+  mode: foreground
+data:
+  name: my_foreground_scene
+  root: ../data/my_scene
+  frames: {start: 0, stop: 300}
+  scale: 0.5
+  train_cameras: [0, 1, 2]
+  eval_cameras: [3]
+  masks:
+    source: external
+    manifest_path: ../data/my_scene/manifests/masks.json
+init:
+  # Keep geometry initialization stable across training-seed sweeps.
+  seed: 0
+  num_gaussians: 2000000
+  keyframe_stride: 10
+  da3:
+    cache_path: ../data/my_scene/points_da3_foreground_stride10
+train:
+  iterations: 30000
+run:
+  output_path: ../runs/my_foreground_scene

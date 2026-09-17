@@ -166,7 +166,7 @@ void main(uint3 tid : SV_DispatchThreadID, uniform FTGSPPBackwardUniforms unifor
     }
 
     const float3 grad_mean = grad_mean_t;
-    const float3 grad_velocity = grad_mean_t * dt;
+    float3 grad_velocity = grad_mean_t * dt;
     float grad_time = -dot(grad_mean_t, p.velocity);
     float3 grad_log_scale = grad_scale * mg.scale;
     float grad_opacity_logit = 0.0f;

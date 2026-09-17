@@ -1,4 +1,0 @@
-# Default training path: existing keyframe PLYs -> init -> train -> export.
-# RoMa/RoMaV2 point generation has been removed from this repository.
-stages: [init, train, export]
-check_only: false

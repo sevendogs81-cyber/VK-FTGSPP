@@ -1,0 +1,23 @@
+name: CPU contracts
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  tests:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.29"
+      - run: uv sync --python 3.12 --extra dev --no-install-project
+      - run: uv run --no-sync pytest -q
+      - run: sudo apt-get update && sudo apt-get install -y libvulkan-dev libglm-dev ninja-build
+      - run: uv pip install pybind11==3.0.1 cmake
+      - run: |
+          .venv/bin/cmake -S native -B build/contracts -G Ninja \
+            -DPython_EXECUTABLE="$PWD/.venv/bin/python" \
+            -Dpybind11_DIR="$PWD/.venv/lib/python3.12/site-packages/pybind11/share/cmake/pybind11" \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+          .venv/bin/cmake --build build/contracts --target pair_collective_test
+          .venv/bin/ctest --test-dir build/contracts --output-on-failure

@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from ftgspp.native_runtime.distributed_contract import (
+from ftgspp.training.distributed_contract import (
     DistributedContractError,
     ReplicaDivergenceError,
     assert_replicas_consistent,
@@ -13,7 +13,7 @@ from ftgspp.native_runtime.distributed_contract import (
     sum_relocation_statistics,
     validate_checkpoint_optimizer_state,
 )
-from ftgspp.reference.distributed import (
+from  tests.reference.distributed import (
     add_shared_gradients,
     consolidate_optimizer_state_for_checkpoint,
     deterministic_relocation_plan,

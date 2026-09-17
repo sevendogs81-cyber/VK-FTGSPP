@@ -7,13 +7,15 @@ import numpy as np
 
 from ftgspp.config.schema import AppConfig, DistributedConfig
 from ftgspp.config.validate import DISTRIBUTED_SAMPLING_POLICIES
-from ftgspp.native_runtime.distributed import (
-    DistributedPlan,
-    SynchronousBackendGroup,
-    _flat_epoch_permutation,
-    _torch_random_sampler_stream,
+from ftgspp.training.sampler import (
     sample_rank_views,
     sampling_phase_seed,
+    _flat_epoch_permutation,
+    _torch_random_sampler_stream,
+)
+from ftgspp.training.distributed import (
+    DistributedPlan,
+    SynchronousBackendGroup,
 )
 
 
@@ -44,8 +46,6 @@ class _FakeBackend:
         ] = []
         self.loss_reads = 0
         self.closed = False
-        self.raw_microstep_gradients: list[np.ndarray] = []
-        self.finalize_calls: list[int] = []
         self.apply_sync_capacity_calls: list[int] = []
         self.drain_structure_calls = 0
         self._collect_geometry_grad_stats = False
@@ -79,7 +79,6 @@ class _FakeBackend:
         del step
         value = np.float32(view_index + 1)
         self.gradient[:] = (value, value * 2.0)
-        self.raw_microstep_gradients.append(self.gradient.copy())
         self.stats[:, 0] += value
         self.stats[:, 1] += 1.0
         l1, ssim = float(value), float(value * 0.25)
@@ -97,18 +96,9 @@ class _FakeBackend:
         if collect_loss:
             self.loss = terms
 
-    def finalize_local_gradient(self, microsteps: int) -> None:
-        self.finalize_calls.append(int(microsteps))
-        if len(self.raw_microstep_gradients) != int(microsteps):
-            raise RuntimeError("fake local microstep count mismatch")
-        self.gradient = np.mean(
-            np.stack(self.raw_microstep_gradients), axis=0, dtype=np.float32,
-        )
-
     def apply_sync_tile_capacity(self, exact_count: int) -> None:
         self.apply_sync_capacity_calls.append(int(exact_count))
         self.gradient.fill(0.0)
-        self.raw_microstep_gradients.clear()
 
     def clear_sync_collectives_for_replay(self) -> None:
         self.clear_sync_calls = getattr(self, "clear_sync_calls", 0) + 1
@@ -119,27 +109,11 @@ class _FakeBackend:
     def inject_sync_tile_overflow(self, exact_count: int) -> None:
         self.injected_overflow = int(exact_count)
 
-    def supports_packed_gradient_transport(self) -> bool:
-        return True
-
-    def packed_gradient_state(self) -> np.ndarray:
-        return self.gradient.copy()
-
-    def packed_gradient_layout(self):
-        return {"parameter": (0, 2), "total_floats": 2}
-
-    def reduce_packed_gradients_into(self, per_rank, output) -> None:
-        output[:] = np.mean(np.stack(per_rank), axis=0, dtype=np.float32)
-
-    def set_packed_gradient_state(self, values: np.ndarray) -> None:
-        self.gradient = np.array(values, dtype=np.float32, copy=True)
-
     def optimizer_step(self, step: int) -> None:
         del step
         self.moment = self.gradient.copy()
         self.parameter -= self.gradient
         self.gradient.fill(0.0)
-        self.raw_microstep_gradients.clear()
 
     def set_collect_geometry_grad_stats(self, enabled: bool) -> None:
         self._collect_geometry_grad_stats = bool(enabled)
@@ -202,53 +176,11 @@ class _FakeBackend:
         self.closed = True
 
 
-class _PackedFakeBackend(_FakeBackend):
-    def __init__(self, rank: int) -> None:
+class _PairExchangeFakeBackend(_FakeBackend):
+    def __init__(self, rank):
         super().__init__()
         self.rank = int(rank)
-        self.packed_reduction_outputs: list[int] = []
-        self.packed_download_arenas: list[int] = []
-        self.packed_downloads = 0
-        self.packed_uploads = 0
 
-    def supports_packed_gradient_transport(self) -> bool:
-        return True
-
-    def packed_gradient_state(self) -> np.ndarray:
-        self.packed_downloads += 1
-        arena = self.gradient.copy()
-        self.packed_download_arenas.append(id(arena))
-        return arena
-
-    def packed_gradient_layout(self):
-        return {
-            "abi_version": 1,
-            "sh_layout": "native_reordered_padded_float4",
-            "parameter": (0, 2),
-            "total_floats": 2,
-        }
-
-    def reduce_packed_gradients_into(self, per_rank, output) -> None:
-        self.packed_reduction_outputs.append(id(output))
-        for index in range(output.size):
-            value = np.float32(0.0)
-            for rank_values in per_rank:
-                if rank_values.dtype != np.float32 or not np.isfinite(rank_values[index]):
-                    raise RuntimeError("packed reducer requires finite float32 inputs")
-                value = np.float32(value + rank_values[index])
-            output[index] = np.float32(value / np.float32(len(per_rank)))
-
-    def set_packed_gradient_state(self, values: np.ndarray) -> None:
-        self.packed_uploads += 1
-        self.gradient = np.array(values, dtype=np.float32, copy=True)
-
-
-class _MissingPackedBackend(_FakeBackend):
-    def supports_packed_gradient_transport(self) -> bool:
-        return False
-
-
-class _PairExchangeFakeBackend(_PackedFakeBackend):
     _condition = threading.Condition()
     _gradients: dict[int, dict[int, np.ndarray]] = {}
     _statistics: dict[int, dict[int, np.ndarray]] = {}
@@ -290,6 +222,13 @@ class _PairExchangeFakeBackend(_PackedFakeBackend):
             ),
         }
 
+    def join_pair_session(self, leader) -> None:
+        self.session_leader = leader
+
+    def abort_pair_session(self, reason) -> None:
+        with self._condition:
+            self._condition.notify_all()
+
     def configure_pair_exchange_gpu_merge(
         self, *, sparse: bool, codec_policy: str = "auto_exact",
     ) -> None:
@@ -323,9 +262,9 @@ class _PairExchangeFakeBackend(_PackedFakeBackend):
         }
 
     def optimizer_step_pair_exchange_gpu_merge(
-        self, step: int, timestamps: tuple[float, ...],
+        self, step: int, rank0_timestamp: float, rank1_timestamp: float,
     ):
-        self.assert_timestamp_count = len(timestamps)
+        self.assert_timestamp_count = 2
         self.gradient = np.mean(
             np.stack(self.peer_gradients), axis=0,
             dtype=np.float32,
@@ -389,10 +328,10 @@ class _OverflowOncePairExchangeFakeBackend(_PairExchangeFakeBackend):
         return super().exchange_pair_gradient(rank=rank, generation=generation)
 
     def optimizer_step_pair_exchange_gpu_merge(
-        self, step: int, timestamps: tuple[float, ...],
+        self, step: int, rank0_timestamp: float, rank1_timestamp: float,
     ):
         self.optimizer_calls += 1
-        return super().optimizer_step_pair_exchange_gpu_merge(step, timestamps)
+        return super().optimizer_step_pair_exchange_gpu_merge(step, rank0_timestamp, rank1_timestamp)
 
 
 class _StalePairExchangeFakeBackend(_PairExchangeFakeBackend):
@@ -403,6 +342,21 @@ class _StalePairExchangeFakeBackend(_PairExchangeFakeBackend):
 
 
 class DistributedRuntimeTests(unittest.TestCase):
+    def test_phase_boundaries_recreate_session_and_preserve_timeout(self):
+        from unittest.mock import Mock
+        replicas = [_PairExchangeFakeBackend(0), _PairExchangeFakeBackend(1)]
+        for replica in replicas:
+            replica.begin_hard_separation = lambda: {"marginalized": 1, "kept": 1}
+            replica.resume_hard_separation = replica.begin_hard_separation
+        with SynchronousBackendGroup(replicas, collective_timeout_seconds=0.25) as group:
+            create = replicas[0].create_pair_exchange_gpu_merge_owner
+            replicas[0].create_pair_exchange_gpu_merge_owner = Mock(wraps=create)
+            group.begin_hard_separation()
+            group.resume_hard_separation()
+            calls = replicas[0].create_pair_exchange_gpu_merge_owner.call_args_list
+            self.assertEqual(len(calls), 2)
+            self.assertTrue(all(call.kwargs["timeout_seconds"] == 0.25 for call in calls))
+
     def test_main_phase_seed_is_the_train_seed(self):
         seed, train_iterations = 17, 30_000
         main_seed = sampling_phase_seed(
@@ -455,17 +409,16 @@ class DistributedRuntimeTests(unittest.TestCase):
             ),
         )
 
-    def test_k_view_sampler_returns_rank_major_global_slots(self):
+    def test_single_view_sampler_returns_one_rank_slot(self):
         actual = sample_rank_views(
-            seed=31, step=2, world_size=2, microsteps=2,
+            seed=31, step=2, world_size=2,
             num_views=11, sampling_policy="flat_epoch",
         )
         stream = np.concatenate([
             _flat_epoch_permutation(31, epoch, 11) for epoch in range(2)
         ])
-        self.assertEqual(actual, tuple(int(value) for value in stream[8:12]))
-        self.assertEqual(len(actual[0:2]), 2)
-        self.assertEqual(len(actual[2:4]), 2)
+        self.assertEqual(actual, tuple(int(value) for value in stream[4:6]))
+        self.assertEqual(len(actual), 2)
 
     def test_flat_epoch_permutation_is_cached_and_immutable(self):
         first = _flat_epoch_permutation(7, 3, 11)
@@ -481,14 +434,13 @@ class DistributedRuntimeTests(unittest.TestCase):
         self.assertEqual(DistributedConfig().sampling_policy, "flat_epoch")
         self.assertIn("flat_epoch", DISTRIBUTED_SAMPLING_POLICIES)
 
-    def test_distributed_plan_resolves_auto_only_to_hierarchical_host(self):
+    def test_distributed_plan_resolves_auto_only_to_pair_host(self):
         config = AppConfig()
         config.distributed.mode = "sync"
         config.distributed.backend = "auto"
         config.distributed.device_ids = [0, 1]
-        config.distributed.global_batch_size = 2
         plan = DistributedPlan.from_config(config)
-        self.assertEqual(plan.backend, "hierarchical_host")
+        self.assertEqual(plan.backend, "pair_host")
         self.assertEqual(
             plan.collective_algorithm, "pair_exchange_gpu_merge",
         )
@@ -544,10 +496,10 @@ class DistributedRuntimeTests(unittest.TestCase):
         self.assertIs(stream, _torch_random_sampler_stream(0, 6300, 1102))
         self.assertEqual(
             sample_rank_views(
-                seed=0, step=2, world_size=2, microsteps=2, num_views=6300,
+                seed=0, step=2, world_size=2, num_views=6300,
                 sampling_policy="torch_random_sampler", sample_count=10,
             ),
-            (4897, 5283, 2501, 4466),
+            (2563, 3579),
         )
 
     def test_torch_random_sampler_requires_phase_sample_count(self):
@@ -591,20 +543,18 @@ class DistributedRuntimeTests(unittest.TestCase):
         )
 
     def test_flat_epoch_keeps_every_prefix_globally_balanced(self):
-        for world_size, microsteps, steps, num_views in (
-            (1, 1, 53, 17),
-            (2, 1, 29, 17),
-            (3, 2, 11, 17),
-            (2, 4, 9, 17),
+        for world_size, steps, num_views in (
+            (1, 53, 17),
+            (2, 29, 17),
         ):
             with self.subTest(
-                world_size=world_size, microsteps=microsteps,
+                world_size=world_size,
             ):
                 counts = np.zeros(num_views, dtype=np.int64)
                 for step in range(steps):
                     selected = sample_rank_views(
                         seed=31, step=step, world_size=world_size,
-                        microsteps=microsteps, num_views=num_views,
+                        num_views=num_views,
                         sampling_policy="flat_epoch",
                     )
                     np.add.at(
@@ -681,24 +631,6 @@ class DistributedRuntimeTests(unittest.TestCase):
             )
             self.assertEqual(len(report["rank_results"]), 2)
 
-    def test_k2_accumulates_per_rank_then_collects_and_updates_once(self):
-        replicas = [_PairExchangeFakeBackend(0), _PairExchangeFakeBackend(1)]
-        with SynchronousBackendGroup(
-            replicas, local_microsteps=2, collective_sparse=True,
-        ) as group:
-            result = group.train_step((0, 2, 1, 3), step=5)
-            for replica in replicas:
-                np.testing.assert_array_equal(
-                    replica.parameter, [-2.5, -5.0],
-                )
-                np.testing.assert_array_equal(replica.moment, [2.5, 5.0])
-                self.assertEqual(replica.finalize_calls, [2])
-                # Exact K-view touched unions keep sparse eligible for P=2.
-                self.assertTrue(replica.collective_sparse)
-            self.assertEqual(result["views"], (0, 2, 1, 3))
-            self.assertAlmostEqual(result["loss"]["l1"], 2.5)
-            self.assertAlmostEqual(result["loss"]["reg_scale"], 0.5)
-
     def test_non_log_sync_step_skips_scalar_readback(self):
         replicas = [_PairExchangeFakeBackend(0), _PairExchangeFakeBackend(1)]
         with SynchronousBackendGroup(replicas) as group:
@@ -728,11 +660,11 @@ class DistributedRuntimeTests(unittest.TestCase):
             )
         self.assertEqual(shards, [(0, (10, 12, 14)), (1, (11, 13))])
 
-    def test_auto_maps_only_to_hierarchical_pair_exchange(self):
+    def test_auto_maps_only_to_pair_exchange(self):
         replicas = [_PairExchangeFakeBackend(0), _PairExchangeFakeBackend(1)]
         with SynchronousBackendGroup(replicas, transport="auto") as group:
             result = group.train_step((0, 2), step=0)
-            self.assertEqual(group.transport, "hierarchical_host")
+            self.assertEqual(group.transport, "pair_host")
             self.assertEqual(
                 group.collective_algorithm, "pair_exchange_gpu_merge",
             )
@@ -779,7 +711,7 @@ class DistributedRuntimeTests(unittest.TestCase):
     def test_removed_runtime_transport_values_are_rejected(self):
         for transport in ("packed_host", "host_mailbox", "device_group"):
             with self.subTest(transport=transport), self.assertRaisesRegex(
-                ValueError, "expected 'auto' or 'hierarchical_host'",
+                ValueError, "expected 'auto' or 'pair_host'",
             ):
                 SynchronousBackendGroup(
                     [

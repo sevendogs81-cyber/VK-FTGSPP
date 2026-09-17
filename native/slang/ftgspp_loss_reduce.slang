@@ -1,14 +1,16 @@
 #include "config.slang"
 #include "ftgspp_work_control.slang"
+#include "ftgspp_image_objective.slang"
 
 // Scalar counterpart of ssim.slang.  The first two outputs are already
 // weighted exactly like ssimBackward's L1 and SSIM gradients, so their sum is
 // the scalar objective whose derivative is consumed by the native backward.
 layout(binding=0) StructuredBuffer<float4> pixel_state;
 layout(binding=1) StructuredBuffer<uint32_t> reference_rgba;
-layout(binding=2) StructuredBuffer<float4> ssim_map;
-layout(binding=3) RWByteAddressBuffer loss_accum;
-layout(binding=4) StructuredBuffer<TileWorkControl> work_control;
+layout(binding=2) StructuredBuffer<uint32_t> validity_flags;
+layout(binding=3) StructuredBuffer<float4> ssim_map;
+layout(binding=4) RWByteAddressBuffer loss_accum;
+layout(binding=5) StructuredBuffer<TileWorkControl> work_control;
 
 struct Uniforms {
     uint image_width;
@@ -17,6 +19,12 @@ struct Uniforms {
     float ssim_grad_weight;
     // Matches ssim.slang: 0 none, 1 legacy lower clamp, 2 FTGSPP [0,1].
     uint prediction_clamp_mode;
+    uint objective_mode;
+    float background_r;
+    float background_g;
+    float background_b;
+    uint valid_pixel_count;
+    uint valid_window_count;
 };
 
 groupshared float l1_values[256];
@@ -36,27 +44,21 @@ void main(
     float ssim = 0.0f;
     if (pixel < count) {
         const uint packed = reference_rgba[pixel];
-        const float alpha = float(packed >> 24) / 255.0f;
-        const float3 reference = float3(
-            packed & 255u, (packed >> 8) & 255u, (packed >> 16) & 255u
-        ) / 255.0f;
-        const float3 raw_prediction = pixel_state[pixel].rgb;
-        const float3 prediction = u.prediction_clamp_mode == 1u
-            ? max(raw_prediction, float3(0.0f))
-            : (u.prediction_clamp_mode == 2u
-                ? clamp(raw_prediction, float3(0.0f), float3(1.0f))
-                : raw_prediction);
-        l1 = alpha * (
-            abs(prediction.x-reference.x) +
-            abs(prediction.y-reference.y) +
-            abs(prediction.z-reference.z)
-        ) * u.l1_weight;
+        const FTGSPPObjectivePixel objective = ftgspp_objective_pixel(
+            pixel_state[pixel], packed, u.objective_mode,
+            u.prediction_clamp_mode,
+            float3(u.background_r, u.background_g, u.background_b));
+        if ((validity_flags[pixel] & 1u) != 0u) {
+            l1 = (
+                abs(objective.prediction.x-objective.target.x) +
+                abs(objective.prediction.y-objective.target.y) +
+                abs(objective.prediction.z-objective.target.z)
+            ) * u.l1_weight;
+        }
 
         const uint x = pixel % u.image_width;
         const uint y = pixel / u.image_width;
-        if (x >= 5u && y >= 5u &&
-            x + 5u < u.image_width && y + 5u < u.image_height
-        ) {
+        if ((validity_flags[pixel] & 2u) != 0u) {
             float ssim_sum = 0.0f;
             [ForceUnroll]
             for (uint channel = 0; channel < 3u; ++channel)

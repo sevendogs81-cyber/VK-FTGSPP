@@ -20,12 +20,13 @@ endif()
 
 # Find required packages
 find_package(Vulkan REQUIRED)
-find_package(Python COMPONENTS Interpreter Development REQUIRED)
+set(PYBIND11_FINDPYTHON ON)
+find_package(Python 3.12 EXACT COMPONENTS Interpreter Development.Module REQUIRED)
 find_package(Threads REQUIRED)
 include(CTest)
 
 # Find pybind11
-find_package(pybind11 QUIET)
+find_package(pybind11 3.0.1 QUIET)
 if(NOT pybind11_FOUND)
     # If pybind11 is not found, download it
     message(STATUS "Downloading pybind11")
@@ -33,7 +34,7 @@ if(NOT pybind11_FOUND)
     FetchContent_Declare(
         pybind11
         GIT_REPOSITORY https://github.com/pybind/pybind11
-        GIT_TAG        v2.11.1
+        GIT_TAG        v3.0.1
         GIT_SHALLOW    TRUE
     )
     FetchContent_MakeAvailable(pybind11)
@@ -56,34 +57,21 @@ endif()
 
 # Source files
 set(SOURCES
-    src/buffer.cpp
-    src/scheduler.cpp
-    src/gs_pipeline.cpp
-    src/pipeline_ring.cpp
-    src/gs_renderer.cpp
-    src/gs_trainer.cpp
-    src/perf_timer.cpp
-    src/host_mailbox_owner.cpp
-    src/hierarchical_host_collective.cpp
-    src/sync_generation_state.cpp
-    src/python_bindings.cpp
-)
-
-set(HEADERS
-    src/config.h
-    src/buffer.h
-    src/scheduler.h
-    src/gs_pipeline.h
-    src/gs_renderer.h
-    src/gs_trainer.h
-    src/perf_timer.h
-    src/host_mailbox_owner.h
-    src/hierarchical_host_collective.h
-    src/sync_generation_state.h
+    src/device/buffer.cpp
+    src/render/scheduler.cpp
+    src/device/gs_pipeline.cpp
+    src/device/pipeline_ring.cpp
+    src/render/gs_renderer.cpp
+    src/training/gs_trainer.cpp
+    src/device/perf_timer.cpp
+    src/collective/host_mailbox_owner.cpp
+    src/collective/sync_generation_state.cpp
+    src/bindings/python_bindings.cpp
 )
 
 # Create the Python module
-pybind11_add_module(_ftgspp_vk ${SOURCES} ${HEADERS})
+pybind11_add_module(_ftgspp_vk ${SOURCES})
+target_include_directories(_ftgspp_vk PRIVATE src)
 
 # Link libraries
 target_link_libraries(_ftgspp_vk PRIVATE 
@@ -94,23 +82,22 @@ target_link_libraries(_ftgspp_vk PRIVATE
 )
 
 if(BUILD_TESTING)
-    add_executable(hierarchical_host_collective_test
-        tests/hierarchical_host_collective_test.cpp
-        src/hierarchical_host_collective.cpp
-        src/host_mailbox_owner.cpp
-        src/sync_generation_state.cpp
+    add_executable(pair_collective_test
+        tests/pair_collective_test.cpp
+        src/render/scheduler.cpp
+        src/collective/host_mailbox_owner.cpp
+        src/collective/sync_generation_state.cpp
     )
     target_include_directories(
-        hierarchical_host_collective_test PRIVATE src)
+        pair_collective_test PRIVATE src)
     target_link_libraries(
-        hierarchical_host_collective_test PRIVATE Threads::Threads)
+        pair_collective_test PRIVATE Threads::Threads)
     add_test(
-        NAME hierarchical_host_collective_contracts
-        COMMAND hierarchical_host_collective_test)
+        NAME pair_collective_contracts
+        COMMAND pair_collective_test)
 endif()
 
 # Compiler-specific options
-target_compile_definitions(_ftgspp_vk PRIVATE VERSION_INFO=${EXAMPLE_VERSION_INFO})
 if(FTGSPP_VULKAN_VALIDATION)
     target_compile_definitions(_ftgspp_vk PRIVATE ENABLE_VULKAN_VALIDATION_LAYER=1)
 endif()
@@ -131,4 +118,19 @@ set_target_properties(_ftgspp_vk PROPERTIES
 # dependencies on headless training servers.
 
 # Install target
-install(TARGETS _ftgspp_vk DESTINATION .)
+install(TARGETS _ftgspp_vk DESTINATION ftgspp)
+file(GLOB_RECURSE SHADER_SOURCES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/slang/*"
+    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/*")
+add_custom_command(
+    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/shaders/manifest.json"
+    COMMAND "${Python_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/compile_shaders.py"
+        --src "${CMAKE_CURRENT_SOURCE_DIR}/slang"
+        --dst "${CMAKE_CURRENT_BINARY_DIR}/shaders" --force
+    DEPENDS ${SHADER_SOURCES} "${CMAKE_CURRENT_SOURCE_DIR}/compile_shaders.py"
+    VERBATIM)
+add_custom_target(ftgspp_shaders ALL
+    DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/shaders/manifest.json")
+add_dependencies(_ftgspp_vk ftgspp_shaders)
+install(DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/shaders/"
+    DESTINATION ftgspp/shaders FILES_MATCHING PATTERN "*.spv" PATTERN "manifest.json")

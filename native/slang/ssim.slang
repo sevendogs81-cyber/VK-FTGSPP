@@ -2,6 +2,7 @@
 
 #include "config.slang"
 #include "ftgspp_work_control.slang"
+#include "ftgspp_image_objective.slang"
 
 #ifndef EXPORT_MODE
 #define EXPORT_MODE 0
@@ -31,20 +32,19 @@ static const uint SHARED_Y = BLOCK_Y + 2 * HALO;
 static const uint CONV_X = BLOCK_X;
 static const uint CONV_Y = SHARED_Y;
 
-static const float C1 = 0.01*0.01;
-static const float C2 = 0.03*0.03;
 static const uint numChannels = 3u;
 
 
 // Input/Output buffer declarations
 layout(binding=0) StructuredBuffer<float4> img1Buffer;
 layout(binding=1) StructuredBuffer<uint32_t> img2Buffer;
-layout(binding=2) RWStructuredBuffer<float4> ssimMapBuffer;
+layout(binding=2) StructuredBuffer<uint32_t> validityBuffer;
+layout(binding=3) RWStructuredBuffer<float4> ssimMapBuffer;
 #if EXPORT_MODE == EXPORT_MODE_VULKAN_FORWARD
-layout(binding=3) StructuredBuffer<TileWorkControl> work_control;
-#else
-layout(binding=3) RWStructuredBuffer<float4> dLdimg1Buffer;
 layout(binding=4) StructuredBuffer<TileWorkControl> work_control;
+#else
+layout(binding=4) RWStructuredBuffer<float4> dLdimg1Buffer;
+layout(binding=5) StructuredBuffer<TileWorkControl> work_control;
 #endif
 
 
@@ -65,6 +65,26 @@ struct Uniforms {
     // 0: no clamp (the affine color corrector already consumed a clamped
     //    renderer output), 1: legacy VkSplat lower clamp, 2: FTGSPP [0,1].
     uint predictionClampMode;
+    uint objectiveMode;
+    float backgroundR;
+    float backgroundG;
+    float backgroundB;
+    uint validPixelCount;
+    uint validWindowCount;
+    // Training SSIM uses data_range=1 (0.01^2 / 0.03^2). Hold-out SSIM_2
+    // uses data_range=2. Both share this kernel.
+    float ssimC1;
+    float ssimC2;
+}
+
+[ForceInline]
+bool isValidPixel(uint index) {
+    return (validityBuffer[index] & 1u) != 0u;
+}
+
+[ForceInline]
+bool isValidWindow(uint index) {
+    return (validityBuffer[index] & 2u) != 0u;
 }
 
 
@@ -83,6 +103,23 @@ float3 getPixelValue(
     if (predictionClampMode == 2u)
         return clamp(value, float3(0.0f), float3(1.0f));
     return value;
+}
+
+[ForceInline]
+FTGSPPObjectivePixel getObjectivePixel(
+    int x, int y, int w, int h, Uniforms uniforms)
+{
+    FTGSPPObjectivePixel empty;
+    empty.raw_prediction = float3(0.0f);
+    empty.prediction = float3(0.0f);
+    empty.target = float3(0.0f);
+    if (x < 0 || x >= w || y < 0 || y >= h)
+        return empty;
+    const int idx = y * w + x;
+    return ftgspp_objective_pixel(
+        img1Buffer[idx], img2Buffer[idx], uniforms.objectiveMode,
+        uniforms.predictionClampMode,
+        float3(uniforms.backgroundR, uniforms.backgroundG, uniforms.backgroundB));
 }
 
 [ForceInline]
@@ -143,14 +180,10 @@ void ssimForward(
                 int gy = int(tileStartY + localY) - int(HALO);
                 int gx = int(tileStartX + localX) - int(HALO);
                 
-                float alpha;
-                float val1 = getPixelValue(
-                    img1Buffer, gx, gy, imageWidth, imageHeight,
-                    uniforms.predictionClampMode)[ci];
-                float val2 = getPixelValue(img2Buffer, gx, gy, imageWidth, imageHeight, alpha)[ci];
-                
-                sTile[localY][localX][0] = val1 * alpha;
-                sTile[localY][localX][1] = val2 * alpha;
+                FTGSPPObjectivePixel objective = getObjectivePixel(
+                    gx, gy, imageWidth, imageHeight, uniforms);
+                sTile[localY][localX][0] = objective.prediction[ci];
+                sTile[localY][localX][1] = objective.target[ci];
             }
         }
         
@@ -261,7 +294,8 @@ void ssimForward(
         float dMdmu1 = 0.0;
         float dMdsigma1Sq = 0.0;
         float dMdsigma12 = 0.0;
-        if (pixX < imageWidth && pixY < imageHeight) {
+        if (pixX < imageWidth && pixY < imageHeight
+            && isValidWindow(pixId)) {
             float mu1 = out0;
             float mu2 = out2;
             float mu1Sq = mu1 * mu1;
@@ -270,6 +304,8 @@ void ssimForward(
             float sigma2Sq = out3 - mu2Sq;
             float sigma12 = out4 - mu1 * mu2;
             
+            const float C1 = uniforms.ssimC1;
+            const float C2 = uniforms.ssimC2;
             float A = mu1Sq + mu2Sq + C1;
             float B = sigma1Sq + sigma2Sq + C2;
             float C_ = 2.0f * mu1 * mu2 + C1;
@@ -285,6 +321,8 @@ void ssimForward(
             ssimMapBuffer[pixId*numChannels+ci] = float4(
                 float4(outSSIM, dMdmu1, dMdsigma1Sq, dMdsigma12)
             );
+        } else if (pixX < imageWidth && pixY < imageHeight) {
+            ssimMapBuffer[pixId*numChannels+ci] = float4(0.0f);
         }
 
     }
@@ -393,28 +431,34 @@ void ssimBackward(
             sum1 += sScratch[ly][lx][1] * wc;
             sum2 += sScratch[ly][lx][2] * wc;
             
-            float alpha;
-            const float rawP1 = img1Buffer[pixId][ci];
-            float p1 = float(getPixelValue(
-                img1Buffer, pixX, pixY, imageWidth, imageHeight,
-                uniforms.predictionClampMode)[ci]);
-            float p2 = float(getPixelValue(img2Buffer, pixX, pixY, imageWidth, imageHeight, alpha)[ci]);
-            p1 *= alpha; p2 *= alpha;
-            float g_l1 = sign(p1 - p2) * gradWeightL1;
+            FTGSPPObjectivePixel objective = getObjectivePixel(
+                pixX, pixY, imageWidth, imageHeight, uniforms);
+            const float rawP1 = objective.raw_prediction[ci];
+            const float p1 = objective.prediction[ci];
+            const float p2 = objective.target[ci];
+            float g_l1 = isValidPixel(pixId)
+                ? sign(p1 - p2) * gradWeightL1 : 0.0f;
             float g_ssim = (sum0 + (2.0f * p1) * sum1 + p2 * sum2) * gradWeightSSIM;
-            float clampDerivative = 1.0f;
-            if (uniforms.predictionClampMode == 1u)
-                clampDerivative = rawP1 > 0.0f ? 1.0f : 0.0f;
-            else if (uniforms.predictionClampMode == 2u)
-                // torch.clamp propagates at the exact endpoints.
-                clampDerivative = rawP1 >= 0.0f && rawP1 <= 1.0f ? 1.0f : 0.0f;
-            // Both prediction and reference are premultiplied by the RGBA
-            // alpha in the scalar objective, so chain the same alpha here.
-            float dLdpix = (g_l1 + g_ssim) * alpha * clampDerivative;
+            float dLdpix = (g_l1 + g_ssim)
+                * ftgspp_clamp_derivative(rawP1, uniforms.predictionClampMode);
+            const float3 background = float3(
+                uniforms.backgroundR, uniforms.backgroundG, uniforms.backgroundB);
+            const bool composite = ftgspp_is_composite_objective(
+                uniforms.objectiveMode);
             
-            if (ci == 0) dLdimg1Buffer[pixId] = float4(float4(dLdpix, 0, 0, 0));
-            else if (ci == 1) dLdimg1Buffer[pixId].y = float(dLdpix);
-            else if (ci == 2) dLdimg1Buffer[pixId].z = float(dLdpix);
+            if (ci == 0) dLdimg1Buffer[pixId] = float4(
+                dLdpix, 0, 0,
+                composite ? dLdpix * background.x : 0.0f);
+            else if (ci == 1) {
+                dLdimg1Buffer[pixId].y = dLdpix;
+                if (composite)
+                    dLdimg1Buffer[pixId].w += dLdpix * background.y;
+            }
+            else if (ci == 2) {
+                dLdimg1Buffer[pixId].z = dLdpix;
+                if (composite)
+                    dLdimg1Buffer[pixId].w += dLdpix * background.z;
+            }
         }
         
         GroupMemoryBarrierWithGroupSync();

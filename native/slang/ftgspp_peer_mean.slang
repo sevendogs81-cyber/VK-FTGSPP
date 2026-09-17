@@ -23,7 +23,7 @@ void main(uint3 tid : SV_DispatchThreadID, uniform PeerMeanUniforms u)
     const float b = peer_gradient[u.peer_offset + i];
     // Keep the production reduction branch-free and bandwidth-bound. A
     // non-finite input propagates to the loss/replica validation boundary;
-    // packed_host remains the eager per-element finite-checking reference.
+    // numerical test references perform eager finite checks.
     if (u.reset != 0u) {
         local_gradient[u.local_offset + i] = b * u.peer_weight;
     } else {

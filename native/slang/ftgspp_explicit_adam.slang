@@ -59,9 +59,8 @@ void ftgspp_adam(
     x -= lr * m_hat / (sqrt(v_hat) + eps);
 }
 
-// This intentionally keeps the 192-byte push-constant ABI of the old fused
-// pipeline.  It lets the public single-card entry point dispatch backward and
-// Adam with one shared uniform construction.
+// Keep the shared backward/Adam push-constant ABI. It lets the public
+// single-card entry point dispatch backward and Adam with one construction.
 struct FTGSPPBackwardUniforms
 {
     uint32_t step;
@@ -180,7 +179,8 @@ void main(uint3 tid : SV_DispatchThreadID, uniform FTGSPPBackwardUniforms unifor
         g_times_durations[m1] = m;
         g_times_durations[m2] = v;
     }
-    {
+    // The hard-phase optimizer does not own velocity/gate parameters or moments.
+    if (uniforms.reserved0 < 0.5f) {
         float4 x = velocities_gates[idx];
         float4 m = g_velocities_gates[m1];
         float4 v = g_velocities_gates[m2];

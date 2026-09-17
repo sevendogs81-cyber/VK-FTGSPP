@@ -8,8 +8,8 @@ uint active_sh_float_count(uint active_sh) {
 
 // Version 2 records carry only SH coefficients active at the current step.
 // Full degree 3 remains 66 words for backwards capacity planning.
-uint record_words(uint active_sh) {
-    return 18u + active_sh_float_count(active_sh);
+uint record_words(uint active_sh, bool hard_phase) {
+    return 18u + active_sh_float_count(active_sh) - (hard_phase ? 4u : 0u);
 }
 
 struct SparseGradientUniforms
@@ -30,10 +30,8 @@ layout(binding=1) RWStructuredBuffer<int> active_flags;
 void main(uint3 tid : SV_DispatchThreadID, uniform SparseGradientUniforms u)
 {
     const uint id = tid.x;
-    // Cleared once per local generation. Every microstep only promotes zero to
-    // one, yielding the exact K-view touched union entirely on GPU.
-    if (id < u.num_splats && tiles_touched[id] != 0)
-        active_flags[id] = 1;
+    if (id < u.num_splats)
+        active_flags[id] = tiles_touched[id] != 0 ? 1 : 0;
 }
 #elif SPARSE_GRADIENT_PHASE == 1
 layout(binding=0) StructuredBuffer<int> active_flags;
@@ -63,13 +61,15 @@ void main(uint3 tid : SV_DispatchThreadID, uniform SparseGradientUniforms u)
         return;
     // The existing GPU cumsum is inclusive. Subtracting one gives the
     // exclusive active rank and guarantees records are strictly ID-sorted.
-    uint word = (inclusive - 1u) * record_words(u.active_sh);
+    uint word = (inclusive - 1u) * record_words(u.active_sh, u.reserved != 0u);
     records.Store(word++ * 4u, id);
     for (uint j = 0; j < 3; ++j) store_float(word++, grad_mean[3u*id+j]);
     for (uint j = 0; j < 4; ++j) store_float(word++, grad_scale_opacity[4u*id+j]);
     for (uint j = 0; j < 2; ++j) store_float(word++, grad_time_duration[2u*id+j]);
-    for (uint j = 0; j < 4; ++j)
-        store_float(word++, grad_velocity_gate[4u*id+j]);
+    if (u.reserved == 0u) {
+        for (uint j = 0; j < 4; ++j)
+            store_float(word++, grad_velocity_gate[4u*id+j]);
+    }
     const uint lane = id % SH_REORDER_SIZE;
     const uint block = id - lane;
     const uint sh_floats = active_sh_float_count(u.active_sh);
@@ -79,36 +79,6 @@ void main(uint3 tid : SV_DispatchThreadID, uniform SparseGradientUniforms u)
         store_float(word++, grad_sh[4u*float4_index + component % 4u]);
     }
     for (uint j = 0; j < 4; ++j) store_float(word++, grad_rotation[4u*id+j]);
-}
-#elif SPARSE_GRADIENT_PHASE == 2
-layout(binding=0) RWStructuredBuffer<float> grad_mean;
-layout(binding=1) RWStructuredBuffer<float> grad_scale_opacity;
-layout(binding=2) RWStructuredBuffer<float> grad_time_duration;
-layout(binding=3) RWStructuredBuffer<float> grad_velocity_gate;
-layout(binding=4) RWStructuredBuffer<float> grad_sh;
-layout(binding=5) RWStructuredBuffer<float> grad_rotation;
-
-[shader("compute")]
-[numthreads(256, 1, 1)]
-void main(uint3 tid : SV_DispatchThreadID, uniform SparseGradientUniforms u)
-{
-    const uint id = tid.x;
-    if (id >= u.num_splats)
-        return;
-    const float scale = 1.0f / float(max(u.world_size, 1u));
-    for (uint j = 0; j < 3; ++j) grad_mean[3u*id+j] *= scale;
-    for (uint j = 0; j < 4; ++j) grad_scale_opacity[4u*id+j] *= scale;
-    for (uint j = 0; j < 2; ++j) grad_time_duration[2u*id+j] *= scale;
-    for (uint j = 0; j < 4; ++j)
-        grad_velocity_gate[4u*id+j] *= scale;
-    const uint lane = id % SH_REORDER_SIZE;
-    const uint block = id - lane;
-    for (uint coefficient = 0; coefficient < 12; ++coefficient) {
-        const uint float4_index = 12u*block + coefficient*SH_REORDER_SIZE + lane;
-        for (uint channel = 0; channel < 4; ++channel)
-            grad_sh[4u*float4_index+channel] *= scale;
-    }
-    for (uint j = 0; j < 4; ++j) grad_rotation[4u*id+j] *= scale;
 }
 #else
 layout(binding=0) ByteAddressBuffer records;
@@ -128,7 +98,7 @@ void main(uint3 tid : SV_DispatchThreadID, uniform SparseGradientUniforms u)
     const uint record = tid.x;
     if (record >= u.peer_count)
         return;
-    uint word = record * record_words(u.active_sh);
+    uint word = record * record_words(u.active_sh, u.reserved != 0u);
     const uint id = records.Load(word++ * 4u);
     if (id >= u.num_splats)
         return;
@@ -151,10 +121,12 @@ void main(uint3 tid : SV_DispatchThreadID, uniform SparseGradientUniforms u)
         precise float dest = grad_time_duration[2u*id+j];
         grad_time_duration[2u*id+j] = dest + contrib;
     }
-    for (uint j = 0; j < 4; ++j) {
-        precise float contrib = scale * load_float(word++);
-        precise float dest = grad_velocity_gate[4u*id+j];
-        grad_velocity_gate[4u*id+j] = dest + contrib;
+    if (u.reserved == 0u) {
+        for (uint j = 0; j < 4; ++j) {
+            precise float contrib = scale * load_float(word++);
+            precise float dest = grad_velocity_gate[4u*id+j];
+            grad_velocity_gate[4u*id+j] = dest + contrib;
+        }
     }
     const uint lane = id % SH_REORDER_SIZE;
     const uint block = id - lane;
