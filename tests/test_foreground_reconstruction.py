@@ -879,3 +879,82 @@ def test_locked_final_test_cli_uses_selected_model_identity_without_mutation(
     assert identity["selection_manifest"] == str(selection_path.resolve())
     assert identity["color_correction"] == "disabled_for_novel_final_test_cameras"
     assert selection_path.read_bytes() == selection_before
+
+
+def test_holdout_eval_cli_does_not_apply_trained_color_corrector(
+    tmp_path, monkeypatch,
+):
+    from ftgspp import cli as cli_module
+
+    run = tmp_path / "run"
+    run.mkdir()
+    model_path = run / "gaussians.npz"
+    model_path.write_bytes(b"holdout-model")
+    model_hash = hashlib.sha256(model_path.read_bytes()).hexdigest()
+    (run / "export_selection.json").write_text(json.dumps({
+        "step": 11,
+        "model_sha256": model_hash,
+        "color_correction": {"artifact": "must-not-be-opened.npz"},
+    }), encoding="utf-8")
+    config = SimpleNamespace(
+        run=SimpleNamespace(
+            output_path=run, view_rgb_cache=1, view_load_workers=0,
+        ),
+        train=SimpleNamespace(
+            iterations=20, color_correction=True,
+        ),
+        data=SimpleNamespace(test_manifest=None),
+    )
+    holdout_scene = SimpleNamespace(
+        name="holdout",
+        eval_views=[object()],
+        evaluation_identity=None,
+        checkpoint_metadata=lambda: {"fingerprint": "training"},
+    )
+    observed = {}
+
+    class Runner:
+        def __init__(self, actual_config):
+            assert actual_config is config
+        def _preflight(self):
+            return holdout_scene
+        def _evaluate(self, backend, dataset, step):
+            observed["dataset"] = dataset
+            observed["step"] = step
+            observed["color_correction"] = config.train.color_correction
+
+    class Backend:
+        def __init__(self, device, *, honor_device_env):
+            observed["device"] = device
+            assert honor_device_env is False
+        def configure(self, actual_config, extent):
+            assert actual_config is config and extent == 1.0
+        def upload_dataset(self, dataset, **options):
+            assert dataset is holdout_scene
+        def upload_model(self, model):
+            assert model == "model"
+        def restore_optimizer(self, _state):
+            observed["restored_optimizer"] = True
+        def set_color_params(self, _params):
+            raise AssertionError("hold-out eval must not install learned camera rows")
+        def close(self):
+            observed["closed"] = True
+
+    monkeypatch.setattr(cli_module, "load_run_config", lambda path: config)
+    monkeypatch.setattr("ftgspp.training.runner.NativeRunner", Runner)
+    monkeypatch.setattr("ftgspp.training.backend.NativeVulkanBackend", Backend)
+    monkeypatch.setattr("ftgspp.training.backend.camera_extent", lambda scene: 1.0)
+    monkeypatch.setattr("ftgspp.io.checkpoint.load_model", lambda path: "model")
+    monkeypatch.setattr(
+        "ftgspp.io.checkpoint.latest_checkpoint",
+        lambda path: None,
+    )
+    cli_module.main(["eval", "--run", str(run), "--device", "1"])
+
+    assert observed == {
+        "device": 1,
+        "dataset": holdout_scene,
+        "step": 11,
+        "color_correction": True,
+        "closed": True,
+    }

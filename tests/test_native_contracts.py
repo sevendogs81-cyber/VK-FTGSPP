@@ -572,6 +572,20 @@ class NativeContractTests(unittest.TestCase):
         self.assertIn("complete_eval_metrics", holdout)
         self.assertNotIn("ssim_workspace", holdout)
         self.assertNotIn("_psnr(", holdout)
+        self.assertNotIn("_color_correction_enabled", holdout)
+        self.assertIn("begin(int(view_index), False)", holdout)
+        render_eval = backend[
+            backend.index("def render_eval(") : backend.index("def render_components(")
+        ]
+        self.assertIn("begin(int(view_index), False)", render_eval)
+        self.assertNotIn("_color_correction_enabled", render_eval)
+        components = backend[
+            backend.index("def render_components(") : backend.index(
+                "def evaluate_holdout_view("
+            )
+        ]
+        self.assertNotIn("_color_correction_enabled", components)
+        self.assertIn("begin(int(view_index), bool(apply_color_correction))", components)
         evaluation = runner[
             runner.index("def _evaluate(") : runner.index("def _optimizer_update(")
         ]

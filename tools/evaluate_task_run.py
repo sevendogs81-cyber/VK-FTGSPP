@@ -14,10 +14,7 @@ import uuid
 
 from ftgspp.config.compose import load_config
 from ftgspp.io.checkpoint import load_model
-from ftgspp.io.export_selection import (
-    load_export_selection,
-    restore_exported_color_correction,
-)
+from ftgspp.io.export_selection import load_export_selection
 from ftgspp.training.backend import NativeVulkanBackend, camera_extent
 from ftgspp.training.runner import NativeRunner, primary_metric_name
 
@@ -72,7 +69,6 @@ def main() -> None:
     temporary = output.parent / (
         f".{output.name}.{uuid.uuid4().hex}.metrics.jsonl"
     )
-    color_digest: str | None = None
     try:
         metadata = backend.device_metadata()
         backend.configure(config, camera_extent(dataset))
@@ -82,10 +78,6 @@ def main() -> None:
             workers=int(config.run.view_load_workers),
         )
         backend.upload_model(load_model(model_path))
-        if config.train.color_correction:
-            color_digest = restore_exported_color_correction(
-                backend, run, selection, dataset,
-            )
         metrics = runner._evaluate(
             backend,
             dataset,
@@ -109,7 +101,8 @@ def main() -> None:
         "model_sha256": model_digest,
         "config_sha256": _sha256(config_path),
         "selection_sha256": _sha256(selection_path),
-        "color_snapshot_sha256": color_digest,
+        "color_snapshot_sha256": None,
+        "color_correction": "disabled_for_holdout_cameras",
         "selected_step": int(selection.get(
             "step", config.train.iterations - 1,
         )),

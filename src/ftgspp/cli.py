@@ -14,7 +14,6 @@ from ftgspp.config.compose import load_run_config, resolve_config
 from ftgspp.io.export_selection import (
     export_selection_path,
     load_export_selection,
-    restore_exported_color_correction,
 )
 
 _PREPARE_SUBCOMMANDS = {
@@ -255,10 +254,6 @@ def main(argv: list[str] | None = None) -> None:
             backend.restore_optimizer(snapshot.optimizer)
             if str(snapshot.metadata.get("phase", "")).startswith("hard_separation"):
                 backend.resume_hard_separation()
-        if selection and not final_test:
-            restore_exported_color_correction(
-                backend, args.run, selection, dataset,
-            )
         if final_test:
             identity = dict(dataset.evaluation_identity or {})
             identity.update({

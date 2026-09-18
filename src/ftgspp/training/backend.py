@@ -296,13 +296,11 @@ class NativeVulkanBackend:
         self._bound_train_index: int | None = None
         self._num_gaussians = 0
         self._image_objective = "scene_rgb_v1"
-        self._color_correction_enabled = False
 
     def configure(self, config, scene_extent: float) -> None:
         lrs, schedules = config.train.lrs, config.train.lr_schedules
         self.max_duration = float(config.model.max_duration)
         self._image_objective = str(config.pipeline.image_objective)
-        self._color_correction_enabled = bool(config.train.color_correction)
         self.native.configure_ftgspp({
             "max_steps": int(config.train.iterations),
             "max_sh_degree": int(config.init.sh_degree),
@@ -960,12 +958,11 @@ class NativeVulkanBackend:
         if callable(begin) and callable(submit) and callable(complete):
             if callable(drain):
                 drain()
-            begin(int(view_index), bool(self._color_correction_enabled))
+            # Hold-out cameras report raw raster RGB even when CC is trained.
+            begin(int(view_index), False)
             submit()
             return np.asarray(complete(), dtype=np.float32)
-        self.native.render_dynamic_val_view(
-            int(view_index), bool(self._color_correction_enabled),
-        )
+        self.native.render_dynamic_val_view(int(view_index), False)
         copy_rgb = getattr(self.native, "copy_pixel_rgb", None)
         if callable(copy_rgb):
             return np.asarray(copy_rgb(), dtype=np.float32)
@@ -990,16 +987,12 @@ class NativeVulkanBackend:
             if all(callable(method) for method in (begin, submit, complete)):
                 if callable(drain):
                     drain()
-                begin(int(view_index), bool(
-                    apply_color_correction or self._color_correction_enabled
-                ))
+                begin(int(view_index), bool(apply_color_correction))
                 submit()
                 state = np.asarray(complete(), dtype=np.float32)
             else:
                 self.native.render_dynamic_val_view(
-                    int(view_index), bool(
-                        apply_color_correction or self._color_correction_enabled
-                    ),
+                    int(view_index), bool(apply_color_correction),
                 )
                 state = np.array(
                     self.native.pixel_state, dtype=np.float32, copy=True,
@@ -1055,7 +1048,8 @@ class NativeVulkanBackend:
             )
         if callable(drain):
             drain()
-        begin(int(view_index), bool(self._color_correction_enabled))
+        # Known validation cameras never consume trained per-camera affines.
+        begin(int(view_index), False)
         gpu = dict(complete_metrics((float(color[0]), float(color[1]), float(color[2]))))
         required = (
             "squared_error_sum",

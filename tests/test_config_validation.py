@@ -120,6 +120,20 @@ class StaticConfigValidationTests(unittest.TestCase):
         self.assertIsNone(config.init.da3.min_consistent_views)
         self.assertIsNone(config.init.da3.use_sky_mask)
 
+    def test_official_training_preset_matches_freetimegs_plus_plus(self):
+        config = resolve_config(OmegaConf.create({
+            "data": {"root": "scene"},
+        }), base_dir=ROOT).config
+        self.assertEqual(config.train.relocation.start, 500)
+        self.assertEqual(config.train.relocation.stop, 25000)
+        self.assertEqual(config.train.relocation.every, 100)
+        self.assertAlmostEqual(config.train.lrs["velocity_model"], 1.6e-3)
+        short = resolve_config(OmegaConf.create({
+            "data": {"root": "scene"},
+            "train": {"iterations": 20000},
+        }), base_dir=ROOT).config
+        self.assertEqual(short.train.relocation.stop, 20000)
+
     def test_foreground_profile_keeps_alpha_source_and_fixed_background(self):
         config = resolve_config(OmegaConf.create({
             "pipeline": {"mode": "foreground"},

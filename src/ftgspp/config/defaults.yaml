@@ -109,7 +109,7 @@ train:
   export_best: true
   relocation:
     start: 500
-    stop: ${ftgspp_min:29000,${train.iterations}}
+    stop: ${ftgspp_min:25000,${train.iterations}}
     every: 100
     opacity_threshold: 0.005
     mode: 3d_mcmc
@@ -124,7 +124,7 @@ train:
     sh_n: 0.000125
     durations: 0.005
     times: 0.00016
-    velocity_model: 0.00016
+    velocity_model: 0.0016
     marginal_gates: 0.001
     color_correctors: 0.001
   lr_schedules:

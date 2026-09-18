@@ -2,7 +2,7 @@
 
 Produces per-frame PSNR, SSIM_2 and LPIPS-VGG with the existing benchmark's
 [0,1], normalize=False LPIPS convention. Uses only held-out eval views, never
-fits color correction to them, and closes Vulkan before starting VGG.
+applies trained color correction to them, and closes Vulkan before starting VGG.
 """
 from __future__ import annotations
 
@@ -48,26 +48,12 @@ def main():
         raise ValueError("no held-out evaluation views")
     workspace = _EvalSsimWorkspace()
     pairs, rows = [], []
-    color_hash = None
     backend = NativeVulkanBackend(args.device, honor_device_env=False)
     try:
         metadata = backend.device_metadata()
         backend.configure(config, camera_extent(dataset))
         backend.upload_dataset(dataset, rgb_cache=64, workers=8)
         backend.upload_model(load_model(model_path))
-        if config.train.color_correction:
-            color_info = selection["color_correction"]
-            color_path = run / color_info["artifact"]
-            color_hash = hashlib.sha256(color_path.read_bytes()).hexdigest()
-            if (color_info.get("sha256") is not None
-                    and color_hash != color_info["sha256"]):
-                raise ValueError("color correction snapshot hash mismatch")
-            with np.load(color_path) as color:
-                if int(color["snapshot_step"]) != int(selection["step"]):
-                    raise ValueError("color correction snapshot step mismatch")
-                if list(map(int, color["camera_ids"])) != sorted(map(int, dataset.cameras)):
-                    raise ValueError("color correction camera map mismatch")
-                backend.set_color_params(color["params"])
         for index, view in enumerate(dataset.eval_views):
             pred = np.clip(np.asarray(backend.render_eval(index), np.float32), 0, 1)
             reference = view.load_rgb()[..., :3].astype(np.float32) / 255.0
@@ -90,7 +76,8 @@ def main():
     result = {
         "run": str(run), "model_sha256": model_hash,
         "config_sha256": hashlib.sha256((run / "config.resolved.yaml").read_bytes()).hexdigest(),
-        "color_snapshot_sha256": color_hash,
+        "color_snapshot_sha256": None,
+        "color_correction": "disabled_for_holdout_cameras",
         "step": selection["step"], "selection_source": selection["source"],
         "protocol": "scene_rgb_v1", "ssim_variant": "SSIM_2", "ssim_data_range": 2.0,
         "lpips_convention": "VGG [0,1] normalize=False (legacy benchmark convention)",

@@ -79,6 +79,7 @@ def test_resolved_plan_scales_once_and_is_immutable(tmp_path, policy, factor):
     raw = node(mode="sync", device_ids=[0, 2], world_size_lr_scaling=policy)
     plan = resolve_config(raw, base_dir=tmp_path)
     assert plan.config.train.lrs["means"] == pytest.approx(0.00016 * factor)
+    assert plan.config.train.lrs["velocity_model"] == pytest.approx(0.0016 * factor)
     with pytest.raises(dataclasses.FrozenInstanceError):
         plan.yaml = ""
     copy = plan.config

@@ -212,8 +212,8 @@ public:
         config.quats_lr = 1e-3f;
         config.times_lr = 1.6e-4f;
         config.durations_lr = 5e-3f;
-        config.velocities_lr = 1.6e-4f;
-        config.velocities_lr_final = 1.6e-6f;
+        config.velocities_lr = 1.6e-3f;
+        config.velocities_lr_final = 1.6e-5f;
         config.gates_lr = 1e-3f;
         config.scale_reg = 1e-2f;
         config.opacity_reg = 1e-2f;
