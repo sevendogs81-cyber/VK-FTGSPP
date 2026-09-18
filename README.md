@@ -28,14 +28,17 @@ The core wheel is Torch-free. Optional extras add Torch only when you ask.
 ## Installation
 
 ```bash
-git clone https://github.com/sevendogs81-cyber/FastGS.git
+git clone git@github.com:sevendogs81-cyber/FastGS.git
 cd FastGS
 bash scripts/setup.sh
 source .venv/bin/activate
 ```
 
-That script installs missing headers, pins Slang 2026.10 and uv 0.11.29 to the
-same versions as CI, creates `.venv`, builds the native wheel, and runs
+The repository is **private**: HTTPS clone without a GitHub login fails. Use SSH
+(or `gh auth login` plus HTTPS) on an account that can read the repo.
+
+That script installs missing headers, pins Slang 2026.10 (and uv 0.11.29 if
+`uv` is missing), creates `.venv`, builds the native wheel, and runs
 `ftgspp doctor`. Keep the venv activated for every later `ftgspp` command.
 Manual steps and troubleshooting are in [docs/install.md](docs/install.md).
 

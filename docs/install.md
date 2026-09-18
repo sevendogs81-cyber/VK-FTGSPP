@@ -3,11 +3,14 @@
 The usual path is one script from a clone:
 
 ```bash
-git clone https://github.com/sevendogs81-cyber/FastGS.git
+git clone git@github.com:sevendogs81-cyber/FastGS.git
 cd FastGS
 bash scripts/setup.sh
 source .venv/bin/activate
 ```
+
+The repository is **private**. `git clone https://github.com/sevendogs81-cyber/FastGS.git`
+fails without GitHub credentials. SSH, or HTTPS after `gh auth login`, is required.
 
 Building the wheel compiles C++ and every shader. That step does **not** need
 a GPU. `ftgspp doctor`, `train`, and `eval` do. CUDA ordinals and Vulkan
@@ -23,10 +26,11 @@ the wheel only provides the `ftgspp` command.
 
 1. Installs `build-essential` and `libvulkan-dev` with `apt-get` when they are
    missing (unless `--skip-apt`).
-2. Downloads Slang **2026.10** to `$HOME/.local/slang-2026.10` and checks the
-   same tarball checksum as CI (`beddadd9b481…`).
-3. Installs [uv](https://docs.astral.sh/uv/) **0.11.29** if it is not on
-   `PATH`.
+2. Downloads Slang **2026.10** to `$HOME/.local/slang-2026.10` when `slangc`
+   2026.10 is not already on `PATH`, and checks the same tarball checksum as
+   CI (`beddadd9b481…`).
+3. Installs [uv](https://docs.astral.sh/uv/) **0.11.29** only if `uv` is not
+   already on `PATH`.
 4. Creates `.venv` with Python **3.12.x**, appends Slang to that venv's
    `activate` script, then `uv pip install .`.
 5. Runs `ftgspp doctor --devices 0` unless `--skip-doctor`.
@@ -44,7 +48,7 @@ Use this only if you cannot run `scripts/setup.sh`. The pins must stay the
 same.
 
 ```bash
-git clone https://github.com/sevendogs81-cyber/FastGS.git
+git clone git@github.com:sevendogs81-cyber/FastGS.git
 cd FastGS
 
 sudo apt-get update
@@ -76,10 +80,12 @@ separate `dist/` step.
 ## Troubleshooting
 
 The JSON `name` from `doctor` should be an NVIDIA GPU, not `llvmpipe`. Use
-that object's `device_id` as `--devices`. Doctor opens a real device; it fails
-on a CPU-only build machine even when the wheel compiled. `scripts/setup.sh`
-treats a doctor failure as a warning so a CPU host can still finish the
-install.
+that object's `device_id` as `--devices`. CUDA ordinals from `nvidia-smi` and
+Vulkan ids often differ: on a two-GPU Linux host, Vulkan index `1` can be
+`llvmpipe` while `nvidia-smi` GPU `1` is the second NVIDIA card. Doctor opens
+a real device; it fails on a CPU-only build machine even when the wheel
+compiled. `scripts/setup.sh` treats a doctor failure as a warning so a CPU
+host can still finish the install.
 
 If `slangc: not found`, Python/CMake cannot find 3.12, or Vulkan headers are
 missing, stop and fix that step. Do not pass `--devices` with two ids: the
