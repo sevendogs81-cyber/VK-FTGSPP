@@ -23,6 +23,7 @@ but is in development and not a supported user path.
 - `native/src/bindings`: NumPy/Python boundary; `common` holds native configuration.
 - `native/slang` and `native/shaders/radix_sort`: shader source only.
 - `tests/reference`: numerical reference implementations, not installed runtime.
+- `scripts/setup.sh`: one-command user install. Pins match the artifact workflow.
 - `tools`: unsupported research helpers for dataset baking, TensorBoard and
   monitoring. Official evaluation is `ftgspp eval`.
 

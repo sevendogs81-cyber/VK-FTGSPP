@@ -47,7 +47,7 @@ sdist.include = [
     "native/**/*.comp", "native/**/*.glsl", "native/*.py", "native/CMakeLists.txt",
     "native/shaders/radix_sort/LICENSE", "src/**/*.py", "src/**/*.yaml",
     "tests/**/*.py", "tools/*.py", "tools/README.md",
-    "docs/architecture.md", "docs/migration.md",
+    "docs/*.md", "scripts/setup.sh", "scripts/README.md",
     "examples/*.yaml", "examples/*.json",
     ".github/workflows/*.yml", "LICENSE", "LICENSES/*", "THIRD_PARTY.md",
     "CONTRIBUTING.md", "uv.lock",
