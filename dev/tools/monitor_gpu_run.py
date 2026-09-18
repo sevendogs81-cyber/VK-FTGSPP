@@ -2,7 +2,7 @@
 """Poll nvidia-smi (+ optional train_metrics) into CSV / JSONL / text log beside a run.
 
 Example (run in a second tmux pane while training):
-  python tools/monitor_gpu_run.py \\
+  python dev/tools/monitor_gpu_run.py \\
     --run-dir /path/to/run \\
     --interval 5 \\
     --gpus 0,1

@@ -5,7 +5,7 @@ Reuses the native runtime geometry / undistort maps so training with
 ``data.scale=1.0`` and zero distortion only needs JPEG decode (no remap).
 
 Example:
-  python tools/bake_undistort_images.py \\
+  python dev/tools/bake_undistort_images.py \\
     --source /path/to/dataset \\
     --output /path/to/dataset_undistorted \\
     --scale 1.0 --jpeg-quality 90 --workers 16 --start 0 --stop 300
@@ -349,7 +349,7 @@ def main() -> int:
     data_yaml = args.write_data_yaml
     if data_yaml is None:
         data_yaml = (
-            Path(__file__).resolve().parents[1]
+            Path(__file__).resolve().parents[2]
             / "configs"
             / "data"
             / f"{args.data_name}.yaml"

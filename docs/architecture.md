@@ -5,7 +5,7 @@ loads a shared Scene/Camera/View manifest, initializes or resumes explicit
 Gaussians, trains, then exports. This is a fixed sequence, not a configurable
 stage list. Evaluation and PLY export consume explicit model/state outputs.
 The first community release documents **one-device** training. Two-device pair
-transport remains in the tree (native collective, `tests/gpu/`, GPU workflow)
+transport remains in the tree (native collective, `dev/tests/gpu/`, GPU workflow)
 but is in development and not a supported user path.
 
 - `src/ftgspp/config`: schema, path rules, immutable ResolvedRunPlan and validation.
@@ -22,9 +22,9 @@ but is in development and not a supported user path.
 - `native/src/collective`: session-scoped pair transport and generation state.
 - `native/src/bindings`: NumPy/Python boundary; `common` holds native configuration.
 - `native/slang` and `native/shaders/radix_sort`: shader source only.
-- `tests/reference`: numerical reference implementations, not installed runtime.
+- `dev/tests/reference`: numerical reference implementations, not installed runtime.
 - `scripts/setup.sh`: one-command user install. Pins match the artifact workflow.
-- `tools`: unsupported research helpers for dataset baking, TensorBoard and
+- `dev/tools`: unsupported research helpers for dataset baking, TensorBoard and
   monitoring. Official evaluation is `ftgspp eval`.
 
 ## Initialization decision tree

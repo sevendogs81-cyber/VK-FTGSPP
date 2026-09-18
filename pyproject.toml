@@ -46,7 +46,7 @@ sdist.include = [
     "native/**/*.cpp", "native/**/*.h", "native/**/*.slang",
     "native/**/*.comp", "native/**/*.glsl", "native/*.py", "native/CMakeLists.txt",
     "native/shaders/radix_sort/LICENSE", "src/**/*.py", "src/**/*.yaml",
-    "tests/**/*.py", "tools/*.py", "tools/README.md",
+    "dev/tests/**/*.py", "dev/tools/*.py", "dev/tools/README.md", "dev/README.md",
     "docs/*.md", "scripts/setup.sh", "scripts/README.md",
     "examples/*.yaml", "examples/*.json",
     ".github/workflows/*.yml", "LICENSE", "LICENSES/*", "THIRD_PARTY.md",
@@ -62,8 +62,8 @@ sdist.exclude = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
-pythonpath = ["src", "."]
+testpaths = ["dev/tests"]
+pythonpath = ["src", "dev"]
 markers = ["gpu: requires a compatible NVIDIA Vulkan GPU"]
 
 [tool.pyright]

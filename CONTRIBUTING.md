@@ -15,10 +15,10 @@ behavior tests together.
 
 The supported surface is the installed CLI plus the YAML keys documented in
 README, `docs/usage.md`, and `docs/architecture.md`, on **one GPU**. Two-device
-pair code, `tests/gpu/` scripts, and `.github/workflows/gpu.yml` stay in the
+pair code, `dev/tests/gpu/` scripts, and `.github/workflows/gpu.yml` stay in the
 tree for engineering; they are in development and not a user-facing
-first-release path. `tools/` scripts are unsupported research helpers and may
-change without notice.
+first-release path. `dev/tools/` scripts are unsupported research helpers and
+may change without notice.
 
 Do not commit generated SPIR-V, extension binaries, datasets, weights, runs, or
 the local-only notes `docs/foreground_reconstruction_plan.md`,

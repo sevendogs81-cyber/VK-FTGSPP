@@ -320,7 +320,7 @@ class NativeRuntimeTests(unittest.TestCase):
         self.assertIn("property float motion_2", header)
 
     def test_native_runtime_sources_do_not_import_torch_or_cuda(self):
-        root = Path(__file__).resolve().parents[1] / "src" / "ftgspp"
+        root = Path(__file__).resolve().parents[2] / "src" / "ftgspp"
         # Optional LPIPS/DA3 plugins may import Torch lazily; the core must not.
         paths = [
             path for path in root.rglob("*.py")

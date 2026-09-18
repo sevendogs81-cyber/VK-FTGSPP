@@ -1,6 +1,6 @@
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 SLANG_VERSION = "2026.10"
 SLANG_TARBALL = f"slang-{SLANG_VERSION}-linux-x86_64-glibc-2.27.tar.gz"
 SLANG_SHA256 = "beddadd9b48151aa2d7b556056ea02b9826bde59d4d4fa827b33c5184e42a983"

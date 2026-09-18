@@ -175,7 +175,7 @@ ftgspp eval --run data/my_scene/runs/my_foreground_scene --device 0 \
 See [examples/final_test_manifest.example.json](../examples/final_test_manifest.example.json).
 Validation rejects any camera/frame, path, or RGB hash already used by
 training or checkpoint selection. Official evaluation is `ftgspp eval`.
-Scripts under `tools/` are unsupported research helpers.
+Scripts under `dev/tools/` are unsupported research helpers.
 
 Optional extras: `[da3]`, `[lpips]`, `[birefnet]`, `[foreground]` (BiRefNet +
 LPIPS family together), `[tensorboard]`. LPIPS is never part of the training
@@ -192,6 +192,6 @@ ftgspp prepare selfcap --scene-root <scene> --init-backend da3 --write-config sc
 
 Passing two `--devices` values is not a supported first-release workflow.
 The CLI still accepts it so engineering scripts keep working, and prints a
-warning. Pair transport, `tests/gpu/check_pair_equivalence.py`,
-`tests/gpu/smoke_sync_multi_gpu.py`, and `.github/workflows/gpu.yml` remain
+warning. Pair transport, `dev/tests/gpu/check_pair_equivalence.py`,
+`dev/tests/gpu/smoke_sync_multi_gpu.py`, and `.github/workflows/gpu.yml` remain
 in the repository for that work.

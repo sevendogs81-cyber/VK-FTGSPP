@@ -6,7 +6,7 @@ and may change without notice. Official evaluation is `ftgspp eval`.
 Run them from a checkout with `src/` on `PYTHONPATH`, for example:
 
 ```bash
-PYTHONPATH=src python tools/evaluate_task_run.py --help
+PYTHONPATH=src python dev/tools/evaluate_task_run.py --help
 ```
 
 ## Evaluation

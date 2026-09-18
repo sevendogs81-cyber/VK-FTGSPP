@@ -13,5 +13,5 @@ source .venv/bin/activate
 `--skip-doctor` skips the GPU check (useful on a CPU build machine).
 `--device N` is the Vulkan id passed to doctor, not an `nvidia-smi` ordinal.
 
-Research helpers under `tools/` are unsupported and are not part of this
+Research helpers under `dev/tools/` are unsupported and are not part of this
 install path.

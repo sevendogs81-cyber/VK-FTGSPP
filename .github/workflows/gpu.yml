@@ -26,14 +26,14 @@ jobs:
         run: |
           set -- $DEVICES
           cd "$RUNNER_TEMP"
-          PYTHONPATH="$GITHUB_WORKSPACE" "$RUNNER_TEMP/ftgspp-gpu/bin/python" -m unittest tests.test_gpu_foreground_numeric -v
+          PYTHONPATH="$GITHUB_WORKSPACE/dev" "$RUNNER_TEMP/ftgspp-gpu/bin/python" -m unittest tests.test_gpu_foreground_numeric -v
           cd "$GITHUB_WORKSPACE"
-          "$RUNNER_TEMP/ftgspp-gpu/bin/python" tests/gpu/smoke_native.py --device "$1"
-          "$RUNNER_TEMP/ftgspp-gpu/bin/python" tests/gpu/check_pair_equivalence.py --devices $DEVICES
-          "$RUNNER_TEMP/ftgspp-gpu/bin/python" tests/gpu/check_composite_overflow_replay.py --devices $DEVICES
+          "$RUNNER_TEMP/ftgspp-gpu/bin/python" dev/tests/gpu/smoke_native.py --device "$1"
+          "$RUNNER_TEMP/ftgspp-gpu/bin/python" dev/tests/gpu/check_pair_equivalence.py --devices $DEVICES
+          "$RUNNER_TEMP/ftgspp-gpu/bin/python" dev/tests/gpu/check_composite_overflow_replay.py --devices $DEVICES
           for codec in auto_exact dense sorted_sparse; do
             for mode in partial_copy exact_copy 3d_mcmc; do
-              "$RUNNER_TEMP/ftgspp-gpu/bin/python" tests/gpu/smoke_sync_multi_gpu.py --devices $DEVICES --codec "$codec" --relocation-mode "$mode"
+              "$RUNNER_TEMP/ftgspp-gpu/bin/python" dev/tests/gpu/smoke_sync_multi_gpu.py --devices $DEVICES --codec "$codec" --relocation-mode "$mode"
             done
           done
-          "$RUNNER_TEMP/ftgspp-gpu/bin/python" tests/gpu/run_pipeline_acceptance.py --devices $DEVICES --steps 100 --output "$RUNNER_TEMP/ftgspp-run-$GITHUB_RUN_ID"
+          "$RUNNER_TEMP/ftgspp-gpu/bin/python" dev/tests/gpu/run_pipeline_acceptance.py --devices $DEVICES --steps 100 --output "$RUNNER_TEMP/ftgspp-run-$GITHUB_RUN_ID"

@@ -7,7 +7,7 @@ It is not a library you `import`.
 
 **First release trains on one GPU.** One view produces one optimizer update.
 Two-device synchronous training is **in development**: the pair code,
-`tests/gpu/` scripts, and the controlled GPU workflow stay in the tree for
+`dev/tests/gpu/` scripts, and the controlled GPU workflow stay in the tree for
 engineering, but they are not a supported user path. Local gradient
 accumulation is not part of the interface.
 
@@ -80,8 +80,7 @@ FastGS/
 ├── docs/              # install, usage, architecture
 ├── src/ftgspp/        # Python CLI, installed as `ftgspp`
 ├── native/            # Vulkan + Slang sources compiled into the wheel
-├── tests/             # engineering contracts, not a user path
-└── tools/             # unsupported research helpers
+└── dev/               # tests and research tools; not a user path
 ```
 
 ## Development

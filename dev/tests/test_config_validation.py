@@ -12,7 +12,7 @@ from ftgspp.config.compose import resolve_config
 from ftgspp.config.validate import compute_derived_fields, validate_static_config
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def _valid_config() -> AppConfig:
