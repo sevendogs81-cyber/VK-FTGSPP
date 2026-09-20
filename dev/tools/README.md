@@ -25,4 +25,4 @@ PYTHONPATH=src python dev/tools/evaluate_task_run.py --help
 - `subsample_ply.py` — point-cloud thinning.
 - `monitor_gpu_run.py` — `nvidia-smi` sampler beside a training run.
 - `audit_selfcap_initialization.py` — read-only replay of recorded SelfCap
-  initialization (`ftgspp-init-l3-v3` and historical v1/v2 manifests).
+  initialization (`ftgspp-init-l3-v4` and historical v1/v2/v3 manifests).

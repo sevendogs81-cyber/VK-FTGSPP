@@ -69,7 +69,7 @@ def _pipeline_profile_defaults(config: DictConfig) -> DictConfig:
     The profile is deliberately applied between package defaults and the user
     node. A community user only selects ``pipeline.mode``; controlled
     background-policy and initializer overrides remain explicit. Foreground
-    always uses the composite_v1 / foreground_v1 contract.
+    uses carving by default with the composite_v1 / foreground_v1 contract.
     """
 
     mode = str(OmegaConf.select(config, "pipeline.mode", default="scene"))
@@ -88,7 +88,11 @@ def _pipeline_profile_defaults(config: DictConfig) -> DictConfig:
     ):
         masks["manifest_path"] = "${data.root}/manifests/masks.json"
     init_profile: dict[str, object] = {
-        "backend": "auto",
+        "backend": "carving",
+        "points_path": (
+            "${data.root}/points_vhull_ibr_stride"
+            "${init.keyframe_stride}"
+        ),
         "da3": {
             "cache_path": (
                 "${data.root}/points_da3_foreground_stride"
@@ -100,8 +104,7 @@ def _pipeline_profile_defaults(config: DictConfig) -> DictConfig:
     }
     profile: dict[str, object] = {
         "data": {"masks": masks},
-        # Auto may reuse only a provenance-checked foreground point set;
-        # arbitrary scene PLYs are never consumed implicitly.
+        # Carving consumes only a provenance-checked visual-hull point set.
         "init": init_profile,
         "train": {"background": {"mode": "random_solid"}},
         "eval": {

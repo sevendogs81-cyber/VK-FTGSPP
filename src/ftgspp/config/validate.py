@@ -7,7 +7,7 @@ from ftgspp.config.schema import AppConfig, DEFAULT_FPS
 RELOCATION_MODES = {"partial_copy", "exact_copy", "3d_mcmc"}
 PIPELINE_MODES = {"scene", "foreground"}
 SCORE_MODES = {"default", "gate_included"}
-INIT_BACKENDS = {"auto", "points", "da3"}
+INIT_BACKENDS = {"auto", "carving", "point_filtering", "points", "da3"}
 MASK_SOURCES = {"none", "external", "alpha"}
 RGB_ENCODINGS = {"straight", "premultiplied"}
 BACKGROUND_MODES = {"fixed", "random_solid"}
@@ -160,9 +160,12 @@ def validate_static_config(config: AppConfig) -> None:
             raise ValueError(
                 "pipeline.mode=foreground requires mandatory external or alpha masks"
             )
-        if config.init.backend in {"auto", "da3"} and not bool(
-            config.init.da3.foreground_only
-        ):
+        if config.init.backend == "auto":
+            raise ValueError(
+                "pipeline.mode=foreground requires an explicit init.backend: "
+                "carving (default), point_filtering, points, or da3"
+            )
+        if config.init.backend == "da3" and not bool(config.init.da3.foreground_only):
             raise ValueError(
                 "pipeline.mode=foreground requires foreground-aware DA3 initialization"
             )
@@ -247,11 +250,24 @@ def validate_static_config(config: AppConfig) -> None:
             f"unsupported init.backend: {config.init.backend} "
             f"(expected one of {sorted(INIT_BACKENDS)})"
         )
-    if config.init.backend == "points" and config.init.points_path is None:
-        raise ValueError("init.points_path is required when init.backend=points")
+    if config.init.backend in {"points", "point_filtering"} and config.init.points_path is None:
+        raise ValueError(
+            f"init.points_path is required when init.backend={config.init.backend}"
+        )
+    if config.init.backend in {"carving", "point_filtering"}:
+        if pipeline_mode != "foreground":
+            raise ValueError(
+                f"init.backend={config.init.backend} requires pipeline.mode=foreground"
+            )
+        if config.init.points_path is None:
+            raise ValueError(
+                f"init.points_path is required when init.backend={config.init.backend}"
+            )
     da3 = config.init.da3
     if not str(da3.model_name) and da3.model_path is None:
-        raise ValueError("init.da3.model_name must not be empty when init.backend=da3")
+        raise ValueError(
+            "DA3-backed initialization requires init.da3.model_name or model_path"
+        )
     if str(da3.quality) not in DA3_QUALITIES:
         raise ValueError(
             f"unsupported init.da3.quality: {da3.quality} "

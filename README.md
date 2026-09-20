@@ -17,30 +17,35 @@ and [third-party notices](THIRD_PARTY.md) before use or redistribution.
 
 ## Requirements
 
-- Linux x86_64 and an NVIDIA driver that exposes Vulkan compute
+- Linux x86_64 and an NVIDIA GPU driver with Vulkan compute support
 - **Python 3.12.x** (3.11 and 3.13 will fail the native build)
-- C++17 compiler (`g++`) and Vulkan headers/loader (`libvulkan-dev`)
+- `build-essential`, `git`, `curl`, `libvulkan-dev`, and `libglm-dev`
 - Slang **2026.10** with `slangc` on `PATH` (the setup script pins this)
-- [uv](https://docs.astral.sh/uv/) (CI uses 0.11.29)
+- [uv](https://docs.astral.sh/uv/) **0.11.29**
 
-The core wheel is Torch-free. Optional extras add Torch only when you ask.
+`ftgspp doctor` is the authoritative GPU compatibility check. Native training
+requires 32-lane subgroups, shader Int16/Int64, timeline semaphores, and Vulkan
+float32 buffer atomic add support.
 
 ## Installation
 
 ```bash
-git clone git@github.com:sevendogs81-cyber/FastGS.git
+git clone https://github.com/sevendogs81-cyber/FastGS.git
 cd FastGS
 bash scripts/setup.sh
 source .venv/bin/activate
 ```
 
-The repository is **private**: HTTPS clone without a GitHub login fails. Use SSH
-(or `gh auth login` plus HTTPS) on an account that can read the repo.
+The default is the lightweight, Torch-free Vulkan training runtime for users
+with prepared masks and PLYs. Starting from raw RGB instead uses:
 
-That script installs missing headers, pins Slang 2026.10 (and uv 0.11.29 if
-`uv` is missing), creates `.venv`, builds the native wheel, and runs
-`ftgspp doctor`. Keep the venv activated for every later `ftgspp` command.
-Manual steps and troubleshooting are in [docs/install.md](docs/install.md).
+```bash
+bash scripts/setup.sh --with-init
+```
+
+That adds BiRefNet-HR and DA3. `--with-birefnet` and `--with-da3` install only
+one preparation capability. Full component requirements are in
+[docs/install.md](docs/install.md).
 
 ## First training run
 
@@ -53,18 +58,25 @@ data/my_capture/images/<camera_id>/<numeric-frame>.(png|jpg|...)
 
 ```bash
 ftgspp prepare dataset --images data/my_capture/images --fps 30 --eval-cameras 3
-ftgspp train --config data/my_capture/ftgspp.yaml --devices 0
 ```
 
-`prepare` writes a starter YAML and prints the next `train` command. Replace
+`prepare` writes a starter YAML and prints the required initialization step.
+Replace
 `3` with a hold-out camera that already exists under `images/`, or omit
 `--eval-cameras`. `--devices` is the Vulkan id from `ftgspp doctor`, not
 `nvidia-smi`.
 
-`init.backend: auto` needs a complete keyframe RGB PLY set under
-`data/my_capture/points_stride10/`, or the optional DA3 stack. Without
-either, training stops at initialization. Full data rules, resume, eval,
+Scene-mode `init.backend: auto` needs a complete keyframe RGB PLY set under
+`data/my_capture/points_stride10/`, or DA3 installed with `--with-da3` or
+`--with-init`. Without prepared PLYs or locally/network-accessible DA3 weights,
+training stops with an explicit initialization error. Full data rules, resume, eval,
 export, foreground, and extras: [docs/usage.md](docs/usage.md).
+
+After the configured point source exists:
+
+```bash
+ftgspp train --config data/my_capture/ftgspp.yaml --devices 0
+```
 
 ## Next
 
@@ -89,7 +101,7 @@ FastGS/
 ## Development
 
 ```bash
-uv sync --python 3.12 --extra dev --no-install-project
+uv sync --locked --python 3.12 --extra dev --no-install-project
 uv run --no-sync pytest
 ```
 

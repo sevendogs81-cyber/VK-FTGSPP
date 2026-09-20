@@ -207,13 +207,22 @@ def _write_config(
         if mask_root is not None:
             masks["root"] = rel(mask_root)
         data["masks"] = masks
+    keyframe_stride = min(10, len(frames))
+    init: dict[str, object] = {
+        "seed": 0,
+        "keyframe_stride": keyframe_stride,
+    }
+    if pipeline == "foreground":
+        init.update({
+            "backend": "carving",
+            "points_path": rel(
+                root / f"points_vhull_ibr_stride{keyframe_stride}"
+            ),
+        })
     node = {
         "pipeline": {"mode": pipeline},
         "data": data,
-        "init": {
-            "seed": 0,
-            "keyframe_stride": min(10, len(frames)),
-        },
+        "init": init,
         "run": {"output_path": rel(output.parent / "runs" / name)},
     }
     OmegaConf.save(OmegaConf.create(node), output)
@@ -339,7 +348,24 @@ def main(argv: list[str] | None = None) -> None:
     )
     print(f"dataset manifest: {manifest}")
     print(f"starter config: {config}")
-    print(f"train: ftgspp train --config {config}")
+    if args.pipeline == "foreground":
+        stride = min(10, len(frames))
+        point_output = root / f"points_vhull_ibr_stride{stride}"
+        if args.mask_source == "external":
+            print(
+                "masks: ftgspp prepare masks "
+                f"--images {images} --output {root / 'masks' / 'birefnet_hr'}"
+            )
+        print(
+            "points: ftgspp prepare points --method carving "
+            f"--config {config} --output {point_output}"
+        )
+    else:
+        print(
+            "initialize: provide points_stride*/fXXXXXX.ply or configure the "
+            "DA3 route"
+        )
+    print(f"train after initialization: ftgspp train --config {config}")
 
 
 if __name__ == "__main__":

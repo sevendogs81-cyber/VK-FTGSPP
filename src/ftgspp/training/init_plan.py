@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import copy
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, is_dataclass, replace
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 from ftgspp.io.provenance import stage_identity
 
-
 L1_ALGORITHM = "ftgspp-da3-l1-v1"
 L2_ALGORITHM = "ftgspp-da3-l2-v3"
-L3_ALGORITHM = "ftgspp-init-l3-v3"
+L3_ALGORITHM = "ftgspp-init-l3-v4"
 
 L1_SOURCE_FILES = (
     "src/ftgspp/optional/da3.py",

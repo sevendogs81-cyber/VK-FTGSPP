@@ -54,6 +54,7 @@ jobs:
                   "tests/test_gpu_foreground_numeric.py",
                   "examples/foreground_scene.yaml",
                   "examples/foreground_fixed_black.yaml",
+                  "examples/foreground_point_filtering.yaml",
                   "examples/foreground_visual_hull.yaml",
                   "examples/final_test_manifest.example.json",
               ):

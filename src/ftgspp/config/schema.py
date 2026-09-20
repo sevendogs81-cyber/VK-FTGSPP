@@ -168,9 +168,10 @@ class DA3InitConfig:
 
 @dataclass
 class InitConfig:
-    # ``auto`` keeps the configured PLY path when it is complete and falls
-    # back to DA3 only when a keyframe cloud is missing.  ``points`` and
-    # ``da3`` make the source explicit for reproducible runs.
+    # Scene-only ``auto`` uses the configured PLY set, then DA3. Foreground
+    # mode requires an explicit source: ``carving`` (default),
+    # ``point_filtering``, ``points``, or ``da3``. The first two require a
+    # versioned preparation manifest recording the selected method.
     backend: str = "auto"
     points_path: Path | None = MISSING
     keyframe_stride: int = MISSING

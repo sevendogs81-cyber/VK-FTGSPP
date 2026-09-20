@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import io
 import os
 from pathlib import Path
+from typing import Literal, overload
 
 import numpy as np
 
@@ -17,14 +20,38 @@ PLY_TYPES = {
 }
 
 
-def read_point_ply(path: Path) -> tuple[np.ndarray, np.ndarray]:
+@overload
+def read_point_ply(
+    path: Path, *, return_sha256: Literal[False] = False,
+) -> tuple[np.ndarray, np.ndarray]: ...
+
+
+@overload
+def read_point_ply(
+    path: Path, *, return_sha256: Literal[True],
+) -> tuple[np.ndarray, np.ndarray, str]: ...
+
+
+def read_point_ply(
+    path: Path,
+    *,
+    return_sha256: bool = False,
+) -> tuple[np.ndarray, np.ndarray] | tuple[np.ndarray, np.ndarray, str]:
+    """Read an RGB PLY, optionally hashing the same bytes in the same pass."""
+
+    digest = hashlib.sha256() if return_sha256 else None
     with path.open("rb") as stream:
-        if stream.readline().strip() != b"ply":
+        raw = stream.readline()
+        if digest is not None:
+            digest.update(raw)
+        if raw.strip() != b"ply":
             raise ValueError(f"invalid PLY: {path}")
         fmt, count, current = None, None, None
         properties: list[tuple[str, str]] = []
         while True:
             raw = stream.readline()
+            if digest is not None:
+                digest.update(raw)
             if not raw:
                 raise ValueError(f"missing PLY end_header: {path}")
             line = raw.decode("ascii").strip()
@@ -48,24 +75,56 @@ def read_point_ply(path: Path) -> tuple[np.ndarray, np.ndarray]:
         required = {"x", "y", "z", "red", "green", "blue"}
         if missing := required - {name for name, _ in properties}:
             raise ValueError(f"PLY {path} is missing {sorted(missing)}")
+        payload = None
+        if digest is not None:
+            payload = stream.read()
+            digest.update(payload)
         if fmt == "ascii":
-            matrix = np.loadtxt(stream, max_rows=count, ndmin=2)
+            matrix = np.loadtxt(
+                io.BytesIO(payload) if payload is not None else stream,
+                max_rows=count, ndmin=2,
+            )
             values = {name: matrix[:, index] for index, (name, _) in enumerate(properties)}
         elif fmt in {"binary_little_endian", "binary_big_endian"}:
             order = "<" if fmt == "binary_little_endian" else ">"
             dtype = np.dtype([(name, order + PLY_TYPES[kind]) for name, kind in properties])
-            vertices = np.fromfile(stream, dtype=dtype, count=count)
+            vertices = (
+                np.frombuffer(payload, dtype=dtype, count=count)
+                if payload is not None
+                else np.fromfile(stream, dtype=dtype, count=count)
+            )
+            if len(vertices) != count:
+                raise ValueError(
+                    f"PLY {path} contains {len(vertices)} vertices, expected {count}"
+                )
             values = {name: vertices[name] for name, _ in properties}
         else:
             raise ValueError(f"unsupported PLY format: {fmt}")
     xyz = np.stack([values[axis] for axis in "xyz"], axis=1).astype(np.float32)
     rgb = np.stack([values[name] for name in ("red", "green", "blue")], axis=1).astype(np.uint8)
+    if digest is not None:
+        return xyz, rgb, digest.hexdigest()
     return xyz, rgb
+
+
+@overload
+def write_point_ply(
+    path: Path, xyz: np.ndarray, rgb: np.ndarray, *, allow_empty: bool = False,
+    return_sha256: Literal[False] = False,
+) -> Path: ...
+
+
+@overload
+def write_point_ply(
+    path: Path, xyz: np.ndarray, rgb: np.ndarray, *, allow_empty: bool = False,
+    return_sha256: Literal[True],
+) -> tuple[Path, str]: ...
 
 
 def write_point_ply(
     path: Path, xyz: np.ndarray, rgb: np.ndarray, *, allow_empty: bool = False,
-) -> Path:
+    return_sha256: bool = False,
+) -> Path | tuple[Path, str]:
     """Write an RGB point cloud in the compact PLY format accepted by FTGSPP.
 
     DA3 produces dense per-pixel points rather than a source PLY.  Keeping the
@@ -103,21 +162,48 @@ def write_point_ply(
         "property uchar red", "property uchar green", "property uchar blue",
         "end_header",
     ]
+    encoded_header = ("\n".join(header) + "\n").encode("ascii")
     with path.open("wb") as stream:
-        stream.write(("\n".join(header) + "\n").encode("ascii"))
+        stream.write(encoded_header)
         vertices.tofile(stream)
+    if return_sha256:
+        digest = hashlib.sha256(encoded_header)
+        digest.update(memoryview(vertices).cast("B"))
+        return path, digest.hexdigest()
     return path
+
+
+@overload
+def write_point_ply_atomic(
+    path: Path, xyz: np.ndarray, rgb: np.ndarray, *, allow_empty: bool = False,
+    return_sha256: Literal[False] = False,
+) -> Path: ...
+
+
+@overload
+def write_point_ply_atomic(
+    path: Path, xyz: np.ndarray, rgb: np.ndarray, *, allow_empty: bool = False,
+    return_sha256: Literal[True],
+) -> tuple[Path, str]: ...
 
 
 def write_point_ply_atomic(
     path: Path, xyz: np.ndarray, rgb: np.ndarray, *, allow_empty: bool = False,
-) -> Path:
+    return_sha256: bool = False,
+) -> Path | tuple[Path, str]:
     """Write a point cloud completely before making it visible at ``path``."""
 
     path = Path(path)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
-        write_point_ply(temporary, xyz, rgb, allow_empty=allow_empty)
+        written = (
+            write_point_ply(
+                temporary, xyz, rgb, allow_empty=allow_empty,
+                return_sha256=True,
+            )
+            if return_sha256 else
+            write_point_ply(temporary, xyz, rgb, allow_empty=allow_empty)
+        )
         os.replace(temporary, path)
     finally:
         # ``os.replace`` removes the temporary on success.  On an interrupted
@@ -126,6 +212,9 @@ def write_point_ply_atomic(
             temporary.unlink()
         except FileNotFoundError:
             pass
+    if return_sha256:
+        assert isinstance(written, tuple)
+        return path, written[1]
     return path
 
 

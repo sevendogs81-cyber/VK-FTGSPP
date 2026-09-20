@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import unittest
+import hashlib
 import json
 import tempfile
+import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -37,6 +38,10 @@ class _Dataset:
     def view(frame: int, _camera_id: int) -> _View:
         return _View(float(frame))
 
+    @staticmethod
+    def checkpoint_metadata() -> dict[str, str]:
+        return {"fingerprint": "test-dataset"}
+
 
 def _chunks() -> dict[str, list[np.ndarray]]:
     return {name: [] for name in (
@@ -47,15 +52,52 @@ def _chunks() -> dict[str, list[np.ndarray]]:
 
 
 class InitializeSamplingTests(unittest.TestCase):
-    def test_foreground_auto_rejects_unversioned_user_points(self):
+    def test_carving_requires_a_versioned_manifest(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             self.assertTrue(_valid_prepared_point_manifest(
                 root, _Dataset(), [0],
             ))
             self.assertFalse(_valid_prepared_point_manifest(
+                root, _Dataset(), [0], expected_method="carving",
+            ))
+
+    def test_carving_backend_requires_a_carving_manifest(self):
+        from ftgspp.io.provenance import source_identity
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ply = root / "f000000.ply"
+            ply.write_bytes(b"test-ply")
+            manifest = {
+                "schema": "ftgspp-visual-hull-ibr-v2",
+                "method": "carving",
+                "dataset_fingerprint": "test-dataset",
+                "source_identity": {
+                    "set_sha256": source_identity()["set_sha256"],
+                },
+                "rows": [{
+                    "frame": 0,
+                    "ply": ply.name,
+                    "ply_sha256": hashlib.sha256(ply.read_bytes()).hexdigest(),
+                }],
+            }
+            manifest_path = root / "manifest.json"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            (root / "completed.json").write_text(json.dumps({
+                "schema": "ftgspp-visual-hull-ibr-v2",
+                "manifest_sha256": hashlib.sha256(
+                    manifest_path.read_bytes(),
+                ).hexdigest(),
+                "keyframes": 1,
+            }), encoding="utf-8")
+
+            self.assertTrue(_valid_prepared_point_manifest(
                 root, _Dataset(), [0],
-                require_foreground_compatibility=True,
+                expected_method="carving",
+            ))
+            self.assertFalse(_valid_prepared_point_manifest(
+                root, _Dataset(), [0], expected_method="point_filtering",
             ))
 
     def test_adaptive_budget_is_exact_capacity_aware_and_linear_time(self):
@@ -217,6 +259,8 @@ class InitializeSamplingTests(unittest.TestCase):
         self.assertEqual(diagnostics["strategy"], "adaptive_surface_grid")
         self.assertGreaterEqual(float(diagnostics["occupied_fraction"]), 0.8)
         self.assertEqual(diagnostics["fallback_points"], 0)
+        self.assertLessEqual(diagnostics["voxel_search_full_passes"], 7)
+        self.assertLessEqual(diagnostics["voxel_search_sample_points"], 8192)
 
     def test_smaller_reference_cloud_does_not_reduce_current_frame_selection(self):
         xyz_current = np.stack(

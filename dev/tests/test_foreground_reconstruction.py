@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,16 +10,23 @@ import cv2
 import numpy as np
 import pytest
 
+import ftgspp.optional.birefnet as birefnet
+import ftgspp.optional.visual_hull as visual_hull
 from ftgspp.data.scene import Scene, View, _read_mask_manifest, load_final_test_scene
-from ftgspp.optional.birefnet import _infer_probability, _view_inputs
+from ftgspp.optional.birefnet import (
+    BIREFNET_HR_MODEL_NAME,
+    BIREFNET_HR_REVISION,
+    _infer_probabilities,
+    _view_inputs,
+)
 from ftgspp.optional.da3 import (
     _conditioned_camera_diagnostics,
     depth_to_points,
     geometric_consistency_filter,
 )
-from ftgspp.optional.visual_hull import carve_visual_hull
-from ftgspp.optional.visual_hull import filter_points_by_visual_hull
 from ftgspp.optional.point_color import color_points_ibr
+from ftgspp.optional.visual_hull import carve_visual_hull, filter_points_by_visual_hull
+from ftgspp.training.backend import NativeVulkanBackend
 from ftgspp.training.background import sample_background, sample_rank_backgrounds
 from ftgspp.training.foreground_metrics import boundary_fscore, foreground_metrics
 from ftgspp.training.objective import (
@@ -28,7 +35,6 @@ from ftgspp.training.objective import (
     composite_v1,
     composite_v1_pixel_vjp,
 )
-from ftgspp.training.backend import NativeVulkanBackend
 from ftgspp.training.runner import NativeRunner, _background_context_audit
 
 
@@ -418,13 +424,15 @@ def test_birefnet_view_manifest_supports_arbitrary_source_names():
         assert rows == [(image.resolve(), 17, 42, Path("17/000042.png"))]
 
 
-def test_birefnet_activation_and_preprocessing_are_explicit():
+def test_birefnet_hr_preprocessing_and_batch_restore(monkeypatch):
     torch = pytest.importorskip("torch")
+    monkeypatch.setattr(birefnet, "BIREFNET_HR_RESOLUTION", 4)
 
     class ConstantModel:
         def __init__(self, value: float):
             self.value = value
             self.input = None
+
         def __call__(self, value):
             self.input = value.detach().cpu().numpy()
             return torch.full(
@@ -434,23 +442,100 @@ def test_birefnet_activation_and_preprocessing_are_explicit():
 
     rgb = np.full((3, 5, 3), 255, np.uint8)
     model = ConstantModel(0.25)
-    probability = _infer_probability(
-        model, torch, "cpu", rgb, 4, output_activation="probability",
-        preprocessing_profile="unit_square_v1",
+    probability = _infer_probabilities(model, torch, "cpu", [rgb])[0]
+    np.testing.assert_allclose(
+        probability, 1.0 / (1.0 + np.exp(-0.25)), atol=1e-7,
     )
-    np.testing.assert_allclose(probability, 0.25, atol=1e-7)
-    np.testing.assert_allclose(model.input, 1.0, atol=1e-7)
-    logits = _infer_probability(
-        ConstantModel(0.25), torch, "cpu", rgb, 4,
-        output_activation="sigmoid_logits",
-        preprocessing_profile="birefnet_imagenet_square_v1",
+    expected_input = (
+        np.ones((1, 3, 4, 4), np.float32)
+        - np.asarray([0.485, 0.456, 0.406], np.float32)[None, :, None, None]
+    ) / np.asarray([0.229, 0.224, 0.225], np.float32)[None, :, None, None]
+    np.testing.assert_allclose(model.input, expected_input, atol=1e-6)
+    batched = _infer_probabilities(
+        ConstantModel(0.75), torch, "cpu",
+        [np.zeros((2, 3, 3), np.uint8), np.zeros((4, 5, 3), np.uint8)],
     )
-    np.testing.assert_allclose(logits, 1.0 / (1.0 + np.exp(-0.25)), atol=1e-7)
-    with pytest.raises(RuntimeError, match="outside"):
-        _infer_probability(
-            ConstantModel(1.1), torch, "cpu", rgb, 4,
-            output_activation="probability",
+    assert [value.shape for value in batched] == [(2, 3), (4, 5)]
+    expected = 1.0 / (1.0 + np.exp(-0.75))
+    np.testing.assert_allclose(batched[0], expected, atol=1e-7)
+    np.testing.assert_allclose(batched[1], expected, atol=1e-7)
+
+
+def test_birefnet_hr_cuda_oom_batch_fallback(
+    tmp_path, monkeypatch,
+):
+    scene = tmp_path / "scene"
+    images = scene / "images" / "0"
+    images.mkdir(parents=True)
+    for frame in range(2):
+        assert cv2.imwrite(
+            str(images / f"{frame:06d}.png"),
+            np.full((3 + frame, 5, 3), 64 + frame, np.uint8),
         )
+
+    class FakeCuda:
+        empty_cache_calls = 0
+
+        @classmethod
+        def empty_cache(cls):
+            cls.empty_cache_calls += 1
+
+    fake_torch = SimpleNamespace(
+        float16=object(), bfloat16=object(), cuda=FakeCuda,
+    )
+    model = SimpleNamespace(config=SimpleNamespace(
+        _name_or_path=BIREFNET_HR_MODEL_NAME, _commit_hash="test-commit",
+    ))
+    monkeypatch.setattr(
+        birefnet, "_load_model",
+        lambda *_args, **_kwargs: (model, fake_torch, "cuda:0", "float16"),
+    )
+    calls = []
+
+    def infer(_model, _torch, _device, rgbs, **kwargs):
+        calls.append((len(rgbs), kwargs["precision"]))
+        if len(rgbs) > 1:
+            raise RuntimeError("CUDA out of memory")
+        return [np.full(rgb.shape[:2], 0.75, np.float32) for rgb in rgbs]
+
+    monkeypatch.setattr(birefnet, "_infer_probabilities", infer)
+    monkeypatch.setattr(birefnet, "_model_state_sha256", lambda _model: "a" * 64)
+    monkeypatch.setattr(
+        "ftgspp.io.provenance.source_identity",
+        lambda: {
+            "schema": "test-source-v1", "set_sha256": "b" * 64,
+            "git_patch_sha256": "c" * 64,
+        },
+    )
+
+    manifest_path = birefnet.prepare_birefnet_masks(
+        images_root=scene / "images",
+        output_root=scene / "masks" / "birefnet_hr",
+        batch_size=2,
+        qa_count=0,
+    )
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert payload["model"] == BIREFNET_HR_MODEL_NAME
+    assert payload["model_identity"]["requested_revision"] == BIREFNET_HR_REVISION
+    assert payload["model_identity"]["verification"] == "resolved_commit"
+    assert payload["model_identity"]["loaded_state_dict_sha256"] is None
+    assert payload["inference_resolution"] == 2048
+    assert payload["preprocessing"]["profile"] == "birefnet_hr_imagenet_square_v1"
+    assert payload["preprocessing"]["interpolation"] == "opencv_linear"
+    assert payload["inference"] == {
+        "device": "cuda:0",
+        "precision": "float16",
+        "requested_batch_size": 2,
+        "minimum_batch_size": 1,
+        "maximum_successful_batch_size": 1,
+        "cuda_oom_batch_reductions": 1,
+    }
+    assert calls == [(2, "float16"), (1, "float16"), (1, "float16")]
+    assert FakeCuda.empty_cache_calls == 1
+    assert len(payload["views"]) == 2
+    assert all(Path(row["mask_path"]).suffix == ".png" for row in payload["views"])
+    assert payload["performance"]["pipeline"]["input_read_and_sha256_passes"] == 1
+    assert payload["performance"]["pipeline"]["mask_encode_and_sha256_passes"] == 1
 
 
 def test_birefnet_manifest_requires_completed_hashed_matching_content():
@@ -583,10 +668,133 @@ def test_visual_hull_carves_mask_supported_voxels():
             ))
         points, diagnostics = carve_visual_hull(
             views, np.asarray([[-0.4, -0.4, 1.5], [0.4, 0.4, 2.5]]),
-            resolution=12, min_views=2, support_fraction=1.0,
+            resolution=12, min_views=2, support_fraction=1.0, device="cpu",
         )
         assert len(points) > 0
         assert diagnostics["output_count"] == len(points)
+        assert diagnostics["device"] == "cpu"
+
+
+def test_carving_bounds_are_derived_robustly_from_da3_clouds():
+    rng = np.random.default_rng(9)
+    points = rng.uniform(-1.0, 1.0, (2_000, 3)).astype(np.float32)
+    points = np.concatenate((points, np.asarray([[500.0, 0.0, 0.0]], np.float32)))
+    bounds, diagnostics = visual_hull._bounds_from_point_clouds([
+        (points, np.zeros((len(points), 3), np.uint8)),
+    ])
+    assert bounds.shape == (2, 3)
+    assert np.all(bounds[1] > bounds[0])
+    assert bounds[1, 0] < 2.0
+    assert diagnostics["source_points"] == len(points)
+
+
+def test_default_carving_reuses_da3_for_automatic_bounds(tmp_path, monkeypatch):
+    cloud_root = tmp_path / "da3"
+    cloud_root.mkdir()
+    xyz = np.asarray([
+        [-1.0, -0.5, 1.0], [1.0, 0.5, 2.0], [0.0, 0.0, 1.5],
+    ], np.float32)
+    rgb = np.full((len(xyz), 3), 127, np.uint8)
+
+    class Generated(list):
+        cache_root = cloud_root
+        generated = True
+
+    views = [
+        SimpleNamespace(camera_id=camera, frame=0, timestamp=0.0)
+        for camera in range(2)
+    ]
+
+    class FakeScene:
+        frames = [0]
+        train_cameras = [0, 1]
+        fps = 30.0
+        calibration_available = True
+
+        def view(self, _frame, camera):
+            return views[camera]
+
+        def views_nearest_timestamp(self, *_args, **_kwargs):
+            return views
+
+        def checkpoint_metadata(self):
+            return {"fingerprint": "dataset"}
+
+    config = SimpleNamespace(
+        init=SimpleNamespace(
+            keyframe_stride=1,
+            da3=SimpleNamespace(sync_tolerance_fraction=0.25),
+        ),
+        train=SimpleNamespace(seed=4),
+    )
+    monkeypatch.setattr(visual_hull, "load_config", lambda _path: config)
+    monkeypatch.setattr(
+        visual_hull.Scene, "from_config", lambda _config: FakeScene(),
+    )
+    monkeypatch.setattr(
+        "ftgspp.optional.da3.generate_da3_points",
+        lambda *_args, **_kwargs: Generated([(xyz, rgb)]),
+    )
+    monkeypatch.setattr(
+        visual_hull, "carve_visual_hull",
+        lambda _views, _bounds, **_kwargs: (
+            xyz,
+            {"device": "cpu", "output_count": len(xyz)},
+        ),
+    )
+    monkeypatch.setattr(
+        visual_hull, "color_points_ibr",
+        lambda points, *_args, **_kwargs: SimpleNamespace(
+            keep=np.ones(len(points), bool),
+            rgb=rgb,
+            source_count=np.ones(len(points), np.int64),
+        ),
+    )
+
+    manifest_path = visual_hull.prepare_visual_hull_points(
+        tmp_path / "config.yaml", tmp_path / "prepared", None,
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["method"] == "carving"
+    assert manifest["point_source"]["kind"] == "da3_generated"
+    assert manifest["bounds_source"]["kind"] == "point_cloud_quantiles"
+    assert manifest["bounds_source"]["point_source"]["path"] == str(cloud_root)
+
+
+def test_visual_hull_cli_makes_both_geometry_methods_explicit(
+    tmp_path, monkeypatch,
+):
+    calls = []
+
+    def prepare(config, output, bounds, **kwargs):
+        calls.append((config, output, bounds, kwargs))
+        return tmp_path / "manifest.json"
+
+    monkeypatch.setattr(visual_hull, "prepare_visual_hull_points", prepare)
+    visual_hull.main([
+        "--config", str(tmp_path / "scene.yaml"),
+        "--output", str(tmp_path / "carved"),
+    ])
+    assert calls[-1][3]["method"] == "carving"
+    assert calls[-1][3]["device"] == "auto"
+    assert calls[-1][2] is None
+
+    visual_hull.main([
+        "--config", str(tmp_path / "scene.yaml"),
+        "--output", str(tmp_path / "filtered"),
+        "--method", "point_filtering",
+    ])
+    assert calls[-1][2] is None
+    assert calls[-1][3]["method"] == "point_filtering"
+    assert calls[-1][3]["input_points"] is None
+
+    with pytest.raises(SystemExit):
+        visual_hull.main([
+            "--config", str(tmp_path / "scene.yaml"),
+            "--output", str(tmp_path / "invalid"),
+            "--method", "point_filtering",
+            "--bounds", "-1", "-1", "-1", "1", "1", "1",
+        ])
 
 
 def _synthetic_view(
@@ -605,6 +813,25 @@ def _synthetic_view(
         distortion=np.zeros(5, np.float32), size=(9, 9),
         mask_path=mask_path, mask_source="external",
     )
+
+
+def test_visual_hull_cuda_matches_cpu_when_available(tmp_path):
+    torch = pytest.importorskip("torch")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    views = [
+        _synthetic_view(tmp_path, camera, (50, 60, 70))
+        for camera in range(2)
+    ]
+    bounds = np.asarray([[-0.2, -0.2, 2.0], [0.2, 0.2, 2.4]])
+    cpu, _cpu_diagnostics = carve_visual_hull(
+        views, bounds, resolution=8, surface_band=False, device="cpu",
+    )
+    cuda, cuda_diagnostics = carve_visual_hull(
+        views, bounds, resolution=8, surface_band=False, device="cuda",
+    )
+    np.testing.assert_allclose(cuda, cpu, atol=0.0)
+    assert cuda_diagnostics["device"] == "cuda"
 
 
 def test_ibr_depth_rank_top3_and_neighbor_z_buffer_are_explicit():
@@ -644,10 +871,10 @@ def test_visual_hull_surface_thickness_and_existing_cloud_filter():
         ]
         bounds = np.asarray([[-0.2, -0.2, 2.0], [0.2, 0.2, 2.4]])
         thin, thin_diag = carve_visual_hull(
-            views, bounds, resolution=8, surface_band_layers=1,
+            views, bounds, resolution=8, surface_band_layers=1, device="cpu",
         )
         thick, thick_diag = carve_visual_hull(
-            views, bounds, resolution=8, surface_band_layers=2,
+            views, bounds, resolution=8, surface_band_layers=2, device="cpu",
         )
         assert len(thick) > len(thin)
         assert thick_diag["surface_band_layers"] == 2
@@ -655,6 +882,34 @@ def test_visual_hull_surface_thickness_and_existing_cloud_filter():
         keep, diagnostics = filter_points_by_visual_hull(candidates, views)
         assert keep.tolist() == [True, False, False]
         assert diagnostics["kept_count"] == 1
+
+
+def test_coarse_carving_only_projects_sparse_fine_candidates(tmp_path):
+    views = [
+        _synthetic_view(tmp_path, camera, (50, 60, 70))
+        for camera in range(2)
+    ]
+    mask = np.zeros((9, 9), np.uint8)
+    mask[3:6, 3:6] = 255
+    for view in views:
+        assert cv2.imwrite(str(view.mask_path), mask)
+    _points, diagnostics = carve_visual_hull(
+        views,
+        np.asarray([[-2.0, -2.0, 2.0], [2.0, 2.0, 3.0]]),
+        resolution=32,
+        coarse_resolution=8,
+        surface_band=False,
+        min_views=2,
+        support_fraction=1.0,
+        mask_dilation_pixels=0,
+        chunk_points=257,
+        device="cpu",
+    )
+    assert diagnostics["coarse_candidate_count"] < diagnostics["candidate_count"]
+    assert (
+        diagnostics["evaluated_candidate_count"]
+        == diagnostics["coarse_candidate_count"]
+    )
 
 
 def test_visual_hull_rejects_all_points_behind_cameras():
@@ -667,7 +922,7 @@ def test_visual_hull_rejects_all_points_behind_cameras():
         with pytest.raises(RuntimeError, match="empty volume"):
             carve_visual_hull(
                 views, np.asarray([[-1, -1, -3], [1, 1, -1]], float),
-                resolution=8,
+                resolution=8, device="cpu",
             )
 
 

@@ -14,12 +14,12 @@ data:
     source: external
     manifest_path: ../data/my_scene/manifests/masks.json
 init:
+  backend: carving
+  points_path: ../data/my_scene/points_vhull_ibr_stride10
   # Keep geometry initialization stable across training-seed sweeps.
   seed: 0
   num_gaussians: 2000000
   keyframe_stride: 10
-  da3:
-    cache_path: ../data/my_scene/points_da3_foreground_stride10
 train:
   iterations: 30000
   background:

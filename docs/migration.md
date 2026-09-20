@@ -25,6 +25,9 @@ There is no implicit migration of old execution semantics.
   joint PSNR+SSIM score (`train.export_best`, default true). Optimizer
   checkpoints are optional
   (`train.save_checkpoints`) and share `train.checkpoint_interval` with eval.
+- `scripts/setup.sh` now installs the Torch-free Vulkan training runtime by
+  default. Use `--with-birefnet`, `--with-da3`, or `--with-init`; the former
+  aggregate `[foreground]` extra and `--core-only` switch are removed.
 - `FTGSPP_TRAIN_EVAL_INTERVAL` is removed. Mid-run hold-out eval uses
   `train.checkpoint_interval`. Set `save_checkpoints: false` to eval without
   writing ckpt files.
@@ -46,6 +49,14 @@ There is no implicit migration of old execution semantics.
 - Foreground auto initialization no longer trusts a manifestless PLY directory.
   Generated visual-hull manifests are accepted automatically; choose
   `init.backend: points` to acknowledge unversioned user geometry.
+- Visual-hull manifests are now `ftgspp-visual-hull-ibr-v2` and record the
+  explicit `carving` or `point_filtering` method. Regenerate older prepared
+  point caches before training. Select them with the matching
+  `init.backend`; `points` is reserved for generic/user PLYs.
+- New Gaussian initialization manifests use `ftgspp-init-l3-v4`. The L3 change
+  replaces repeated full-cloud voxel searches with bounded sampling plus exact
+  calibration, and preallocates final model arrays. Existing L2 DA3 point
+  caches remain valid; rerunning initialization creates the new L3 result.
 - `pipeline.foreground_version`, `pipeline.foreground_preset`,
   `train.image_objective`, and `eval.protocol` are rejected. Foreground training
   is `composite_v1`; the objective and evaluation protocol are derived from

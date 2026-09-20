@@ -48,8 +48,15 @@ def test_prepare_dataset_creates_manifest_and_resolvable_starter_config(tmp_path
     assert config.data.eval_cameras == [7]
     assert config.data.frames.start == 3
     assert config.data.frames.stop == 5
-    assert OmegaConf.load(config_path).init.seed == 0
+    starter = OmegaConf.load(config_path)
+    assert starter.init.seed == 0
+    assert starter.init.backend == "carving"
+    assert starter.init.points_path == "points_vhull_ibr_stride2"
     assert config.init.seed == 0
+    assert config.init.backend == "carving"
+    assert config.init.points_path == (
+        tmp_path / f"points_vhull_ibr_stride{config.init.keyframe_stride}"
+    )
 
 
 def test_manifest_only_supports_arbitrary_paths_and_explicit_timestamps(tmp_path):

@@ -10,7 +10,8 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           version: "0.11.29"
-      - run: uv sync --python 3.12 --extra dev --no-install-project
+      - run: uv sync --locked --python 3.12 --extra dev --no-install-project
+      - run: uv sync --locked --dry-run --no-dev --no-install-project --extra birefnet --extra da3
       - run: bash -n scripts/setup.sh
       - run: uv run --no-sync pytest -q
       - run: sudo apt-get update && sudo apt-get install -y libvulkan-dev libglm-dev ninja-build

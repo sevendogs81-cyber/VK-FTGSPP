@@ -3,20 +3,21 @@
 from __future__ import annotations
 
 import copy
-import json
 import hashlib
+import json
 import logging
 import os
 import time
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Literal, overload
 
 import numpy as np
 from scipy.spatial import cKDTree
 
 from ftgspp.data.scene import Scene
-from ftgspp.io.model import NativeGaussians, TEMPORAL_SCALE_MULTIPLIER
+from ftgspp.io.model import TEMPORAL_SCALE_MULTIPLIER, NativeGaussians
 from ftgspp.io.ply import read_point_ply
 from ftgspp.training.init_plan import (
     L3_ALGORITHM,
@@ -29,6 +30,9 @@ from ftgspp.training.stage_timer import StageTimer
 SH_C0 = 0.28209479177387814
 SPARSE_JITTER_SCALE = 0.25
 logger = logging.getLogger("ftgspp.native")
+PREPARED_POINT_BACKENDS = frozenset({
+    "auto", "carving", "point_filtering", "points",
+})
 
 
 @dataclass(frozen=True)
@@ -84,10 +88,29 @@ def _keyframe_clouds(
     return result
 
 
+@overload
+def _complete_point_clouds(
+    root: Path | None, frames: Sequence[int], *, label: str,
+    allow_empty: bool = False, return_sha256: Literal[False] = False,
+) -> list[tuple[np.ndarray, np.ndarray]] | None: ...
+
+
+@overload
+def _complete_point_clouds(
+    root: Path | None, frames: Sequence[int], *, label: str,
+    allow_empty: bool = False, return_sha256: Literal[True],
+) -> tuple[list[tuple[np.ndarray, np.ndarray]], dict[str, str]] | None: ...
+
+
 def _complete_point_clouds(
     root: Path | None, frames: Sequence[int], *, label: str,
     allow_empty: bool = False,
-) -> list[tuple[np.ndarray, np.ndarray]] | None:
+    return_sha256: bool = False,
+) -> (
+    list[tuple[np.ndarray, np.ndarray]]
+    | tuple[list[tuple[np.ndarray, np.ndarray]], dict[str, str]]
+    | None
+):
     """Read a complete ``f<frame>.ply`` set, returning ``None`` if absent.
 
     A complete-set check is important for ``auto``: silently mixing a stale
@@ -102,15 +125,25 @@ def _complete_point_clouds(
     paths = [root / f"f{int(frame):06d}.ply" for frame in frames]
     if not all(path.is_file() for path in paths):
         return None
+    points: list[tuple[np.ndarray, np.ndarray]]
+    digests: dict[str, str] = {}
     try:
-        points = [read_point_ply(path) for path in paths]
+        if return_sha256:
+            loaded = [read_point_ply(path, return_sha256=True) for path in paths]
+            points = [(xyz, rgb) for xyz, rgb, _digest in loaded]
+            digests = {
+                path.name: digest
+                for path, (_xyz, _rgb, digest) in zip(paths, loaded, strict=True)
+            }
+        else:
+            points = [read_point_ply(path) for path in paths]
     except (OSError, ValueError) as exc:
         logger.warning("ignoring invalid %s point-cloud cache: %s", label, exc)
         return None
     if any(len(xyz) == 0 for xyz, _rgb in points) and not allow_empty:
         logger.warning("ignoring empty %s point-cloud cache in %s", label, root)
         return None
-    return points
+    return (points, digests) if return_sha256 else points
 
 
 def _valid_prepared_point_manifest(
@@ -118,7 +151,8 @@ def _valid_prepared_point_manifest(
     dataset: Scene,
     frames: Sequence[int],
     *,
-    require_foreground_compatibility: bool = False,
+    expected_method: str | None = None,
+    actual_ply_hashes: Mapping[str, str] | None = None,
 ) -> bool:
     """Validate the optional visual-hull manifest beside explicit PLYs.
 
@@ -129,7 +163,7 @@ def _valid_prepared_point_manifest(
 
     manifest_path = Path(root) / "manifest.json"
     if not manifest_path.is_file():
-        return not require_foreground_compatibility
+        return expected_method is None
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         completed = json.loads(
@@ -143,13 +177,11 @@ def _valid_prepared_point_manifest(
     # an unversioned user PLY directory.  Unknown schemas must fail closed:
     # otherwise a newer/incompatible or partially replaced cache silently
     # bypasses every integrity check below.
-    if manifest.get("schema") != "ftgspp-visual-hull-ibr-v1":
+    if manifest.get("schema") != "ftgspp-visual-hull-ibr-v2":
         return False
-    if completed.get("schema") != "ftgspp-visual-hull-ibr-v1":
+    if completed.get("schema") != "ftgspp-visual-hull-ibr-v2":
         return False
-    if require_foreground_compatibility and not bool(
-        manifest.get("foreground_compatible", True)
-    ):
+    if expected_method is not None and manifest.get("method") != expected_method:
         return False
     if manifest.get("dataset_fingerprint") != dataset.checkpoint_metadata()["fingerprint"]:
         return False
@@ -185,10 +217,16 @@ def _valid_prepared_point_manifest(
         if not isinstance(relative, str):
             return False
         path = Path(root) / relative
-        try:
-            digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        except OSError:
-            return False
+        digest = (
+            actual_ply_hashes.get(relative)
+            if actual_ply_hashes is not None else None
+        )
+        if digest is None:
+            try:
+                from ftgspp.io.init_cache import file_sha256
+                digest = file_sha256(path)
+            except OSError:
+                return False
         if digest != row.get("ply_sha256"):
             return False
     return True
@@ -198,6 +236,8 @@ def _valid_da3_cache(
     config, dataset: Scene, root: Path | None, expected_frames: Sequence[int] | None = None,
     frame_positions: Sequence[int] | None = None,
     *, configured_model_identity: dict[str, object] | None = None,
+    actual_ply_hashes: Mapping[str, str] | None = None,
+    verify_ply_hashes: bool = True,
 ) -> bool:
     if root is None:
         return False
@@ -238,8 +278,11 @@ def _valid_da3_cache(
         return False
     options = config.init.da3
     from ftgspp.optional.da3 import (
-        da3_l2_identity, model_identity as da3_model_identity,
+        da3_l2_identity,
         resolve_da3_cache_root,
+    )
+    from ftgspp.optional.da3 import (
+        model_identity as da3_model_identity,
     )
     from ftgspp.optional.da3_schedule import (
         input_camera_ids,
@@ -338,15 +381,22 @@ def _valid_da3_cache(
         if not isinstance(row, dict) or not isinstance(row.get("ply"), str):
             logger.warning("DA3 keyframe manifest row is invalid: %s", root)
             return False
-        path = root / row["ply"]
-        try:
-            digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        except OSError:
-            logger.warning("DA3 cache keyframe is unreadable: %s", path)
-            return False
-        if digest != row.get("ply_sha256"):
-            logger.warning("DA3 cache keyframe hash mismatch: %s", path)
-            return False
+        if verify_ply_hashes:
+            path = root / row["ply"]
+            digest = (
+                actual_ply_hashes.get(row["ply"])
+                if actual_ply_hashes is not None else None
+            )
+            if digest is None:
+                try:
+                    from ftgspp.io.init_cache import file_sha256
+                    digest = file_sha256(path)
+                except OSError:
+                    logger.warning("DA3 cache keyframe is unreadable: %s", path)
+                    return False
+            if digest != row.get("ply_sha256"):
+                logger.warning("DA3 cache keyframe hash mismatch: %s", path)
+                return False
     if completed.get("keyframes") != len(keyframes):
         logger.warning("DA3 completed marker keyframe count is invalid: %s", root)
         return False
@@ -362,105 +412,155 @@ def _valid_da3_cache(
     return True
 
 
-def _initial_points(
-    config, dataset: Scene, frame_positions: Sequence[int],
-) -> list[KeyframeCloud]:
-    """Resolve user PLYs, a DA3 cache, or lazy DA3 inference in that order."""
+def _prepared_point_clouds(
+    config, dataset: Scene, frames: Sequence[int],
+) -> list[KeyframeCloud] | None:
+    """Load and validate the configured explicit point-cloud cache."""
 
-    frames = [int(dataset.frames[index]) for index in frame_positions]
-    backend = str(getattr(config.init, "backend", "auto"))
-    points_path = getattr(config.init, "points_path", None)
-    if backend in {"auto", "points"}:
-        if not getattr(dataset, "calibration_available", True):
-            if backend == "points":
-                raise ValueError(
-                    "init.backend=points cannot initialize an uncalibrated dataset; "
-                    "use init.backend=da3/auto so DA3 can estimate camera poses"
-                )
-            logger.warning(
-                "dataset has no camera calibration; ignoring user PLYs because "
-                "their world coordinate system cannot be attached to the videos"
+    backend = str(config.init.backend)
+    points_path = config.init.points_path
+    if not dataset.calibration_available:
+        if backend != "auto":
+            raise ValueError(
+                f"init.backend={backend} requires calibrated cameras; "
+                "use init.backend=da3 for camera estimation"
             )
-        else:
-            points = _complete_point_clouds(points_path, frames, label="user")
-            if points is not None:
-                foreground_auto = (
-                    backend == "auto"
-                    and str(getattr(config.pipeline, "mode", "scene")) == "foreground"
-                )
-                if _valid_prepared_point_manifest(
-                    points_path,
-                    dataset,
-                    frames,
-                    require_foreground_compatibility=foreground_auto,
-                ):
-                    logger.info("Gaussian init source: user point clouds (%s)", points_path)
-                    return _keyframe_clouds(
-                        points, root=points_path, frames=frames,
-                        dataset=dataset, source="user_points",
-                    )
+        logger.warning(
+            "dataset has no camera calibration; skipping init.points_path and "
+            "using DA3"
+        )
+        return None
+
+    loaded = _complete_point_clouds(
+        points_path, frames, label="prepared", return_sha256=True,
+    )
+    if loaded is None:
+        if backend == "auto":
+            if points_path is not None:
                 logger.warning(
-                    "prepared point-cloud manifest is stale, incomplete, or not "
-                    "foreground-compatible under %s",
+                    "prepared point-cloud set is incomplete under %s; using DA3",
                     points_path,
                 )
-                if backend == "points":
-                    raise ValueError(
-                        f"point-cloud manifest validation failed under {points_path}; "
-                        "regenerate the prepared initialization"
-                    )
-        if backend == "points":
-            expected = Path(points_path) if points_path is not None else "<unset>"
-            raise FileNotFoundError(
-                f"init.backend=points requires a complete point-cloud set in {expected}; "
-                "provide PLYs or choose init.backend=da3/auto"
-            )
-        if points_path is not None:
-            logger.warning(
-                "user point-cloud set is incomplete under %s; trying DA3 initialization",
-                points_path,
-            )
+            return None
+        expected = Path(points_path) if points_path is not None else "<unset>"
+        command = "ftgspp prepare points"
+        if backend in {"carving", "point_filtering"}:
+            command += f" --method {backend}"
+        raise FileNotFoundError(
+            f"init.backend={backend} requires a complete point-cloud set in "
+            f"{expected}; run '{command}' or choose init.backend=da3"
+        )
+    points, point_hashes = loaded
 
-    da3_options = getattr(config.init, "da3", None)
-    cache_base = getattr(da3_options, "cache_path", None) if da3_options is not None else None
+    if not _valid_prepared_point_manifest(
+        Path(points_path),
+        dataset,
+        frames,
+        expected_method=(
+            backend if backend in {"carving", "point_filtering"} else None
+        ),
+        actual_ply_hashes=point_hashes,
+    ):
+        message = f"prepared point-cloud manifest validation failed under {points_path}"
+        if backend != "auto":
+            raise ValueError(f"{message}; regenerate the prepared initialization")
+        logger.warning("%s; using DA3", message)
+        return None
+
+    logger.info("Gaussian init source: prepared point clouds (%s)", points_path)
+    return _keyframe_clouds(
+        points,
+        root=Path(points_path),
+        frames=frames,
+        dataset=dataset,
+        source="prepared_points",
+    )
+
+
+def _da3_point_clouds(
+    config,
+    dataset: Scene,
+    frames: Sequence[int],
+    frame_positions: Sequence[int],
+) -> list[KeyframeCloud]:
+    """Reuse a valid DA3 cache or generate the complete keyframe set."""
+
+    options = config.init.da3
+    cache_base = options.cache_path
     if cache_base is None:
         cache_base = Path(config.data.root) / (
             f"points_da3_stride{int(config.init.keyframe_stride)}"
         )
     from ftgspp.optional.da3 import resolve_da3_cache_root
+
     cache_path = resolve_da3_cache_root(Path(cache_base))
-    cached = _complete_point_clouds(
-        cache_path, frames, label="DA3",
-        allow_empty=bool(getattr(da3_options, "foreground_only", False)),
+    if not dataset.calibration_available:
+        # Cache reuse must also restore DA3's estimated rig. Let the DA3
+        # adapter validate, load each PLY once, and update the Scene geometry
+        # in one transaction instead of pre-reading the clouds here.
+        from ftgspp.optional.da3 import generate_da3_points
+
+        generated = generate_da3_points(config, dataset, frame_positions)
+        return _keyframe_clouds(
+            generated,
+            root=generated.cache_root,
+            frames=frames,
+            dataset=dataset,
+            source="da3_generated" if generated.generated else "da3_cache",
+        )
+    loaded = _complete_point_clouds(
+        cache_path,
+        frames,
+        label="DA3",
+        allow_empty=bool(options.foreground_only),
+        return_sha256=True,
     )
+    cached = None if loaded is None else loaded[0]
+    point_hashes = None if loaded is None else loaded[1]
     if cached is not None and not _valid_da3_cache(
-        config, dataset, cache_path, expected_frames=frames,
+        config,
+        dataset,
+        cache_path,
+        expected_frames=frames,
         frame_positions=frame_positions,
+        actual_ply_hashes=point_hashes,
     ):
         cached = None
-    if cached is not None and getattr(dataset, "calibration_available", True):
+    if cached is not None:
         logger.info("Gaussian init source: cached DA3 point clouds (%s)", cache_path)
         return _keyframe_clouds(
-            cached, root=cache_path, frames=frames,
-            dataset=dataset, source="da3_cache",
+            cached,
+            root=cache_path,
+            frames=frames,
+            dataset=dataset,
+            source="da3_cache",
         )
-    if cached is not None:
-        logger.warning(
-            "DA3 point cache has no matching camera manifest; regenerating the "
-            "uncalibrated initialization"
-        )
+    from ftgspp.optional.da3 import generate_da3_points
 
-    if backend not in {"auto", "da3"}:
-        raise ValueError(f"unsupported init.backend: {backend}")
-    try:
-        from ftgspp.optional.da3 import generate_da3_points
-    except Exception as exc:  # pragma: no cover - import itself is Torch-free
-        raise RuntimeError("failed to import the optional DA3 initializer") from exc
     generated = generate_da3_points(config, dataset, frame_positions)
     return _keyframe_clouds(
-        generated, root=generated.cache_root, frames=frames,
-        dataset=dataset, source="da3_generated" if generated.generated else "da3_cache",
+        generated,
+        root=generated.cache_root,
+        frames=frames,
+        dataset=dataset,
+        source="da3_generated" if generated.generated else "da3_cache",
     )
+
+
+def _initial_points(
+    config, dataset: Scene, frame_positions: Sequence[int],
+) -> list[KeyframeCloud]:
+    """Resolve one explicit initialization source."""
+
+    frames = [int(dataset.frames[index]) for index in frame_positions]
+    backend = str(config.init.backend)
+    if backend in PREPARED_POINT_BACKENDS:
+        prepared = _prepared_point_clouds(config, dataset, frames)
+        if prepared is not None:
+            return prepared
+    if backend in {"auto", "da3"}:
+        return _da3_point_clouds(config, dataset, frames, frame_positions)
+    raise ValueError(f"unsupported init.backend: {backend}")
 
 
 def _l2_fingerprint_from_points(points: Sequence[KeyframeCloud]) -> str | None:
@@ -512,26 +612,6 @@ def _manifest_reference_timestamps(
     if any(int(frame) not in times for frame in frames):
         return None
     return [times[int(frame)] for frame in frames]
-
-
-def _initial_reference_timestamps(
-    config, dataset: Scene, frame_positions: Sequence[int],
-) -> list[float] | None:
-    """Resolve the manifest belonging to the point source selected by init."""
-
-    frames = [int(dataset.frames[index]) for index in frame_positions]
-    backend = str(getattr(config.init, "backend", "auto"))
-    points_path = getattr(config.init, "points_path", None)
-    if backend in {"auto", "points"} and points_path is not None:
-        paths = [Path(points_path) / f"f{frame:06d}.ply" for frame in frames]
-        if all(path.is_file() for path in paths):
-            timestamps = _manifest_reference_timestamps(points_path, frames)
-            if timestamps is not None:
-                return timestamps
-    da3 = getattr(config.init, "da3", None)
-    return _manifest_reference_timestamps(
-        getattr(da3, "cache_path", None), frames,
-    )
 
 
 def _logit(value: np.ndarray) -> np.ndarray:
@@ -795,21 +875,26 @@ def initialize_explicit(config, dataset: Scene) -> NativeGaussians:
         L3_ALGORITHM,
     )
     rng = np.random.default_rng(initialization_seed(config))
-    chunks: dict[str, list[np.ndarray]] = {name: [] for name in (
-        "means", "log_scales", "quaternions", "opacity_logits", "sh_coefficients",
-        "times", "duration_raw", "velocities", "gate_raw",
-    )}
+    # The exact total is known before conversion. Fill the final arrays in
+    # place instead of retaining per-keyframe chunks and copying every byte
+    # again through np.concatenate (SH alone is hundreds of MB at 2M points).
+    values: dict[str, np.ndarray] = {
+        "means": np.empty((target, 3), np.float32),
+        "log_scales": np.empty((target, 3), np.float32),
+        "quaternions": np.empty((target, 4), np.float32),
+        "opacity_logits": np.empty((target, 1), np.float32),
+        "sh_coefficients": np.zeros((target, 16, 3), np.float32),
+        "times": np.empty((target, 1), np.float32),
+        "duration_raw": np.empty((target, 1), np.float32),
+        "velocities": np.empty((target, 3), np.float32),
+        "gate_raw": np.empty((target, 1), np.float32),
+    }
     with timer.stage("sample_velocity_scale"):
         frame_reports = _initialize_explicit_frames(
-            config, dataset, points, frame_positions, budgets, rng, chunks,
+            config, dataset, points, frame_positions, budgets, rng, values,
         )
-    nonempty_parts = [part for part in chunks["means"] if len(part)]
-    if not nonempty_parts:
+    if not len(values["means"]):
         raise ValueError("initialization produced no Gaussians")
-    values = {
-        name: np.concatenate([part for part in parts if len(part)], axis=0)
-        for name, parts in chunks.items()
-    }
     cuda_peak_bytes: int | None = None
     da3_performance: dict[str, object] | None = None
     for cloud in points:
@@ -837,6 +922,13 @@ def initialize_explicit(config, dataset: Scene) -> NativeGaussians:
         "actual_gaussians": int(len(values["means"])),
         "comparable_budget": True,
         "incomparable_reason": None,
+        "budget_policy": {
+            "total_source": "init.num_gaussians",
+            "exact_total": True,
+            "keyframe_allocation": (
+                "candidate_count_extent_shape_complexity_interframe_motion"
+            ),
+        },
         "keyframe_budget_weights": adaptive_weights,
         "algorithm": L3_ALGORITHM,
         "l3_identity": l3_identity_payload(
@@ -964,6 +1056,21 @@ def _initialize_explicit_frames(
         if isinstance(per_frame, (int, np.integer)) else list(per_frame)
     )
     neighbors = keyframe_neighbor_indices([len(_cloud_arrays(cloud)[0]) for cloud in points])
+    preallocated = bool(chunks) and all(
+        isinstance(value, np.ndarray) for value in chunks.values()
+    )
+    cursor = 0
+
+    def store(name: str, value: np.ndarray) -> None:
+        nonlocal cursor
+        if preallocated:
+            destination = chunks[name]
+            if cursor + len(value) > len(destination):
+                raise RuntimeError("preallocated initialization output is too small")
+            destination[cursor:cursor + len(value)] = value
+        else:
+            chunks[name].append(value)
+
     reports: list[dict[str, object]] = []
     for point_index, cloud in enumerate(points):
         xyz, rgb = _cloud_arrays(cloud)
@@ -977,13 +1084,16 @@ def _initialize_explicit_frames(
         )
         budget = int(budgets[point_index])
         if budget <= 0 or len(xyz) == 0:
-            for name, width in (
-                ("means", 3), ("log_scales", 3), ("quaternions", 4),
-                ("opacity_logits", 1), ("times", 1), ("duration_raw", 1),
-                ("velocities", 3), ("gate_raw", 1),
-            ):
-                chunks[name].append(np.empty((0, width), np.float32))
-            chunks["sh_coefficients"].append(np.empty((0, 16, 3), np.float32))
+            if not preallocated:
+                for name, width in (
+                    ("means", 3), ("log_scales", 3), ("quaternions", 4),
+                    ("opacity_logits", 1), ("times", 1), ("duration_raw", 1),
+                    ("velocities", 3), ("gate_raw", 1),
+                ):
+                    chunks[name].append(np.empty((0, width), np.float32))
+                chunks["sh_coefficients"].append(
+                    np.empty((0, 16, 3), np.float32)
+                )
             reports.append({"skipped": True, "reason": "empty_or_zero_budget"})
             continue
         other_index = neighbors[point_index]
@@ -1030,30 +1140,34 @@ def _initialize_explicit_frames(
             shift = (times - np.float32(t_ref)) * velocity
             means = source_means + shift.astype(np.float32)
         opacity = np.full((n, 1), config.init.opacity, np.float32)
-        chunks["means"].append(means)
-        chunks["log_scales"].append(
+        store("means", means)
+        store("log_scales",
             np.log(np.maximum(config.init.scale * spacing[:, None], 1e-12)).repeat(3, axis=1)
         )
         quaternion = np.zeros((n, 4), np.float32)
         quaternion[:, 0] = 1.0
-        chunks["quaternions"].append(quaternion)
-        chunks["opacity_logits"].append(_logit(opacity))
-        sh = np.zeros((n, 16, 3), np.float32)
-        sh[:, 0] = (rgb[selection].astype(np.float32) / 255.0 - 0.5) / SH_C0
-        chunks["sh_coefficients"].append(sh)
-        chunks["times"].append(times.astype(np.float32))
+        store("quaternions", quaternion)
+        store("opacity_logits", _logit(opacity))
+        sh_dc = (rgb[selection].astype(np.float32) / 255.0 - 0.5) / SH_C0
+        if preallocated:
+            chunks["sh_coefficients"][cursor:cursor + n, 0] = sh_dc
+        else:
+            sh = np.zeros((n, 16, 3), np.float32)
+            sh[:, 0] = sh_dc
+            store("sh_coefficients", sh)
+        store("times", times.astype(np.float32))
         duration = np.full((n, 1), config.init.duration, np.float32)
         if np.isinf(config.model.max_duration):
             duration = np.log(np.maximum(duration, np.finfo(np.float32).tiny))
         else:
             duration = _logit(duration / (config.model.max_duration * TEMPORAL_SCALE_MULTIPLIER))
-        chunks["duration_raw"].append(duration)
-        chunks["velocities"].append(velocity)
+        store("duration_raw", duration)
+        store("velocities", velocity)
         gate = (
             float(getattr(config.model, "gate_init_logit", -1.0))
             if config.model.marginal_gating else -100.0
         )
-        chunks["gate_raw"].append(np.full((n, 1), gate, np.float32))
+        store("gate_raw", np.full((n, 1), gate, np.float32))
         restored = means - (times - np.float32(t_ref)) * velocity
         reports.append({
             "sampling": sample_diag,
@@ -1061,4 +1175,10 @@ def _initialize_explicit_frames(
             "replica_count": int(resampled),
             "source_restore_mae": float(np.mean(np.abs(restored - source_means))),
         })
+        cursor += n
+    if preallocated and cursor != len(chunks["means"]):
+        raise RuntimeError(
+            f"preallocated initialization filled {cursor} of "
+            f"{len(chunks['means'])} rows"
+        )
     return reports

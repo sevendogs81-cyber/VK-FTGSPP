@@ -17,16 +17,29 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-subtests>=0.14", "build>=1.2"]
 tensorboard = ["tensorboard>=2.18"]
-# The upstream depth-anything-3 package is installed from its own repository;
-# this extra supplies the compatible runtime family without making Torch core.
-da3 = ["torch>=2.5", "torchvision>=0.20"]
+# DA3 publishes a broad application/training dependency list.  FTGSPP uses
+# only its inference API, so the uv metadata override below replaces that list
+# with the imports exercised by the pinned inference adapter.
+da3 = [
+    "depth-anything-3==0.1.1", "torch>=2.5", "torchvision>=0.20",
+    "addict>=2.4", "einops>=0.8", "evo>=1.33", "imageio>=2.37",
+    "moviepy==1.0.3", "pillow>=10", "plyfile>=1.1", "trimesh>=4.4",
+    "huggingface-hub>=0.35", "safetensors>=0.4",
+]
 # Optional Torch dependencies for eval-time LPIPS. TorchMetrics'
 # learned-perceptual implementation imports torchvision model definitions.
 lpips = ["torch>=2.5", "torchvision>=0.20", "torchmetrics>=1.6"]
-birefnet = ["torch>=2.5", "transformers>=4.45", "safetensors>=0.4"]
-foreground = [
-    "torch>=2.5", "torchvision>=0.20", "torchmetrics>=1.6",
-    "transformers>=4.45", "safetensors>=0.4",
+birefnet = [
+    "torch>=2.5", "torchvision>=0.20", "transformers>=4.45",
+    "safetensors>=0.4", "timm>=1.0", "kornia>=0.7", "einops>=0.8",
+]
+[tool.uv]
+# depth-anything-3 0.1.1 imports a small inference subset but declares its
+# complete demo/server/training environment (and numpy<2) as hard runtime
+# dependencies.  Static metadata keeps the locked install minimal and lets the
+# NumPy-2/OpenCV-4.12 runtime used and tested by this project remain coherent.
+dependency-metadata = [
+    { name = "depth-anything-3", version = "0.1.1", requires-dist = [] },
 ]
 
 [project.scripts]

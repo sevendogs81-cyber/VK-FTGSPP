@@ -315,7 +315,7 @@ def _read_mask_manifest(path: Path | None, base: Path) -> _MaskManifest:
         raise FileNotFoundError(
             f"foreground mask manifest not found: {path}; generate it with "
             "'ftgspp prepare masks --images <scene>/images "
-            "--output <scene>/masks/birefnet_v1' or configure an existing "
+            "--output <scene>/masks/birefnet_hr' or configure an existing "
             "data.masks.root/source=alpha"
         )
     raw = json.loads(path.read_text(encoding="utf-8"))

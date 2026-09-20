@@ -27,7 +27,8 @@ ftgspp prepare dataset --images data/my_capture/images --fps 30 --eval-cameras 3
 ```
 
 That writes `data/my_capture/manifests/dataset.json` and
-`data/my_capture/ftgspp.yaml`, then prints the next `train` command. The
+`data/my_capture/ftgspp.yaml`, then prints the required initialization step.
+The
 starter YAML pins `init.seed: 0` so later `train.seed` sweeps reuse one
 geometry cache. Default `pipeline.mode` is `scene` (mask-free
 `scene_rgb_v1`).
@@ -38,9 +39,9 @@ complete keyframe RGB PLY set at
 `data/my_capture/points_stride10/`). Files are `f<six-digit-frame>.ply` for
 each keyframe (`f000000.ply`, `f000010.ply`, …) and the last selected frame.
 If that set is incomplete, it loads Depth Anything 3. Put PLYs elsewhere with
-`init.points_path`. Ordinary training does not import DA3; without those PLYs
-you must follow [Optional DA3](#optional-da3) first, or training stops at
-initialization.
+`init.points_path`. The default lightweight install expects that complete PLY
+set. Run `bash scripts/setup.sh --with-da3` (or `--with-init`) before training
+when DA3 must generate missing points.
 
 ```bash
 ftgspp train --config data/my_capture/ftgspp.yaml --devices 0
@@ -78,18 +79,20 @@ with optional optimizer snapshots (`train.save_checkpoints`).
 `train.hard_separation` stays off unless you also enable
 `model.marginal_gating`.
 
-Leave DA3 sizing knobs unset. Initialization follows `init.num_gaussians`,
-`init.keyframe_stride`, `data.frames`, and the native image size.
+Leave DA3 sizing knobs unset. The total experiment budget remains
+`init.num_gaussians`; initialization dynamically resolves DA3 work from that
+budget, `init.keyframe_stride`, `data.frames`, native image size, camera count,
+and foreground-mask coverage. It then reallocates the total across keyframes
+from candidate count, spatial extent, shape complexity, and inter-frame motion.
 `init.da3.quality: auto` (default) derives resolution, fusion cameras, and
 the dense-cache cap. Set `quality: fast|balanced|high` or explicit sizing
 only for a frozen recipe.
 
 ## Foreground reconstruction
 
-Do this after the scene path works. `pipeline.mode: foreground` derives
-`composite_v1`, requires masks, uses a separate foreground DA3 cache, enables
-foreground-only DA3 filtering, trains with random solid backgrounds, and
-ranks checkpoints by foreground PSNR.
+For a masked subject capture, `pipeline.mode: foreground` derives
+`composite_v1`, requires masks, defaults to calibrated visual-hull carving,
+trains with random solid backgrounds, and ranks checkpoints by foreground PSNR.
 `ftgspp train --config ... --pipeline foreground` is the equivalent CLI
 override. Resume always reuses the saved mode.
 
@@ -106,61 +109,136 @@ ftgspp prepare dataset --images data/my_scene/images --fps 30 \
   --pipeline foreground --mask-source alpha --eval-cameras 3
 ```
 
-To generate a versioned BiRefNet cache (needs the `birefnet` extra, same
-venv as Install):
+BiRefNet-HR is an optional preparation component. For the complete raw-RGB
+foreground workflow, install it together with DA3 before generating masks:
 
 ```bash
-uv pip install '.[birefnet]'
+bash scripts/setup.sh --with-init
 ftgspp prepare masks --images data/my_scene/images \
-  --output data/my_scene/masks/birefnet_v1
+  --output data/my_scene/masks/birefnet_hr
 ```
 
-That command writes `data/my_scene/manifests/masks.json` when `--output`
-is `<scene>/masks/<name>`. Then train from
-[examples/foreground_scene.yaml](../examples/foreground_scene.yaml) or from the
-generated YAML.
+Use `--with-birefnet` alone when a point-cloud set or explicit carving bounds
+already exists and only mask generation is needed.
 
-Foreground `init.backend: auto` still needs a provenance-checked foreground
-PLY set or DA3. A manifestless or full-scene PLY directory is never selected
-implicitly; use `init.backend: points` to make that decision explicit.
+The pipeline pins `ZhengPeng7/BiRefNet_HR` model code and weights to an audited
+revision and uses its 2048-square inference size. CUDA uses float16 weights and
+autocast and starts with a batch of two; an
+out-of-memory batch is retried at a smaller size. Use `--precision float32` for
+a numerical control, `--batch-size 1` for a fixed low-memory run, or pin
+select another model revision with `--model-revision`. The resolved model,
+revision, resolution, precision, effective batch sizes and throughput are
+recorded in the manifest. Image decode/hash is prefetched on CPU while the
+current batch runs; restored masks, optional raw arrays and QA overlays are
+encoded by bounded output workers. Shape-compatible masks are restored as a
+batch, and each input/output file is hashed from the bytes already being read
+or written.
+
+That command writes `data/my_scene/manifests/masks.json` when `--output`
+is `<scene>/masks/<name>`. The default geometry path is `carving`. It first
+generates or reuses the configured foreground DA3 cloud, derives robust
+training-only world bounds from it, and carves the mask-supported surface:
+
+```bash
+ftgspp prepare points --method carving \
+  --config examples/foreground_scene.yaml \
+  --output data/my_scene/points_vhull_ibr_stride10 \
+  --resolution 192 --coarse-resolution 48
+ftgspp train --config examples/foreground_scene.yaml --devices 0
+```
+
+Carving uses CUDA automatically when Torch and a CUDA device are available,
+otherwise it uses NumPy on CPU. Projection is chunked and a CUDA OOM retries
+with a smaller chunk. With `--coarse-resolution`, the fine pass enumerates only
+cells covered by the dilated coarse hull. CUDA computes support and keep votes
+on-device and transfers only retained indices and diagnostics. `--device cpu`
+gives the deterministic CPU path. An explicit `--bounds ...` skips DA3-based
+bound estimation; `--input-points` derives bounds from an existing DA3/user PLY
+set.
+
+The second method directly filters the generated/reused DA3 PLYs before IBR
+recoloring:
+
+```bash
+ftgspp prepare points --method point_filtering \
+  --config examples/foreground_scene.yaml \
+  --output data/my_scene/points_vhull_filtered_stride10
+```
+
+Train that filtered set with the matching explicit backend:
+
+```bash
+ftgspp train --config examples/foreground_scene.yaml --devices 0 \
+  --set init.backend=point_filtering \
+  --set init.points_path=../data/my_scene/points_vhull_filtered_stride10
+```
+
+Each generated manifest records the selected method. The `carving` and
+`point_filtering` backends accept only a complete, integrity-checked manifest
+for that exact method. `--input-points` remains available to reuse an existing
+DA3/user PLY directory.
+
+| Method | Geometry source | Practical tradeoff |
+|---|---|---|
+| `carving` (default) | Mask-supported surface band inside DA3/user-derived bounds | Stronger silhouette control and less dependence on DA3 point placement; voxel projection costs more time and memory |
+| `point_filtering` | DA3/user surface points retained by multi-view masks | Usually faster because it skips the voxel grid; it inherits missing surfaces, depth noise, and sampling bias from the source cloud |
+
+Both methods produce surface candidates before the shared Gaussian initializer.
+Carving's voxel volume is an intermediate occupancy representation; the default
+`surface_band` output does not fill the object interior. Shared IBR coloring
+projects and aggregates points in vectorized arrays, and its robust fusion is
+chunked to bound temporary memory.
 
 The foreground evaluator reports black/white-background PSNR/SSIM, foreground
 PSNR, silhouette IoU, boundary F-score, background opacity leakage, foreground
 holes and mask consistency. An optional validity map is a separate ignore
 signal.
 
-## Optional DA3
+## DA3 point generation
 
-`[da3]` installs Torch/TorchVision only. It does **not** install Depth
-Anything 3. Install the upstream
+`bash scripts/setup.sh --with-da3` and the `[da3]` extra install the pinned
+Depth Anything 3 0.1.1 inference stack. `--with-init` installs it together
+with BiRefNet-HR. The lock replaces the upstream package's broad
+demo/server/training metadata with the direct inference dependencies used here;
+the runtime has been tested with this project's NumPy 2/OpenCV 4.12 stack. The upstream
 [Depth Anything 3](https://github.com/ByteDance-Seed/depth-anything-3)
-package and weights in the same environment, then set
-`init.da3.model_path` for offline use. With `model_path` unset, the default
+weights can be selected with `init.da3.model_path` for offline use. With
+`model_path` unset, the default
 `init.da3.model_name` (`depth-anything/DA3-BASE`) may try a network download.
 
 ```bash
-uv pip install '.[da3]'
+uv sync --locked --no-dev --no-editable --extra da3
 ```
 
-DA3 runs on CUDA (`init.da3.device`). That ordinal can differ from the
-Vulkan `--devices` id used for training. Foreground + `auto` initialization
-needs the mask extra **and** this DA3 stack.
+DA3 uses CUDA when available and otherwise falls back to CPU
+(`init.da3.device`). That ordinal can differ from the
+Vulkan `--devices` id used for training. `init.backend: da3` uses its cloud
+directly; uncalibrated captures must use DA3 because visual-hull projection
+requires a camera rig.
 
-## Research controls (not the default path)
+```bash
+ftgspp train --config examples/foreground_scene.yaml --devices 0 \
+  --set init.backend=da3
+```
+
+## Research controls
 
 - [examples/foreground_fixed_black.yaml](../examples/foreground_fixed_black.yaml)
   keeps `composite_v1` but fixes the solid background to black.
 - [examples/foreground_visual_hull.yaml](../examples/foreground_visual_hull.yaml)
-  trains from a calibrated visual-hull + IBR PLY set (requires calibration;
-  uncalibrated input cannot use `init.backend: points`):
+  spells out the default calibrated visual-hull + IBR path:
 
 ```bash
-ftgspp prepare points --config examples/foreground_visual_hull.yaml \
+ftgspp prepare points --method carving \
+  --config examples/foreground_visual_hull.yaml \
   --output data/my_scene/points_vhull_ibr_stride10 \
-  --bounds XMIN YMIN ZMIN XMAX YMAX ZMAX --resolution 192 \
-  --sampling surface_band
+  --resolution 192 --sampling surface_band
 ftgspp train --config examples/foreground_visual_hull.yaml --devices 0
 ```
+
+- [examples/foreground_point_filtering.yaml](../examples/foreground_point_filtering.yaml)
+  exposes the DA3-cloud filtering route with
+  `init.backend: point_filtering`.
 
 A locked final test set is evaluated without entering checkpoint selection.
 `ftgspp-final-test-v2` requires a completed run with `export_selection.json`:
@@ -177,10 +255,11 @@ Validation rejects any camera/frame, path, or RGB hash already used by
 training or checkpoint selection. Official evaluation is `ftgspp eval`.
 Scripts under `dev/tools/` are unsupported research helpers.
 
-Optional extras: `[da3]`, `[lpips]`, `[birefnet]`, `[foreground]` (BiRefNet +
-LPIPS family together), `[tensorboard]`. LPIPS is never part of the training
-loss and is off unless `eval.lpips` is enabled. The native model-flow
-renderer remains diagnostic only.
+Optional extras: `[da3]`, `[lpips]`, `[birefnet]`, and `[tensorboard]`.
+`scripts/setup.sh --with-init` combines `[birefnet]` and `[da3]` for users
+starting from raw RGB. LPIPS is never part of the training loss and is off
+unless `eval.lpips` is enabled. The native model-flow renderer remains
+diagnostic only.
 
 SelfCap video layouts:
 

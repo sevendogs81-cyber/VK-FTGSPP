@@ -19,7 +19,7 @@ from ftgspp.io.export_selection import (
 _PREPARE_SUBCOMMANDS = {
     "dataset": "index a rectangular image grid or validate a view manifest",
     "masks": "generate a BiRefNet mask cache (optional extra)",
-    "points": "calibrated visual-hull + IBR point clouds (optional extra)",
+    "points": "carve masks or hull-filter existing points, then apply IBR color",
     "selfcap": "SelfCap layout adapter",
     "final-test": "validate a locked final-test manifest against a run",
 }

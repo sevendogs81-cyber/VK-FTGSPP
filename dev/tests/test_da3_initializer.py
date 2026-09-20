@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import unittest
@@ -13,7 +14,6 @@ import numpy as np
 from ftgspp.data.scene import Scene, View
 from ftgspp.io.ply import read_point_ply, write_point_ply
 from ftgspp.optional.da3 import (
-    _PredictionBundle,
     _cache_namespace,
     _camera_chunks,
     _filter_prediction_bundles,
@@ -21,8 +21,9 @@ from ftgspp.optional.da3 import (
     _intrinsic_to_source,
     _loaded_model_identity,
     _prediction_transform_matrix,
-    _validate_prediction_depth_type,
+    _PredictionBundle,
     _synchronized_views,
+    _validate_prediction_depth_type,
     depth_to_points,
     generate_da3_points,
     geometric_consistency_filter,
@@ -518,6 +519,22 @@ class DA3InitializerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = write_point_ply(Path(tmp) / "f000000.ply", xyz, rgb)
             loaded_xyz, loaded_rgb = read_point_ply(path)
+        np.testing.assert_allclose(loaded_xyz, xyz)
+        np.testing.assert_array_equal(loaded_rgb, rgb)
+
+    def test_generated_ply_hash_is_reused_during_write_and_read(self):
+        xyz = np.asarray([[0, 1, 2], [3, 4, 5]], np.float32)
+        rgb = np.asarray([[10, 20, 30], [40, 50, 60]], np.uint8)
+        with tempfile.TemporaryDirectory() as tmp:
+            path, write_digest = write_point_ply(
+                Path(tmp) / "f000000.ply", xyz, rgb, return_sha256=True,
+            )
+            loaded_xyz, loaded_rgb, read_digest = read_point_ply(
+                path, return_sha256=True,
+            )
+            expected = hashlib.sha256(path.read_bytes()).hexdigest()
+        self.assertEqual(write_digest, expected)
+        self.assertEqual(read_digest, expected)
         np.testing.assert_allclose(loaded_xyz, xyz)
         np.testing.assert_array_equal(loaded_rgb, rgb)
 

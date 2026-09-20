@@ -185,7 +185,7 @@ def test_train_cli_pipeline_switch_resolves_foreground_profile(tmp_path, monkeyp
     ])
     config = captured["config"]
     assert config.pipeline.mode == "foreground"
-    assert config.init.backend == "auto"
+    assert config.init.backend == "carving"
     assert config.init.da3.foreground_only
     assert config.pipeline.image_objective == "composite_v1"
     assert config.pipeline.eval_protocol == "foreground_v1"

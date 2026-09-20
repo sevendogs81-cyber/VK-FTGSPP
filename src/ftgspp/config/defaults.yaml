@@ -34,7 +34,8 @@ data:
     rgb_encoding: straight
     fingerprint: null
 init:
-  # Use existing RGB PLYs when complete; otherwise invoke optional DA3.
+  # Scene mode uses existing RGB PLYs when complete, then optional DA3.
+  # The foreground profile overrides this with explicit visual-hull carving.
   # DA3 sizing follows num_gaussians, keyframe_stride, the frame span, and
   # native image size. Users do not need to set process_res / max_points.
   backend: auto

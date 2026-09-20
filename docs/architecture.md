@@ -14,8 +14,8 @@ but is in development and not a supported user path.
   updates, two phase schedules, evaluation and bounded image prefetch. Pair
   updates exist but are in development.
 - `src/ftgspp/io`: explicit NPZ models, V6 checkpoints, PLY.
-- `src/ftgspp/optional`: evaluation-only LPIPS and the lazy DA3 initializer; default
-  imports do not load Torch or any upstream model package.
+- `src/ftgspp/optional`: BiRefNet-HR masks, visual-hull/IBR preparation,
+  evaluation-only LPIPS, and lazy DA3 integration. CLI imports remain lazy.
 - `native/src/device`: buffers, compute/transfer submission, timing and telemetry.
 - `native/src/render`: projection/rasterization and adaptive dispatch selection.
 - `native/src/training`: backward, Adam, relocation and hard-separation kernels.
@@ -46,12 +46,13 @@ processed RGB initializes the same SH-DC coefficient used by PLY input. Each
 keyframe's views are voxel-fused in world space before any point cap; the fused
 dense cloud is cached as the 3-NN velocity reference, and Gaussian means are
 spatially sampled from it to `init.num_gaussians // keyframes`. Explicit
-Gaussian conversion (algorithm `ftgspp-init-l3-v3`) time-anchors means so
+Gaussian conversion (algorithm `ftgspp-init-l3-v4`) time-anchors means so
 `x(t_ref)` recovers the source point, isolates unique-source KNN scales from
 replica points, and records L3 identity separately from the DA3 L2 cache.
 The initializer has one implementation path: sequential camera chunks,
-cross-view depth consistency, adaptive surface-grid sampling, and exact adaptive
-Gaussian budgeting. The
+cross-view depth consistency, bounded-probe adaptive surface-grid sampling, and
+exact adaptive Gaussian budgeting. L3 allocates final arrays once, while PLY
+loading validates content hashes during the same read. The
 estimated rig and generated PLYs are cached together, so a subsequent run can
 resume without re-estimation or consume a user PLY set in the cached coordinate
 system. Per-point attribute sidecars are not written because L3 consumes only
@@ -59,6 +60,20 @@ XYZ/RGB. New DA3 cache directories use a readable configuration prefix
 (`scene-init0-kf60-v8-r504-<12hex>`) followed by a collision-resistant short
 identity. `init.seed` can pin this namespace independently of `train.seed`.
 `init.backend=points` remains an explicit, calibrated/user-cloud path.
+
+The foreground profile defaults to `init.backend=carving`. Both public geometry
+preparations first reuse or generate the foreground DA3 cache. Carving derives
+robust world bounds from that cache, then creates a mask-supported surface-band
+grid. Its coarse pass expands to sparse fine-grid indices, so projection work is
+limited to surviving regions; the CUDA path keeps vote arrays on-device and
+returns only selected indices. Point filtering retains DA3 samples supported by
+the silhouettes. Their
+training selectors are `init.backend=carving` and
+`init.backend=point_filtering`. Training verifies the selected method,
+dataset/source identity, keyframe set, and every PLY hash. `init.backend=points`
+remains the explicit generic/user-cloud escape hatch, while
+`init.backend=da3` consumes the foreground-aware DA3 cloud without either
+visual-hull preparation.
 
 ## One update
 

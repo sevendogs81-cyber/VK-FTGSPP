@@ -3,7 +3,8 @@
 Replays the selected initializer's sampling and time-jitter RNG on recorded
 clouds, without training or rewriting caches. Ratios diagnose geometry, not
 correspondence correctness. v1/v2 preserve the historical sampler and scale
-formula; v3 uses the current adaptive surface sampler and non-self spacing.
+formula; v3/v4 use adaptive surface sampling and non-self spacing. v4 adds the
+bounded-sample voxel search used by current initialization.
 Run with the checkout's src directory on PYTHONPATH.
 """
 from __future__ import annotations
@@ -18,10 +19,13 @@ from omegaconf import OmegaConf
 from scipy.spatial import cKDTree
 
 from ftgspp.io.ply import read_point_ply
-from ftgspp.training.initialize import (
-    _spacing, _velocity, keyframe_neighbor_indices, sample_keyframe_points,
-)
 from ftgspp.training.init_plan import initialization_seed
+from ftgspp.training.initialize import (
+    _spacing,
+    _velocity,
+    keyframe_neighbor_indices,
+    sample_keyframe_points,
+)
 
 
 def historical_spacing(points: np.ndarray) -> np.ndarray:
@@ -95,17 +99,19 @@ def audit(run: Path, *, replay_version: str = "auto") -> dict:
     version = str(replay_version)
     if version == "auto":
         algorithm = str(manifest.get("algorithm", ""))
-        version = "v3" if algorithm.endswith("l3-v3") else (
+        version = "v4" if algorithm.endswith("l3-v4") else (
+            "v3" if algorithm.endswith("l3-v3") else (
             "v2" if algorithm.endswith("l3-v2") else "v1"
-        )
-    if version not in {"v1", "v2", "v3"}:
-        raise ValueError("replay-version must be auto, v1, v2, or v3")
+        ))
+    if version not in {"v1", "v2", "v3", "v4"}:
+        raise ValueError("replay-version must be auto, v1, v2, v3, or v4")
     clouds = [read_point_ply(Path(f["provenance"]["root"]) / f"f{f['frame']:06d}.ply")[0]
               for f in frames]
     if any(len(xyz) != frame["available_points"]
            for frame, xyz in zip(frames, clouds, strict=True)):
         raise ValueError("source population differs from recorded initialization")
-    seed = initialization_seed(config) if version == "v3" else int(config.train.seed)
+    current = version in {"v3", "v4"}
+    seed = initialization_seed(config) if current else int(config.train.seed)
     rng = np.random.default_rng(seed)
     neighbors = keyframe_neighbor_indices([len(xyz) for xyz in clouds])
     collected = {key: [] for key in (
@@ -113,27 +119,27 @@ def audit(run: Path, *, replay_version: str = "auto") -> dict:
     )}
     grid_fractions = []
     cloud_hashes = []
-    time_anchor = version in {"v2", "v3"} and bool(
+    time_anchor = version in {"v2", "v3", "v4"} and bool(
         getattr(config.init, "time_anchor", True)
     )
-    isolate = version in {"v2", "v3"} and bool(
+    isolate = version in {"v2", "v3", "v4"} and bool(
         getattr(config.init, "isolate_source_scales", True)
     )
     for i, (frame, xyz) in enumerate(zip(frames, clouds, strict=True)):
         cloud_hashes.append(hashlib.sha256(np.ascontiguousarray(xyz).tobytes()).hexdigest())
         budget = int(frame["selected_points"])
-        if version == "v3" and (budget <= 0 or len(xyz) == 0):
+        if current and (budget <= 0 or len(xyz) == 0):
             continue
         unique_budget = min(budget, len(xyz))
         sample_diagnostics: dict[str, object] = {}
-        if version == "v3":
+        if current:
             selected, source, spacing, sample_diagnostics = sample_keyframe_points(rng, xyz, budget)
             unique_sigma = config.init.scale * spacing
         else:
             selected = historical_select(rng, xyz, unique_budget)
             source = xyz[selected]
             unique_sigma = config.init.scale * historical_spacing(source)
-        j = neighbors[i] if version == "v3" else i + 1 if i + 1 < len(frames) else i - 1
+        j = neighbors[i] if current else i + 1 if i + 1 < len(frames) else i - 1
         t_ref = float(frame["reference_timestamp"])
         dt = 0.0 if j is None else frames[j]["reference_timestamp"] - t_ref
         times = (
@@ -150,7 +156,7 @@ def audit(run: Path, *, replay_version: str = "auto") -> dict:
         else:
             means = source
         sigma = unique_sigma if isolate else config.init.scale * (
-            _spacing(means) if version == "v3" else historical_spacing(means)
+            _spacing(means) if current else historical_spacing(means)
         )
         restored = means - (times - np.float32(t_ref)) * velocity
         collected["sigma"].append(sigma)
@@ -160,7 +166,7 @@ def audit(run: Path, *, replay_version: str = "auto") -> dict:
         )
         collected["frame_motion_sigma"].append(abs(dt) * speed / np.maximum(sigma, 1e-12))
         collected["source_restore_mae"].append(np.mean(np.abs(restored - source), axis=1))
-        if version == "v3":
+        if current:
             grid_fractions.append(float(
                 sample_diagnostics.get("occupied_fraction", 1.0)
             ))
@@ -190,10 +196,12 @@ def audit(run: Path, *, replay_version: str = "auto") -> dict:
         "caveats": [
             "Speed is KNN displacement, not validated physical motion.",
             "Sigma is the initialized isotropic standard deviation in world units.",
-            "v1 replays the historical un-anchored initializer; v2/v3 use time anchoring.",
+            "v1 replays the historical un-anchored initializer; v2/v3/v4 use time anchoring.",
             "This tool does not rewrite caches or reinterpret old PSNR tables.",
-            "v1/v2 grid fraction uses the historical bbox-volume grid; v3 reports "
-            "the portion represented by adaptive occupied cells.",
+            (
+                "v1/v2 grid fraction uses the historical bbox-volume grid; "
+                "v3/v4 report the portion represented by adaptive occupied cells."
+            ),
         ],
     }
 
@@ -202,8 +210,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("runs", type=Path, nargs="+")
     parser.add_argument(
-        "--replay-version", choices=("auto", "v1", "v2", "v3"), default="auto",
-        help="v1 is historical; v2 uses time anchoring; v3 also uses adaptive surface sampling",
+        "--replay-version", choices=("auto", "v1", "v2", "v3", "v4"), default="auto",
+        help="v4 is current; v1-v3 replay historical initializers",
     )
     parser.add_argument("--output", type=Path, help="new JSONL file; refuses overwrite")
     args = parser.parse_args()

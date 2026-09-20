@@ -28,14 +28,14 @@ import os
 import tempfile
 import time
 import uuid
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any
 
 import numpy as np
 
 from ftgspp.data.scene import Scene, View
-from ftgspp.io.ply import read_point_ply, write_point_ply_atomic
 from ftgspp.io.init_cache import (
     DA3_SCHEMA,
     namespace_lock,
@@ -44,6 +44,7 @@ from ftgspp.io.init_cache import (
     resolve_published_cache_root,
     write_json_atomic,
 )
+from ftgspp.io.ply import read_point_ply, write_point_ply_atomic
 from ftgspp.optional.da3_evidence import target_depth_is_trusted
 from ftgspp.optional.da3_schedule import (
     foreground_schedule_metadata,
@@ -1522,8 +1523,8 @@ def generate_da3_points(
 
     if not frame_positions:
         raise ValueError("DA3 initialization requires at least one keyframe")
-    from ftgspp.training.initialize import _valid_da3_cache
     from ftgspp.data.scene import _load_da3_camera_manifest
+    from ftgspp.training.initialize import _valid_da3_cache
 
     base = _cache_root(config)
     frames = [int(dataset.frames[int(position)]) for position in frame_positions]
@@ -1534,6 +1535,7 @@ def generate_da3_points(
                 config, dataset, root, expected_frames=frames,
                 frame_positions=frame_positions,
                 configured_model_identity=configured_model,
+                verify_ply_hashes=False,
             ):
                 continue
             geometry = None
@@ -1544,7 +1546,22 @@ def generate_da3_points(
                     )
                     if geometry is None:
                         continue
-                points = [read_point_ply(root / f"f{frame:06d}.ply") for frame in frames]
+                manifest_path = root / "manifest.json"
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                expected_hashes = {
+                    str(row["ply"]): str(row["ply_sha256"])
+                    for row in manifest.get("keyframes", [])
+                    if isinstance(row, dict)
+                    and isinstance(row.get("ply"), str)
+                    and isinstance(row.get("ply_sha256"), str)
+                }
+                points = []
+                for frame in frames:
+                    path = root / f"f{frame:06d}.ply"
+                    xyz, rgb, digest = read_point_ply(path, return_sha256=True)
+                    if expected_hashes.get(path.name) != digest:
+                        raise ValueError(f"DA3 cache keyframe hash mismatch: {path}")
+                    points.append((xyz, rgb))
             except (OSError, ValueError) as exc:
                 logger.warning("ignoring unreadable DA3 generation %s: %s", root, exc)
                 continue
@@ -1554,8 +1571,6 @@ def generate_da3_points(
                     {camera: value[1] for camera, value in geometry.items()},
                     {camera: value[2] for camera, value in geometry.items()},
                 )
-            manifest_path = root / "manifest.json"
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             if root != base:
                 publish_cache_pointer(base, root, manifest_path, manifest["fingerprint"])
             return DA3PointClouds(points, cache_root=root, generated=False)
@@ -1701,6 +1716,7 @@ def _generate_da3_points(
         )
         rng = np.random.default_rng(initialization_seed(config))
         result: list[tuple[np.ndarray, np.ndarray]] = []
+        ply_hashes: dict[int, str] = {}
         diagnostics_rows: list[dict[str, object]] = []
 
         rig_extrinsics: dict[int, np.ndarray] = {}
@@ -1823,10 +1839,12 @@ def _generate_da3_points(
                 )
             result.append((xyz, rgb))
             with timer.stage("cache_write"):
-                ply_path = write_point_ply_atomic(
+                ply_path, ply_digest = write_point_ply_atomic(
                     cache_root / f"f{reference_frame:06d}.ply", xyz, rgb,
                     allow_empty=len(xyz) == 0,
+                    return_sha256=True,
                 )
+                ply_hashes[reference_frame] = ply_digest
             logger.info(
                 "DA3 initialization keyframe %d/%d (f%06d): %d fused points "
                 "(raw=%d voxel=%.5g, dense 3-NN reference)",
@@ -1918,10 +1936,12 @@ def _generate_da3_points(
                 )
             result.append((xyz, rgb))
             with timer.stage("cache_write"):
-                ply_path = write_point_ply_atomic(
+                ply_path, ply_digest = write_point_ply_atomic(
                     cache_root / f"f{frame:06d}.ply", xyz, rgb,
                     allow_empty=len(xyz) == 0,
+                    return_sha256=True,
                 )
+                ply_hashes[frame] = ply_digest
             logger.info(
                 "DA3 initialization keyframe %d/%d (f%06d): %d fused points "
                 "(raw=%d voxel=%.5g, dense 3-NN reference)",
@@ -1957,7 +1977,7 @@ def _generate_da3_points(
                 "frame": frame,
                 "reference_timestamp": reference_times[frame],
                 "ply": ply_path.name,
-                "ply_sha256": hashlib.sha256(ply_path.read_bytes()).hexdigest(),
+                "ply_sha256": ply_hashes[frame],
             })
         cuda_peak_bytes: int | None = None
         try:

@@ -1,8 +1,8 @@
-# Research control: calibrated visual-hull + IBR (not the default foreground path).
-# Prepare the PLY set first, replacing WORLD_* with locked training-only bounds:
-#   ftgspp prepare points --config examples/foreground_visual_hull.yaml \
+# Calibrated visual-hull + IBR, the default foreground geometry path.
+# Prepare the PLY set first. DA3 supplies automatic training-only bounds:
+#   ftgspp prepare points --method carving \
+#     --config examples/foreground_visual_hull.yaml \
 #     --output data/my_scene/points_vhull_ibr_stride10 \
-#     --bounds WORLD_XMIN WORLD_YMIN WORLD_ZMIN WORLD_XMAX WORLD_YMAX WORLD_ZMAX \
 #     --resolution 192 --coarse-resolution 48 --sampling surface_band \
 #     --surface-band-layers 2 --max-points 250000
 # The same YAML then trains from that integrity-checked PLY/manifest directory.
@@ -19,7 +19,7 @@ data:
     source: external
     manifest_path: ../data/my_scene/manifests/masks.json
 init:
-  backend: points
+  backend: carving
   points_path: ../data/my_scene/points_vhull_ibr_stride10
   # Keep geometry initialization stable across training-seed sweeps.
   seed: 0

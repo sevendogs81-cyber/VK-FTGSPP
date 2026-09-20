@@ -35,9 +35,12 @@ def _valid_config() -> AppConfig:
 class StaticConfigValidationTests(unittest.TestCase):
     def test_shipped_examples_resolve_and_final_test_template_is_json(self):
         expected = {
-            "foreground_fixed_black.yaml": ("foreground", "composite_v1", "auto"),
-            "foreground_scene.yaml": ("foreground", "composite_v1", "auto"),
-            "foreground_visual_hull.yaml": ("foreground", "composite_v1", "points"),
+            "foreground_fixed_black.yaml": ("foreground", "composite_v1", "carving"),
+            "foreground_point_filtering.yaml": (
+                "foreground", "composite_v1", "point_filtering",
+            ),
+            "foreground_scene.yaml": ("foreground", "composite_v1", "carving"),
+            "foreground_visual_hull.yaml": ("foreground", "composite_v1", "carving"),
             "scene.yaml": ("scene", "scene_rgb_v1", "auto"),
         }
         for name, contract in expected.items():
@@ -80,7 +83,11 @@ class StaticConfigValidationTests(unittest.TestCase):
             config.data.masks.manifest_path,
             (ROOT / "scene/manifests/masks.json").resolve(),
         )
-        self.assertEqual(config.init.backend, "auto")
+        self.assertEqual(config.init.backend, "carving")
+        self.assertEqual(
+            config.init.points_path,
+            (ROOT / "scene/points_vhull_ibr_stride10").resolve(),
+        )
         self.assertTrue(config.init.da3.foreground_only)
         self.assertIsNone(config.init.da3.min_consistent_views)
         self.assertIsNone(config.init.da3.use_sky_mask)
@@ -111,6 +118,27 @@ class StaticConfigValidationTests(unittest.TestCase):
             "lpips_min_roi_size",
         ):
             self.assertTrue(hasattr(config.eval, field_name))
+
+    def test_foreground_da3_route_is_an_explicit_override(self):
+        config = resolve_config(OmegaConf.create({
+            "pipeline": {"mode": "foreground"},
+            "data": {"root": "scene"},
+            "init": {"backend": "da3"},
+        }), base_dir=ROOT).config
+        self.assertEqual(config.init.backend, "da3")
+        self.assertTrue(config.init.da3.foreground_only)
+
+    def test_foreground_point_filtering_route_is_explicit(self):
+        config = resolve_config(OmegaConf.create({
+            "pipeline": {"mode": "foreground"},
+            "data": {"root": "scene"},
+            "init": {
+                "backend": "point_filtering",
+                "points_path": "scene/points_vhull_filtered_stride10",
+            },
+        }), base_dir=ROOT).config
+        self.assertEqual(config.init.backend, "point_filtering")
+        self.assertTrue(config.init.da3.foreground_only)
 
     def test_scene_da3_geometry_gates_stay_automatic(self):
         config = resolve_config(OmegaConf.create({
@@ -154,6 +182,9 @@ class StaticConfigValidationTests(unittest.TestCase):
             validate_static_config(config)
         config.data.masks.source = "alpha"
         config.data.masks.required = True
+        with self.assertRaisesRegex(ValueError, "explicit init.backend"):
+            validate_static_config(config)
+        config.init.backend = "da3"
         with self.assertRaisesRegex(ValueError, "foreground-aware"):
             validate_static_config(config)
         config.init.da3.foreground_only = True
@@ -347,6 +378,7 @@ class StaticConfigValidationTests(unittest.TestCase):
         config.pipeline.mode = "foreground"
         config.data.masks.source = "alpha"
         config.data.masks.required = True
+        config.init.backend = "da3"
         config.init.da3.foreground_only = True
         config.eval.lpips_min_roi_size = 16
         with self.assertRaisesRegex(ValueError, "at least 32"):

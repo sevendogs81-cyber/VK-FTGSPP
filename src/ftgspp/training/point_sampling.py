@@ -118,12 +118,12 @@ def _voxel_winners(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return one center-nearest point and its voxel id for every occupied cell."""
 
-    inverse = _voxel_inverse(points, voxel)
-    voxel_count = int(inverse.max()) + 1
     origin = points.min(axis=0)
-    # Recover voxel centers from the point coordinates.  This keeps the winner
-    # on the original surface instead of averaging points across a thin sheet.
     keys = np.floor((points - origin) / np.float32(voxel)).astype(np.int64)
+    inverse = _row_inverse(keys)
+    voxel_count = int(inverse.max()) + 1
+    # Keep the winner on the original surface instead of averaging points
+    # across a thin sheet.
     centers = (keys.astype(np.float32) + 0.5) * np.float32(voxel) + origin
     distance = np.sum((points - centers) ** 2, axis=1)
     # Assign farthest-to-nearest so the final write for each voxel is its
@@ -138,6 +138,8 @@ def _voxel_winners(
 def _adaptive_surface_voxel(
     points: np.ndarray,
     budget: int,
+    *,
+    diagnostics: dict[str, object] | None = None,
 ) -> tuple[float, int]:
     """Choose a voxel edge from occupied cells rather than bbox volume.
 
@@ -152,31 +154,117 @@ def _adaptive_surface_voxel(
     extent = max(float(np.max(span)), 1e-8)
     lower = max(extent / float(2**20), 1e-8)
     upper = max(extent * 2.0, lower * 2.0)
+    upper_count = 1
 
     # Keep a lower bracket that still has enough occupied cells.  Repeated
     # coordinates can make the number of distinct cells smaller than budget;
     # in that case the caller will use the exact-budget fallback below.
+    full_passes = 1
     lower_count = int(_voxel_inverse(points, lower).max()) + 1
     for _ in range(8):
         if lower_count >= budget:
             break
         lower *= 0.25
         lower_count = int(_voxel_inverse(points, lower).max()) + 1
+        full_passes += 1
 
     best_voxel = lower
     best_count = lower_count
-    # Geometric bisection is appropriate because occupied-cell count is mostly
-    # monotonic in cell size.  Keep the closest valid count to avoid depending
-    # on exact powers of two in anisotropic clouds.
-    for _ in range(16):
-        middle = float(np.sqrt(lower * upper))
+
+    # Estimate the useful part of the search interval on a deterministic,
+    # bounded subset.  The old implementation rebuilt a full N-point spatial
+    # hash 16 times; this keeps those cheap probes independent of cloud size.
+    sample_limit = 8_192
+    if len(points) > sample_limit:
+        sample_ids = np.linspace(
+            0, len(points) - 1, sample_limit, dtype=np.int64,
+        )
+        search_points = points[sample_ids]
+    else:
+        search_points = points
+    sample_target = max(
+        1,
+        min(
+            len(search_points),
+            int(np.ceil(budget * len(search_points) / len(points))),
+        ),
+    )
+    sample_lower, sample_upper = lower, upper
+    candidate = lower
+    for _ in range(12):
+        middle = float(np.sqrt(sample_lower * sample_upper))
+        count = int(_voxel_inverse(search_points, middle).max()) + 1
+        if count >= sample_target:
+            candidate = middle
+            sample_lower = middle
+        else:
+            sample_upper = middle
+
+    # Calibrate the approximate result with only a few full-cloud passes.
+    # Keep a valid lower bracket throughout so discontinuous voxel counts still
+    # return at least the requested number of representatives when possible.
+    if candidate > lower:
+        count = int(_voxel_inverse(points, candidate).max()) + 1
+        full_passes += 1
+        if count >= budget:
+            if count < best_count or best_count < budget:
+                best_voxel, best_count = candidate, count
+            lower = candidate
+            lower_count = count
+        else:
+            upper = candidate
+            upper_count = count
+    for _ in range(5):
+        # Surface clouds are locally close to two-dimensional, so occupied
+        # count scales approximately with edge^-2.  Use that relation to aim
+        # directly at the budget, while the geometric bracket keeps the search
+        # safe for volumes, curves, and discontinuous counts.
+        if lower_count == len(points) and upper_count < budget:
+            # The tiny lower bracket often puts every point in its own cell and
+            # has no useful local slope. Approach from the measured upper
+            # bracket and bias slightly toward enough cells.
+            predicted = (
+                upper * np.sqrt(max(upper_count / budget, 1e-12)) * 0.92
+            )
+        else:
+            dimension = 2.0
+            if (
+                0 < upper_count < lower_count < len(points)
+                and upper > lower
+            ):
+                dimension = float(np.clip(
+                    np.log(lower_count / upper_count) / np.log(upper / lower),
+                    0.5,
+                    3.0,
+                ))
+            predicted = lower * max(
+                lower_count / budget, 1.0,
+            ) ** (1.0 / dimension)
+        middle = float(np.clip(
+            predicted,
+            lower * 1.01,
+            max(lower * 1.01, upper / 1.01),
+        ))
+        if not lower < middle < upper:
+            middle = float(np.sqrt(lower * upper))
         count = int(_voxel_inverse(points, middle).max()) + 1
+        full_passes += 1
         if count >= budget:
             if count < best_count or best_count < budget:
                 best_voxel, best_count = middle, count
             lower = middle
+            lower_count = count
         else:
             upper = middle
+            upper_count = count
+        if best_count >= budget and best_count <= int(np.ceil(1.05 * budget)):
+            break
+    if diagnostics is not None:
+        diagnostics.update({
+            "voxel_search_full_passes": int(full_passes),
+            "voxel_search_sample_points": int(len(search_points)),
+            "voxel_search_sample_target": int(sample_target),
+        })
     return float(best_voxel), int(best_count)
 
 
@@ -211,8 +299,11 @@ def spatial_sample_indices(
             })
         return np.arange(count, dtype=np.int64)
 
-    voxel, estimated_cells = _adaptive_surface_voxel(points, budget)
-    winners, inverse = _voxel_winners(points, voxel)
+    search_diagnostics: dict[str, object] = {}
+    voxel, estimated_cells = _adaptive_surface_voxel(
+        points, budget, diagnostics=search_diagnostics,
+    )
+    winners, _inverse = _voxel_winners(points, voxel)
     voxel_count = int(len(winners))
     if voxel_count >= budget:
         chosen = rng.choice(voxel_count, size=budget, replace=False)
@@ -241,6 +332,7 @@ def spatial_sample_indices(
             "voxel_size": float(voxel),
             "occupied_fraction": float(voxel_count / max(budget, 1)),
             "fallback_points": fallback_points,
+            **search_diagnostics,
         })
     return selected
 

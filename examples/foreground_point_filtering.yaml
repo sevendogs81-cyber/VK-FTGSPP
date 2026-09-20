@@ -1,0 +1,27 @@
+# DA3 points filtered by calibrated silhouettes, then IBR recolored.
+# Prepare the versioned PLY set before training:
+#   ftgspp prepare points --method point_filtering \
+#     --config examples/foreground_point_filtering.yaml \
+#     --output data/my_scene/points_vhull_filtered_stride10
+pipeline:
+  mode: foreground
+data:
+  name: my_foreground_point_filtering
+  root: ../data/my_scene
+  frames: {start: 0, stop: 300}
+  scale: 0.5
+  train_cameras: [0, 1, 2]
+  eval_cameras: [3]
+  masks:
+    source: external
+    manifest_path: ../data/my_scene/manifests/masks.json
+init:
+  backend: point_filtering
+  points_path: ../data/my_scene/points_vhull_filtered_stride10
+  seed: 0
+  num_gaussians: 2000000
+  keyframe_stride: 10
+train:
+  iterations: 30000
+run:
+  output_path: ../runs/my_foreground_point_filtering
