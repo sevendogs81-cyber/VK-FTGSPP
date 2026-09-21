@@ -115,7 +115,6 @@ class StaticConfigValidationTests(unittest.TestCase):
             "selector_max_background_opacity_leakage",
             "selector_max_foreground_holes",
             "selector_min_boundary_fscore",
-            "lpips_min_roi_size",
         ):
             self.assertTrue(hasattr(config.eval, field_name))
 
@@ -369,23 +368,6 @@ class StaticConfigValidationTests(unittest.TestCase):
             validate_static_config(config)
         config.init.da3.target_bounds = [-1, -2, -3, 1, 2, 3]
         validate_static_config(config)
-
-    def test_eval_lpips_requires_foreground_pipeline_and_valid_sizes(self):
-        config = copy.deepcopy(_valid_config())
-        config.eval.lpips = True
-        with self.assertRaisesRegex(ValueError, "pipeline.mode=foreground"):
-            validate_static_config(config)
-        config.pipeline.mode = "foreground"
-        config.data.masks.source = "alpha"
-        config.data.masks.required = True
-        config.init.backend = "da3"
-        config.init.da3.foreground_only = True
-        config.eval.lpips_min_roi_size = 16
-        with self.assertRaisesRegex(ValueError, "at least 32"):
-            validate_static_config(config)
-        config.eval.lpips_min_roi_size = 64
-        validate_static_config(config)
-
 
 if __name__ == "__main__":
     unittest.main()

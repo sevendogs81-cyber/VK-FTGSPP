@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import logging
 import sys
@@ -15,6 +14,7 @@ from ftgspp.io.export_selection import (
     export_selection_path,
     load_export_selection,
 )
+from ftgspp.io.hashing import file_sha256
 
 _PREPARE_SUBCOMMANDS = {
     "dataset": "index a rectangular image grid or validate a view manifest",
@@ -117,6 +117,23 @@ def main(argv: list[str] | None = None) -> None:
         "--test-manifest", type=Path,
         help="locked ftgspp-final-test-v1/v2 manifest; never used for model selection",
     )
+    final_metrics = evaluate.add_argument_group("optional final-test metrics")
+    final_metrics.add_argument(
+        "--lpips", action="store_true",
+        help="compute VGG LPIPS on the locked final-test split",
+    )
+    final_metrics.add_argument(
+        "--lpips-device", default="auto", metavar="DEVICE",
+        help="Torch device for --lpips: auto, cpu, cuda, or cuda:N (default: auto)",
+    )
+    final_metrics.add_argument(
+        "--lpips-batch-size", type=int, default=4, metavar="N",
+        help="maximum same-resolution LPIPS batch size (default: 4)",
+    )
+    final_metrics.add_argument(
+        "--lpips-min-size", type=int, default=64, metavar="PIXELS",
+        help="skip LPIPS regions below this side length (default: 64)",
+    )
     export = commands.add_parser("export", help="export an explicit model to viewer PLY")
     export.add_argument("--model", type=Path, required=True)
     export.add_argument("--output", type=Path, required=True)
@@ -192,9 +209,18 @@ def main(argv: list[str] | None = None) -> None:
         return
     from ftgspp.training.backend import NativeVulkanBackend, camera_extent
     from ftgspp.data.scene import load_final_test_scene
-    from ftgspp.io.checkpoint import load_model, latest_checkpoint, load_checkpoint_full
+    from ftgspp.io.checkpoint import load_model
     config = load_run_config(args.run.resolve())
     config.run.output_path = args.run.resolve()
+    configured_test_manifest = getattr(config.data, "test_manifest", None)
+    if args.lpips and args.test_manifest is None and configured_test_manifest is None:
+        parser.error("--lpips requires a locked final test manifest")
+    if args.lpips_batch_size <= 0:
+        parser.error("--lpips-batch-size must be greater than zero")
+    if args.lpips_min_size < 32:
+        parser.error("--lpips-min-size must be at least 32")
+    if not str(args.lpips_device).strip():
+        parser.error("--lpips-device must not be empty")
     runner = NativeRunner(config)
     dataset = runner._preflight()
     selection_path = export_selection_path(args.run)
@@ -203,8 +229,10 @@ def main(argv: list[str] | None = None) -> None:
     if args.command == "eval":
         test_manifest = args.test_manifest
         if test_manifest is None:
-            configured = getattr(config.data, "test_manifest", None)
-            test_manifest = Path(configured) if configured is not None else None
+            test_manifest = (
+                Path(configured_test_manifest)
+                if configured_test_manifest is not None else None
+            )
         if test_manifest is not None:
             training_dataset = dataset
             dataset = load_final_test_scene(training_dataset, test_manifest)
@@ -237,7 +265,7 @@ def main(argv: list[str] | None = None) -> None:
         backend.configure(config, camera_extent(dataset))
         backend.upload_dataset(dataset, rgb_cache=config.run.view_rgb_cache, workers=config.run.view_load_workers)
         model_path = args.run / "gaussians.npz"
-        model_sha256 = hashlib.sha256(model_path.read_bytes()).hexdigest()
+        model_sha256 = file_sha256(model_path)
         declared_model_hash = selection.get("model_sha256")
         if declared_model_hash is not None and declared_model_hash != model_sha256:
             raise ValueError(
@@ -246,14 +274,6 @@ def main(argv: list[str] | None = None) -> None:
         selected_step = int(selection.get("step", config.train.iterations - 1))
         model = load_model(model_path)
         backend.upload_model(model)
-        checkpoint = (
-            None if final_test else latest_checkpoint(args.run / "ckpt")
-        )
-        if checkpoint is not None:
-            snapshot = load_checkpoint_full(checkpoint)
-            backend.restore_optimizer(snapshot.optimizer)
-            if str(snapshot.metadata.get("phase", "")).startswith("hard_separation"):
-                backend.resume_hard_separation()
         if final_test:
             identity = dict(dataset.evaluation_identity or {})
             identity.update({
@@ -264,13 +284,27 @@ def main(argv: list[str] | None = None) -> None:
                     str(selection_path.resolve()) if selection_path.is_file() else None
                 ),
                 "selection_manifest_sha256": (
-                    hashlib.sha256(selection_path.read_bytes()).hexdigest()
+                    file_sha256(selection_path)
                     if selection_path.is_file() else None
                 ),
                 "color_correction": "disabled_for_novel_final_test_cameras",
             })
             dataset.evaluation_identity = identity
-        runner._evaluate(backend, dataset, selected_step)
+        if args.lpips:
+            from ftgspp.optional.lpips import FinalTestLpipsMetric
+            metric_extension = FinalTestLpipsMetric(
+                pipeline_mode=str(config.pipeline.mode),
+                device=str(args.lpips_device),
+                batch_size=int(args.lpips_batch_size),
+                min_size=int(args.lpips_min_size),
+                vulkan_metadata=backend.device_metadata(),
+            )
+            runner._evaluate(
+                backend, dataset, selected_step,
+                metric_extension=metric_extension,
+            )
+        else:
+            runner._evaluate(backend, dataset, selected_step)
     finally:
         backend.close()
 

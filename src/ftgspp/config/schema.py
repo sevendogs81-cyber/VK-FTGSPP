@@ -260,11 +260,6 @@ class EvalConfig:
     temporal_cutoffs: list[float] = field(
         default_factory=lambda: [0.0, 0.005, 0.01, 0.02, 0.05]
     )
-    # LPIPS is an evaluation-only scalar metric; it is never a train loss.
-    lpips: bool = False
-    lpips_device: str = "auto"
-    lpips_batch_size: int = 4
-    lpips_min_roi_size: int = 64
 
 
 @dataclass

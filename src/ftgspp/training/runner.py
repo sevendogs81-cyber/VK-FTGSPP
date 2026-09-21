@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import hashlib
 import logging
 import math
 import os
@@ -13,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Sequence
+from typing import Protocol, Sequence
 
 import cv2
 import numpy as np
@@ -42,6 +41,7 @@ from ftgspp.io.checkpoint import (
     validate_training_clocks,
     validate_resume_compatibility,
 )
+from ftgspp.io.hashing import file_sha256
 from ftgspp.data.scene import Scene
 from ftgspp.training.sampler import (
     sample_rank_views,
@@ -64,6 +64,27 @@ from ftgspp.io.model import NativeGaussians
 from ftgspp.io.ply import export_4dgs
 
 logger = logging.getLogger("ftgspp.native")
+
+
+class EvaluationMetricExtension(Protocol):
+    """Single-device, offline metric hook used by the explicit eval command."""
+
+    requires_components: bool
+
+    def observe(
+        self,
+        *,
+        view_index: int,
+        view: object,
+        background: np.ndarray,
+        components: dict[str, np.ndarray],
+    ) -> None: ...
+
+    def finalize(
+        self,
+        *,
+        vulkan_metadata: dict[str, object],
+    ) -> tuple[dict[str, object], dict[str, float]]: ...
 
 
 def _human_bytes(size: int) -> str:
@@ -277,6 +298,111 @@ class _EvalSsimWorkspace:
         centers[:, :5] = False
         centers[:, -5:] = False
         return float(np.mean(value[centers])) if centers.any() else None
+
+
+def _fixed_background_diagnostics(
+    colors: Sequence[Sequence[float]],
+    gpu: dict[str, object],
+    foreground: np.ndarray,
+    transmittance: np.ndarray,
+    reference: np.ndarray,
+    alpha: np.ndarray,
+    validity: np.ndarray,
+    ssim_workspace: _EvalSsimWorkspace,
+) -> list[dict[str, object]]:
+    """Build fixed-background rows from native reductions with a legacy fallback."""
+
+    native_backgrounds = gpu.get("background_metrics")
+    native_rows = native_backgrounds if isinstance(native_backgrounds, list) else []
+    valid_mask = np.asarray(validity).squeeze() >= 0.5
+    valid_pixels = int(np.count_nonzero(valid_mask))
+    reports: list[dict[str, object]] = []
+    for color_index, raw_color in enumerate(colors):
+        color = np.asarray(raw_color, np.float32)
+        metric_row = (
+            native_rows[color_index]
+            if color_index < len(native_rows)
+            and isinstance(native_rows[color_index], dict)
+            else (gpu if color_index == 0 else None)
+        )
+        if metric_row is not None:
+            squared_error_sum = float(metric_row["squared_error_sum"])
+            row_pixels = float(metric_row["valid_pixels"])
+            reports.append({
+                "background": [float(value) for value in color],
+                "psnr": _gpu_psnr(squared_error_sum, row_pixels),
+                "ssim": _gpu_ssim(
+                    float(metric_row["ssim_sum"]),
+                    float(metric_row["valid_windows"]),
+                ),
+                "valid_pixels": int(row_pixels),
+                "squared_error_sum": squared_error_sum,
+                "samples": int(row_pixels) * 3,
+            })
+            continue
+
+        # Compatibility fallback for an older native extension.
+        prediction, target = composite_v1(
+            foreground, transmittance, reference, alpha, color,
+        )
+        difference = prediction[valid_mask].astype(np.float64)
+        difference -= target[valid_mask]
+        np.square(difference, out=difference)
+        squared_error_sum = float(np.sum(difference, dtype=np.float64))
+        samples = valid_pixels * 3
+        mse = squared_error_sum / samples if samples else None
+        reports.append({
+            "background": [float(value) for value in color],
+            "psnr": (
+                None if mse is None else (
+                    float("inf") if mse == 0.0
+                    else float(-10.0 * np.log10(mse))
+                )
+            ),
+            "ssim": ssim_workspace.ssim(prediction, target, validity),
+            "valid_pixels": valid_pixels,
+            "squared_error_sum": squared_error_sum,
+            "samples": samples,
+        })
+    return reports
+
+
+def _foreground_roi_diagnostics(
+    roi: dict[str, object],
+    gpu: dict[str, object],
+    foreground: np.ndarray,
+    transmittance: np.ndarray,
+    reference: np.ndarray,
+    alpha: np.ndarray,
+    validity: np.ndarray,
+    ssim_workspace: _EvalSsimWorkspace,
+) -> float | None:
+    """Return Vulkan ROI SSIM, with a compatibility CPU fallback."""
+
+    y0, y1 = int(roi["y0"]), int(roi["y1"])
+    x0, x1 = int(roi["x0"]), int(roi["x1"])
+    roi_ssim = (
+        _gpu_ssim(
+            float(gpu["roi_ssim_sum"]),
+            float(gpu["roi_valid_windows"]),
+        )
+        if (
+            gpu.get("roi_ssim_sum") is not None
+            and gpu.get("roi_valid_windows") is not None
+        ) else None
+    )
+    if roi_ssim is None:
+        prediction, target = composite_v1(
+            foreground[y0:y1, x0:x1],
+            transmittance[y0:y1, x0:x1],
+            reference[y0:y1, x0:x1],
+            alpha[y0:y1, x0:x1],
+            np.zeros(3, np.float32),
+        )
+        roi_ssim = ssim_workspace.ssim(
+            prediction, target, validity[y0:y1, x0:x1],
+        )
+    return roi_ssim
 
 
 def _finite_rgb(array: np.ndarray) -> bool:
@@ -764,9 +890,22 @@ class NativeRunner:
         clocks: dict[str, int | float] | None = None,
         result_filename: str | None = None,
         full_validation: bool = False,
+        metric_extension: EvaluationMetricExtension | None = None,
     ) -> dict[str, object]:
         if not dataset.eval_views:
             return {}
+        if metric_extension is not None and group is not None:
+            raise ValueError(
+                "offline metric extensions require single-device evaluation"
+            )
+        evaluation_identity = getattr(dataset, "evaluation_identity", None)
+        if metric_extension is not None and (
+            not isinstance(evaluation_identity, dict)
+            or evaluation_identity.get("kind") != "final_test"
+        ):
+            raise ValueError(
+                "offline metric extensions require a locked final-test dataset"
+            )
         full_validation = bool(
             full_validation
             or getattr(dataset, "evaluation_identity", None) is not None
@@ -806,7 +945,7 @@ class NativeRunner:
                 "psnr_sum": 0.0, "ssim_sum": 0.0,
                 "count": 0, "ssim_count": 0,
                 "cameras": {}, "foreground_records": [],
-                "foreground_lpips_pairs": [],
+                "backend_stage_seconds": {}, "score_seconds": 0.0,
             }
             indices = tuple(int(index) for index in indices)
             worker_fn = getattr(replica, "view_load_workers", None)
@@ -829,6 +968,10 @@ class NativeRunner:
                 )
             foreground_protocol = self.config.pipeline.mode == "foreground"
             want_diagnostics = foreground_protocol and bool(full_validation)
+            need_components = want_diagnostics or bool(
+                metric_extension is not None
+                and metric_extension.requires_components
+            )
             ranking_background = np.asarray(
                 self.config.eval.background_colors[0], np.float32,
             )
@@ -892,9 +1035,11 @@ class NativeRunner:
                     return
                 if components is None:
                     raise RuntimeError("foreground diagnostic eval requires F/T")
-                reference_image = replica.cached_view_image(
-                    is_train=False, index=index,
-                )
+                reference_image = components.get("reference_image")
+                if reference_image is None:
+                    reference_image = replica.cached_view_image(
+                        is_train=False, index=index,
+                    )
                 reference = np.asarray(
                     reference_image[..., :3], dtype=np.float32,
                 ) * np.float32(1.0 / 255.0)
@@ -908,37 +1053,37 @@ class NativeRunner:
                 transmittance = np.asarray(
                     components["transmittance"], np.float32,
                 )
-                validity = dataset.eval_views[index].load_validity()
+                validity = components.get("validity")
+                if validity is None:
+                    validity = dataset.eval_views[index].load_validity()
                 report = foreground_metrics(
                     foreground, transmittance, reference, alpha, validity,
-                    background_colors=self.config.eval.background_colors,
+                    # Fixed-background PSNR/SSIM are reduced by Vulkan below.
+                    # Keep this helper focused on silhouette diagnostics.
+                    background_colors=(),
                     opacity_threshold=self.config.eval.opacity_threshold,
                 )
-                for color_index, fixed in enumerate(report["fixed_backgrounds"]):
-                    if color_index == 0:
-                        fixed["psnr"] = psnr
-                        fixed["ssim"] = ssim
-                        continue
-                    color = np.asarray(fixed["background"], np.float32)
-                    fixed_prediction, fixed_target = composite_v1(
-                        foreground, transmittance, reference, alpha, color,
-                    )
-                    fixed["ssim"] = ssim_workspace.ssim(
-                        fixed_prediction, fixed_target, validity,
-                    )
+                report["fixed_backgrounds"] = _fixed_background_diagnostics(
+                    self.config.eval.background_colors,
+                    gpu,
+                    foreground,
+                    transmittance,
+                    reference,
+                    alpha,
+                    validity,
+                    ssim_workspace,
+                )
                 roi_record = report.get("foreground_roi")
-                roi_prediction = roi_target = None
                 if isinstance(roi_record, dict):
-                    y0, y1 = int(roi_record["y0"]), int(roi_record["y1"])
-                    x0, x1 = int(roi_record["x0"]), int(roi_record["x1"])
-                    roi_prediction, roi_target = composite_v1(
-                        foreground, transmittance, reference, alpha,
-                        np.zeros(3, np.float32),
-                    )
-                    report["foreground_roi_ssim"] = ssim_workspace.ssim(
-                        roi_prediction[y0:y1, x0:x1],
-                        roi_target[y0:y1, x0:x1],
-                        validity[y0:y1, x0:x1],
+                    report["foreground_roi_ssim"] = _foreground_roi_diagnostics(
+                        roi_record,
+                        gpu,
+                        foreground,
+                        transmittance,
+                        reference,
+                        alpha,
+                        validity,
+                        ssim_workspace,
                     )
                     report["foreground_roi_background"] = [0.0, 0.0, 0.0]
                 else:
@@ -954,64 +1099,66 @@ class NativeRunner:
                 if not isinstance(records, list):
                     raise RuntimeError("foreground evaluation accumulator is invalid")
                 records.append(report)
-                if bool(self.config.eval.lpips):
-                    pairs = sums["foreground_lpips_pairs"]
-                    if not isinstance(pairs, list):
-                        raise RuntimeError("foreground LPIPS accumulator is invalid")
-                    roi = report.get("foreground_roi")
-                    if (
-                        isinstance(roi, dict)
-                        and roi_prediction is not None
-                        and roi_target is not None
-                    ):
-                        y0, y1 = int(roi["y0"]), int(roi["y1"])
-                        x0, x1 = int(roi["x0"]), int(roi["x1"])
-                        minimum = int(self.config.eval.lpips_min_roi_size)
-                        roi_valid = validity[y0:y1, x0:x1] >= 0.5
-                        if (
-                            y1 - y0 >= minimum and x1 - x0 >= minimum
-                            and bool(np.all(roi_valid))
-                        ):
-                            pairs.append((
-                                len(records) - 1,
-                                np.ascontiguousarray(
-                                    roi_prediction[y0:y1, x0:x1], np.float32,
-                                ),
-                                np.ascontiguousarray(
-                                    roi_target[y0:y1, x0:x1], np.float32,
-                                ),
-                            ))
-                            report["foreground_roi_lpips_skip_reason"] = None
-                        else:
-                            report["foreground_roi_lpips_skip_reason"] = (
-                                "roi_too_small_or_not_fully_valid"
-                            )
-                    else:
-                        report["foreground_roi_lpips_skip_reason"] = (
-                            "empty_reference_foreground"
-                        )
 
-            for offset in range(0, len(indices), eval_window):
-                chunk = indices[offset:offset + eval_window]
-                if callable(prefetch_eval):
-                    prefetch_eval(chunk, executor=eval_executor)
-                next_chunk = indices[
-                    offset + eval_window:offset + 2 * eval_window
-                ]
-                if (
-                    next_chunk
-                    and eval_executor is not None
-                    and callable(schedule_eval)
-                ):
-                    schedule_eval(next_chunk, executor=eval_executor)
-                for index in chunk:
-                    gpu, components = evaluate_view(
-                        int(index),
-                        background=ranking_background,
-                        bind_validity=foreground_protocol,
-                        read_components=want_diagnostics,
-                    )
-                    score_gpu_view(int(index), gpu, components)
+            begin_eval_batch = getattr(replica, "begin_evaluation_batch", None)
+            end_eval_batch = getattr(replica, "end_evaluation_batch", None)
+            if callable(begin_eval_batch):
+                begin_eval_batch()
+            try:
+                for offset in range(0, len(indices), eval_window):
+                    chunk = indices[offset:offset + eval_window]
+                    if callable(prefetch_eval):
+                        prefetch_eval(
+                            chunk, executor=eval_executor,
+                        )
+                    next_chunk = indices[
+                        offset + eval_window:offset + 2 * eval_window
+                    ]
+                    if (
+                        next_chunk
+                        and eval_executor is not None
+                        and callable(schedule_eval)
+                    ):
+                        schedule_eval(
+                            next_chunk, executor=eval_executor,
+                        )
+                    for index in chunk:
+                        gpu, components = evaluate_view(
+                            int(index),
+                            background=ranking_background,
+                            bind_validity=foreground_protocol,
+                            read_components=need_components,
+                        )
+                        raw_stages = gpu.get("stage_seconds")
+                        if isinstance(raw_stages, dict):
+                            stage_totals = sums["backend_stage_seconds"]
+                            if not isinstance(stage_totals, dict):
+                                raise RuntimeError(
+                                    "evaluation stage accumulator is invalid"
+                                )
+                            for name, seconds in raw_stages.items():
+                                stage_totals[str(name)] = float(
+                                    stage_totals.get(str(name), 0.0)
+                                ) + float(seconds)
+                        score_started = time.perf_counter()
+                        score_gpu_view(int(index), gpu, components)
+                        sums["score_seconds"] = float(
+                            sums["score_seconds"]
+                        ) + (time.perf_counter() - score_started)
+                        if metric_extension is not None:
+                            if components is None:
+                                raise RuntimeError(
+                                    "offline metric extension requires rendered components"
+                                )
+                            metric_extension.observe(
+                                view_index=int(index),
+                                view=dataset.eval_views[int(index)],
+                                background=ranking_background,
+                                components=components,
+                            )
+            finally:
+                if callable(end_eval_batch):
+                    end_eval_batch()
             return sums
 
         try:
@@ -1043,7 +1190,21 @@ class NativeRunner:
                 "full_validation" if full_validation else "candidate_subset"
             ),
             "eligible_views": len(eligible),
+            "eval_stage_work_seconds": {
+                name: float(sum(
+                    float(values.get("backend_stage_seconds", {}).get(name, 0.0))
+                    for values in partials
+                ))
+                for name in sorted({
+                    str(name)
+                    for values in partials
+                    for name in values.get("backend_stage_seconds", {})
+                })
+            },
         }
+        metrics["eval_stage_work_seconds"]["cpu_score_and_diagnostics"] = sum(
+            float(values.get("score_seconds", 0.0)) for values in partials
+        )
         evaluation_identity = getattr(dataset, "evaluation_identity", None)
         if evaluation_identity is not None:
             metrics["evaluation_identity"] = dict(evaluation_identity)
@@ -1065,36 +1226,11 @@ class NativeRunner:
                 "diagnostic" if foreground_records else "ranking"
             )
             if foreground_records:
-                if bool(self.config.eval.lpips):
-                    indexed_pairs: list[tuple[dict[str, object], np.ndarray, np.ndarray]] = []
-                    for values in partials:
-                        records = values.get("foreground_records", [])
-                        pairs = values.get("foreground_lpips_pairs", [])
-                        if not isinstance(records, list) or not isinstance(pairs, list):
-                            raise RuntimeError("distributed LPIPS payload is invalid")
-                        for record_index, prediction_roi, target_roi in pairs:
-                            indexed_pairs.append((
-                                records[int(record_index)], prediction_roi, target_roi,
-                            ))
-                    if indexed_pairs:
-                        from ftgspp.optional.lpips import evaluate_lpips_vgg_unnormalized
-                        lpips_values = evaluate_lpips_vgg_unnormalized(
-                            [(prediction, target) for _record, prediction, target in indexed_pairs],
-                            device=str(self.config.eval.lpips_device),
-                            batch_size=int(self.config.eval.lpips_batch_size),
-                            vulkan_metadata=backend.device_metadata(),
-                        )
-                        for (record, _prediction, _target), value in zip(
-                            indexed_pairs, lpips_values, strict=True,
-                        ):
-                            record["foreground_roi_lpips"] = float(value)
-                    for record in foreground_records:
-                        record.setdefault("foreground_roi_lpips", None)
                 metrics["foreground_views"] = foreground_records
                 scalar_keys = (
                     "foreground_psnr", "foreground_roi_ssim",
-                    "foreground_roi_lpips", "silhouette_iou",
-                    "soft_silhouette_iou", "soft_silhouette_dice",
+                    "silhouette_iou", "soft_silhouette_iou",
+                    "soft_silhouette_dice",
                     "boundary_fscore", "background_opacity_leakage",
                     "foreground_holes", "boundary_mask_mae", "mask_mae",
                 )
@@ -1174,12 +1310,11 @@ class NativeRunner:
                 )
                 metrics["soft_silhouette_intersection"] = soft_intersection
                 metrics["soft_silhouette_union"] = soft_union
-                # ROI perceptual metrics and boundary F-score have no additive
+                # ROI SSIM and boundary F-score have no additive
                 # sufficient statistic; their explicitly named frame mean is the
                 # aggregate contract.
                 for key in (
-                    "foreground_roi_ssim", "foreground_roi_lpips",
-                    "boundary_fscore",
+                    "foreground_roi_ssim", "boundary_fscore",
                 ):
                     metrics[key] = metrics[f"{key}_frame_mean"]
                 fixed_reports: list[dict[str, object]] = []
@@ -1280,6 +1415,18 @@ class NativeRunner:
                 metrics["worst_camera_ssim"] = float(
                     camera_metrics[worst_ssim]["ssim"]
                 )
+        if metric_extension is not None:
+            extension_metrics, extension_timings = metric_extension.finalize(
+                vulkan_metadata=backend.device_metadata(),
+            )
+            collisions = set(metrics).intersection(extension_metrics)
+            if collisions:
+                raise RuntimeError(
+                    "offline metric extension overwrote metrics: "
+                    + ", ".join(sorted(collisions))
+                )
+            metrics.update(extension_metrics)
+            metrics["eval_stage_work_seconds"].update(extension_timings)
         metrics["eval_seconds"] = float(time.perf_counter() - eval_begin)
         metrics_name = result_filename or (
             "final_test_metrics.jsonl"
@@ -1788,7 +1935,10 @@ class NativeRunner:
             last_eval_step: int | None = None
 
             def consider_export_candidate(
-                step: int, metrics: dict[str, object],
+                step: int,
+                metrics: dict[str, object],
+                *,
+                checkpoint_snapshot: CheckpointSnapshot | None = None,
             ) -> None:
                 nonlocal best_model, best_color_params, best_metrics, last_eval_step
                 if metrics:
@@ -1812,11 +1962,22 @@ class NativeRunner:
                     ),
                 ):
                     return
-                best_model = backend.model()
-                best_color_params = (
-                    backend.color_params()
-                    if self.config.train.color_correction else None
+                best_model = (
+                    checkpoint_snapshot.model
+                    if checkpoint_snapshot is not None else backend.model()
                 )
+                if self.config.train.color_correction:
+                    snapshot_color = (
+                        checkpoint_snapshot.optimizer.get("color_params")
+                        if checkpoint_snapshot is not None else None
+                    )
+                    best_color_params = (
+                        np.ascontiguousarray(snapshot_color, dtype=np.float32)
+                        if snapshot_color is not None
+                        else backend.color_params()
+                    )
+                else:
+                    best_color_params = None
                 best_metrics = {
                     key: value for key, value in metrics.items()
                     if key != "foreground_views"
@@ -2031,6 +2192,17 @@ class NativeRunner:
                         break
                     if result["relocated"]:
                         logger.info("iteration %d: relocated %d Gaussians in Vulkan", step, result["relocated"])
+                is_final_main_step = step == self.config.train.iterations - 1
+                checkpoint_snapshot = (
+                    publish_if_enabled(
+                        step,
+                        phase=(
+                            "main_complete" if is_final_main_step else "main"
+                        ),
+                        phase_step=step,
+                    )
+                    if snapshot_cadence(step, snapshot_interval) else None
+                )
                 if snapshot_cadence(step, snapshot_interval):
                     consider_export_candidate(
                         step,
@@ -2038,6 +2210,7 @@ class NativeRunner:
                             backend, dataset, step, group=group,
                             clocks=dict(training_clocks),
                         ),
+                        checkpoint_snapshot=checkpoint_snapshot,
                     )
                     elapsed = time.perf_counter()-begin
                     step_rate = (step-start+1)/max(elapsed, 1e-9)
@@ -2065,29 +2238,18 @@ class NativeRunner:
                         "wall-equalized eval at step %d after %.1fs",
                         step, wall_now - begin,
                     )
-                is_final_main_step = step == self.config.train.iterations - 1
-                if snapshot_cadence(step, snapshot_interval):
-                    checkpoint_snapshot = publish_if_enabled(
-                        step,
-                        phase=(
-                            "main_complete"
-                            if is_final_main_step
-                            else "main"
-                        ),
-                        phase_step=step,
+                if (
+                    checkpoint_snapshot is not None
+                    and (
+                        not self.config.train.hard_separation
+                        or main_terminated_all_dead
                     )
-                    if (
-                        checkpoint_snapshot is not None
-                        and (
-                            not self.config.train.hard_separation
-                            or main_terminated_all_dead
-                        )
-                        and is_final_main_step
-                    ):
-                        final_model_snapshot = checkpoint_snapshot.model
-                    # Drop multi-GB optimizer arrays immediately. Only the
-                    # final model host copy may survive for imminent export.
-                    del checkpoint_snapshot
+                    and is_final_main_step
+                ):
+                    final_model_snapshot = checkpoint_snapshot.model
+                # Drop multi-GB optimizer arrays immediately. Only a model
+                # retained as best/final may survive for imminent export.
+                del checkpoint_snapshot
                 verify_interval = distributed.verify_replica_interval
                 if (
                     group is not None and verify_interval > 0 and step > 0
@@ -2289,6 +2451,17 @@ class NativeRunner:
                             logger.warning("hard separation stopped: every Gaussian is dead")
                             reporter.advance(local_step, scalars)
                             break
+                    hard_checkpoint_snapshot = (
+                        publish_if_enabled(
+                            global_step,
+                            phase="hard_separation",
+                            phase_step=local_step,
+                        )
+                        if (
+                            snapshot_cadence(local_step, snapshot_interval)
+                            and local_step != separate_steps - 1
+                        ) else None
+                    )
                     if snapshot_cadence(local_step, snapshot_interval):
                         consider_export_candidate(
                             global_step,
@@ -2296,16 +2469,9 @@ class NativeRunner:
                                 backend, dataset, global_step, group=group,
                                 clocks=dict(training_clocks),
                             ),
+                            checkpoint_snapshot=hard_checkpoint_snapshot,
                         )
-                    if (
-                        snapshot_cadence(local_step, snapshot_interval)
-                        and local_step != separate_steps - 1
-                    ):
-                        publish_if_enabled(
-                            global_step,
-                            phase="hard_separation",
-                            phase_step=local_step,
-                        )
+                    del hard_checkpoint_snapshot
                     verify_interval = distributed.verify_replica_interval
                     if (
                         group is not None and verify_interval > 0
@@ -2480,14 +2646,17 @@ class NativeRunner:
                     }
 
             if dataset.eval_views:
-                backend.upload_model(final)
-                if final_color_params is not None:
-                    backend.set_color_params(final_color_params)
+                selected_is_current = int(selection["step"]) == int(last)
+                if not selected_is_current:
+                    if group is not None:
+                        group.upload_model(final)
+                    else:
+                        backend.upload_model(final)
                 full_metrics = self._evaluate(
                     backend,
                     dataset,
                     int(selection["step"]),
-                    group=None,
+                    group=group,
                     clocks=dict(training_clocks),
                     result_filename="full_validation_metrics.jsonl",
                     full_validation=True,
@@ -2573,9 +2742,7 @@ class NativeRunner:
             model_path = self.output_path / "gaussians.npz"
             save_model(model_path, final)
             selection["model_artifact"] = model_path.name
-            selection["model_sha256"] = hashlib.sha256(
-                model_path.read_bytes()
-            ).hexdigest()
+            selection["model_sha256"] = file_sha256(model_path)
             selection_path = self.output_path / "export_selection.json"
             selection_tmp = selection_path.with_suffix(".json.tmp")
             selection_tmp.write_text(

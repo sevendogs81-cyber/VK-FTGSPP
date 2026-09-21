@@ -24,6 +24,7 @@ from ftgspp.optional.da3 import (
     depth_to_points,
     geometric_consistency_filter,
 )
+from ftgspp.optional.lpips import FinalTestLpipsMetric
 from ftgspp.optional.point_color import color_points_ibr
 from ftgspp.optional.visual_hull import carve_visual_hull, filter_points_by_visual_hull
 from ftgspp.training.backend import NativeVulkanBackend
@@ -167,7 +168,7 @@ def test_composite_color_correction_vjp_matches_finite_difference():
     np.testing.assert_allclose(numeric, gradients["transmittance"], atol=1e-8, rtol=1e-7)
 
 
-def test_foreground_eval_aggregates_fake_lpips_and_uses_separate_final_stream(
+def test_foreground_final_test_streams_optional_lpips_to_separate_result(
     tmp_path, monkeypatch,
 ):
     height = width = 64
@@ -209,6 +210,8 @@ def test_foreground_eval_aggregates_fake_lpips_and_uses_separate_final_stream(
             components = {
                 "foreground": foreground,
                 "transmittance": np.zeros((height, width), np.float32),
+                "reference_image": rgba,
+                "validity": np.ones((height, width), np.float32),
             }
             return _gpu_holdout(
                 height, width, prediction=foreground, reference=rgb, ssim=0.9,
@@ -217,15 +220,15 @@ def test_foreground_eval_aggregates_fake_lpips_and_uses_separate_final_stream(
         def device_metadata(self):
             return {"uuid": "fake-vulkan-device"}
 
-    captured = {}
-    def fake_lpips(pairs, **options):
-        captured["pairs"] = pairs
-        captured["options"] = options
-        return [0.375]
-
-    monkeypatch.setattr(
-        "ftgspp.optional.lpips.evaluate_lpips_vgg_unnormalized", fake_lpips,
-    )
+    captured = {"pairs": []}
+    class FakeEvaluator:
+        device_name = "cpu"
+        def __init__(self, **options):
+            captured["options"] = options
+        def evaluate(self, pairs, *, batch_size):
+            captured["pairs"].extend(pairs)
+            captured["batch_size"] = batch_size
+            return [0.375] * len(pairs)
     runner = object.__new__(NativeRunner)
     runner.config = SimpleNamespace(
         pipeline=SimpleNamespace(
@@ -236,19 +239,26 @@ def test_foreground_eval_aggregates_fake_lpips_and_uses_separate_final_stream(
         eval=SimpleNamespace(
             frame_interval=1,
             background_colors=[[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]],
-            opacity_threshold=0.5, lpips=True, lpips_min_roi_size=32,
-            lpips_device="cpu", lpips_batch_size=2,
+            opacity_threshold=0.5,
         ),
     )
-    metrics = runner._evaluate(Backend(), dataset, 17)
+    extension = FinalTestLpipsMetric(
+        pipeline_mode="foreground", device="cpu", batch_size=2, min_size=32,
+        evaluator_factory=FakeEvaluator,
+    )
+    metrics = runner._evaluate(
+        Backend(), dataset, 17, metric_extension=extension,
+    )
 
-    assert metrics["foreground_roi_lpips"] == pytest.approx(0.375)
-    assert metrics["foreground_roi_lpips_views"] == 1
-    assert metrics["foreground_views"][0]["foreground_roi_lpips"] == pytest.approx(0.375)
+    assert metrics["lpips"] == pytest.approx(0.375)
+    assert metrics["lpips_views"] == 1
+    assert metrics["lpips_view_metrics"][0]["lpips"] == pytest.approx(0.375)
+    assert metrics["lpips_protocol"]["region"] == "reference_foreground_roi"
     assert metrics["evaluation_identity"]["kind"] == "final_test"
     assert len(captured["pairs"]) == 1
     assert captured["pairs"][0][0].shape == (64, 64, 3)
     assert captured["options"]["device"] == "cpu"
+    assert captured["batch_size"] == 2
     assert (tmp_path / "final_test_metrics.jsonl").is_file()
     assert not (tmp_path / "metrics.jsonl").exists()
 
@@ -299,12 +309,129 @@ def test_scene_eval_scores_full_rgb_and_ignores_reference_alpha(tmp_path):
         train=SimpleNamespace(color_correction=False),
         eval=SimpleNamespace(
             frame_interval=1, background_colors=[[0.0, 0.0, 0.0]],
-            opacity_threshold=0.5, lpips=False,
+            opacity_threshold=0.5,
         ),
     )
     metrics = runner._evaluate(Backend(), dataset, 3)
     assert metrics["protocol"] == "scene_rgb_v1"
     assert metrics["psnr"] == pytest.approx(0.0)
+
+
+def test_scene_final_test_optional_lpips_scores_full_frame(tmp_path):
+    height = width = 64
+    rgba = np.zeros((height, width, 4), np.uint8)
+    rgba[..., :3] = 128
+    rgba[..., 3] = 17
+    intrinsic = np.asarray(
+        [[50, 0, width / 2], [0, 50, height / 2], [0, 0, 1]],
+        np.float32,
+    )
+    view = View(
+        path=tmp_path / "unused.png", frame=4, camera_id=3, timestamp=0.0,
+        w2c=np.eye(4, dtype=np.float32), source_intrinsic=intrinsic,
+        intrinsic=intrinsic, distortion=np.zeros(5, np.float32),
+        size=(height, width), mask_source="none",
+    )
+    dataset = Scene(
+        frames=[4], cameras=[3], train_cameras=[], eval_cameras=[3],
+        camera_split_source="locked final test", train_views=[],
+        eval_views=[view], fps=30.0,
+        evaluation_identity={"kind": "final_test"},
+    )
+    prediction = np.full((height, width, 3), 0.4, np.float32)
+
+    class Backend:
+        native = SimpleNamespace()
+        def view_load_workers(self):
+            return 0
+        def view_cache_capacity(self):
+            return 1
+        def evaluate_holdout_view(
+            self, index, *, background, bind_validity, read_components,
+        ):
+            assert index == 0 and not bind_validity and read_components
+            components = {
+                "foreground": prediction,
+                "transmittance": np.zeros((height, width), np.float32),
+                "reference_image": rgba,
+            }
+            return _gpu_holdout(
+                height, width, prediction=prediction,
+                reference=rgba[..., :3].astype(np.float32) / 255.0,
+                components=components, read_components=True,
+            )
+        def device_metadata(self):
+            return {"uuid": "fake-vulkan-device"}
+
+    captured = []
+    class FakeEvaluator:
+        device_name = "cpu"
+        def __init__(self, **_options):
+            pass
+        def evaluate(self, pairs, *, batch_size):
+            assert batch_size == 4
+            captured.extend(pairs)
+            return [0.2] * len(pairs)
+
+    runner = object.__new__(NativeRunner)
+    runner.config = SimpleNamespace(
+        pipeline=SimpleNamespace(mode="scene", eval_protocol="scene_rgb_v1"),
+        run=SimpleNamespace(output_path=tmp_path),
+        train=SimpleNamespace(color_correction=False),
+        eval=SimpleNamespace(
+            frame_interval=1, background_colors=[[0.0, 0.0, 0.0]],
+            opacity_threshold=0.5,
+        ),
+    )
+    extension = FinalTestLpipsMetric(
+        pipeline_mode="scene", device="cpu", batch_size=4, min_size=32,
+        evaluator_factory=FakeEvaluator,
+    )
+    metrics = runner._evaluate(
+        Backend(), dataset, 11, metric_extension=extension,
+    )
+
+    assert metrics["lpips"] == pytest.approx(0.2)
+    assert metrics["lpips_views"] == 1
+    assert metrics["lpips_protocol"]["region"] == "full_frame"
+    assert len(captured) == 1
+    np.testing.assert_allclose(captured[0][0], prediction)
+    np.testing.assert_allclose(captured[0][1], 128.0 / 255.0)
+
+
+def test_final_test_lpips_streams_bounded_same_shape_batches():
+    calls = []
+    class FakeEvaluator:
+        device_name = "cpu"
+        def __init__(self, **_options):
+            pass
+        def evaluate(self, pairs, *, batch_size):
+            calls.append((len(pairs), batch_size))
+            return [float(len(calls))] * len(pairs)
+
+    metric = FinalTestLpipsMetric(
+        pipeline_mode="scene", batch_size=2, min_size=32,
+        evaluator_factory=FakeEvaluator,
+    )
+    image = np.full((32, 32, 3), 64, np.uint8)
+    components = {
+        "foreground": np.full((32, 32, 3), 0.25, np.float32),
+        "transmittance": np.zeros((32, 32), np.float32),
+        "reference_image": image,
+    }
+    for index in range(5):
+        metric.observe(
+            view_index=index,
+            view=SimpleNamespace(camera_id=0, frame=index),
+            background=np.zeros(3, np.float32),
+            components=components,
+        )
+        assert sum(len(items) for items in metric._buffers.values()) < 2
+    result, _timings = metric.finalize(vulkan_metadata={})
+
+    assert calls == [(2, 2), (2, 2), (1, 2)]
+    assert result["lpips_views"] == 5
+    assert result["lpips"] == pytest.approx((1 + 1 + 2 + 2 + 3) / 5)
 
 
 def test_foreground_in_loop_eval_is_ranking_only(tmp_path):
@@ -355,7 +482,7 @@ def test_foreground_in_loop_eval_is_ranking_only(tmp_path):
         train=SimpleNamespace(color_correction=False),
         eval=SimpleNamespace(
             frame_interval=1, background_colors=[[0.0, 0.0, 0.0]],
-            opacity_threshold=0.5, lpips=False, selector="foreground_psnr",
+            opacity_threshold=0.5, selector="foreground_psnr",
         ),
     )
     metrics = runner._evaluate(Backend(), dataset, 9)
@@ -364,6 +491,87 @@ def test_foreground_in_loop_eval_is_ranking_only(tmp_path):
     assert "silhouette_iou" not in metrics
     assert metrics["foreground_psnr"] is not None
     assert metrics["ssim"] == pytest.approx(0.8)
+
+
+def test_native_backend_reuses_bound_eval_reference_and_validity():
+    image = np.zeros((12, 14, 4), np.uint8)
+    image[..., 3] = 255
+    calls = {
+        "image_load": 0, "validity_load": 0,
+        "image_bind": 0, "validity_bind": 0, "bound_copy": 0,
+        "drain": 0,
+    }
+
+    class EvalView:
+        def load_validity(self):
+            calls["validity_load"] += 1
+            return np.ones((12, 14), np.float32)
+
+    class Native:
+        def bind_dynamic_view_image(self, index, is_train, value):
+            assert index == 0 and not is_train and value is image
+            calls["image_bind"] += 1
+        def bind_dynamic_view_validity(self, index, is_train, value):
+            assert index == 0 and not is_train
+            assert value.dtype == np.uint8
+            calls["validity_bind"] += 1
+        def drain_eval(self):
+            calls["drain"] += 1
+        def begin_eval_val_view(self, index, apply_color_correction):
+            assert index == 0 and not apply_color_correction
+        def complete_eval_metrics(self, _background):
+            return {
+                "squared_error_sum": 0.0,
+                "ssim_sum": 1.0,
+                "foreground_squared_error_sum": 0.0,
+                "foreground_samples": 168.0,
+                "valid_pixels": 168.0,
+                "valid_windows": 8.0,
+            }
+        def copy_bound_eval_inputs(self, index):
+            assert index == 0
+            calls["bound_copy"] += 1
+            return image.copy(), np.ones((12, 14), np.uint8)
+        def submit_eval_rgb_readback(self):
+            pass
+        def complete_eval_components(self):
+            return np.zeros((12, 14, 4), np.float32)
+
+    backend = object.__new__(NativeVulkanBackend)
+    backend.native = Native()
+    backend._dataset = SimpleNamespace(eval_views=[EvalView()])
+    backend._bound_eval_images = set()
+    backend._bound_eval_validity = set()
+    backend._eval_background_colors = [[0.0, 0.0, 0.0]]
+    backend._eval_batch_prepared = False
+
+    def cached_view_image(*, is_train, index):
+        assert not is_train and index == 0
+        calls["image_load"] += 1
+        return image
+
+    backend.cached_view_image = cached_view_image
+    backend.begin_evaluation_batch()
+    try:
+        for _ in range(2):
+            backend.evaluate_holdout_view(
+                0, background=[0.0, 0.0, 0.0],
+                bind_validity=True, read_components=False,
+            )
+        _gpu, components = backend.evaluate_holdout_view(
+            0, background=[0.0, 0.0, 0.0],
+            bind_validity=True, read_components=True,
+        )
+    finally:
+        backend.end_evaluation_batch()
+
+    assert components is not None
+    assert components["reference_image"].shape == image.shape
+    assert calls == {
+        "image_load": 1, "validity_load": 1,
+        "image_bind": 1, "validity_bind": 1, "bound_copy": 1,
+        "drain": 1,
+    }
 
 
 def test_external_16bit_mask_is_soft_and_rgb_is_not_premultiplied():
@@ -1053,6 +1261,7 @@ def test_locked_final_test_cli_uses_selected_model_identity_without_mutation(
         run=SimpleNamespace(
             output_path=run, view_rgb_cache=1, view_load_workers=0,
         ),
+        pipeline=SimpleNamespace(mode="scene"),
         train=SimpleNamespace(
             iterations=20, color_correction=True,
         ),
@@ -1075,10 +1284,16 @@ def test_locked_final_test_cli_uses_selected_model_identity_without_mutation(
             assert actual_config is config
         def _preflight(self):
             return training_scene
-        def _evaluate(self, backend, dataset, step):
+        def _evaluate(self, backend, dataset, step, *, metric_extension=None):
             observed["dataset"] = dataset
             observed["step"] = step
             observed["color_correction"] = config.train.color_correction
+            observed["lpips"] = {
+                "mode": metric_extension.pipeline_mode,
+                "device": metric_extension.device,
+                "batch_size": metric_extension.batch_size,
+                "min_size": metric_extension.min_size,
+            }
 
     class Backend:
         def __init__(self, device, *, honor_device_env):
@@ -1090,6 +1305,8 @@ def test_locked_final_test_cli_uses_selected_model_identity_without_mutation(
             assert dataset is locked_scene
         def upload_model(self, model):
             assert model == "model"
+        def device_metadata(self):
+            return {"uuid": "test-device"}
         def restore_optimizer(self, _state):
             raise AssertionError("final test must not restore training optimizer")
         def set_color_params(self, _params):
@@ -1119,6 +1336,8 @@ def test_locked_final_test_cli_uses_selected_model_identity_without_mutation(
     cli_module.main([
         "eval", "--run", str(run), "--device", "2",
         "--test-manifest", str(test_manifest),
+        "--lpips", "--lpips-device", "cpu",
+        "--lpips-batch-size", "2", "--lpips-min-size", "32",
     ])
 
     identity = locked_scene.evaluation_identity
@@ -1127,6 +1346,10 @@ def test_locked_final_test_cli_uses_selected_model_identity_without_mutation(
         "dataset": locked_scene,
         "step": 7,
         "color_correction": False,
+        "lpips": {
+            "mode": "scene", "device": "cpu",
+            "batch_size": 2, "min_size": 32,
+        },
         "closed": True,
     }
     assert identity["model_sha256"] == model_hash
@@ -1134,6 +1357,21 @@ def test_locked_final_test_cli_uses_selected_model_identity_without_mutation(
     assert identity["selection_manifest"] == str(selection_path.resolve())
     assert identity["color_correction"] == "disabled_for_novel_final_test_cameras"
     assert selection_path.read_bytes() == selection_before
+
+
+def test_lpips_cli_rejects_non_final_holdout_eval(tmp_path, monkeypatch):
+    from ftgspp import cli as cli_module
+
+    config = SimpleNamespace(
+        run=SimpleNamespace(output_path=tmp_path),
+        data=SimpleNamespace(test_manifest=None),
+    )
+    monkeypatch.setattr(cli_module, "load_run_config", lambda _path: config)
+    with pytest.raises(SystemExit) as exc:
+        cli_module.main([
+            "eval", "--run", str(tmp_path), "--lpips",
+        ])
+    assert exc.value.code == 2
 
 
 def test_holdout_eval_cli_does_not_apply_trained_color_corrector(
@@ -1202,7 +1440,9 @@ def test_holdout_eval_cli_does_not_apply_trained_color_corrector(
     monkeypatch.setattr("ftgspp.io.checkpoint.load_model", lambda path: "model")
     monkeypatch.setattr(
         "ftgspp.io.checkpoint.latest_checkpoint",
-        lambda path: None,
+        lambda path: (_ for _ in ()).throw(
+            AssertionError("hold-out eval must not load a training checkpoint")
+        ),
     )
     cli_module.main(["eval", "--run", str(run), "--device", "1"])
 

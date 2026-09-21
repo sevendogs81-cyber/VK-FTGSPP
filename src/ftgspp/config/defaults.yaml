@@ -143,10 +143,6 @@ eval:
   selector_min_boundary_fscore: null
   candidate_max_views: 32
   temporal_cutoffs: [0.0, 0.005, 0.01, 0.02, 0.05]
-  lpips: false
-  lpips_device: auto
-  lpips_batch_size: 4
-  lpips_min_roi_size: 64
 run:
   runtime: native
   gpu: 0

@@ -1,12 +1,13 @@
 """Load export_selection.json and restore the selected color-correction snapshot."""
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
 from typing import Any, Mapping
 
 import numpy as np
+
+from ftgspp.io.hashing import file_sha256
 
 
 def export_selection_path(run: Path) -> Path:
@@ -33,7 +34,7 @@ def restore_exported_color_correction(
     if not isinstance(raw, dict):
         return None
     artifact = Path(run) / str(raw["artifact"])
-    digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    digest = file_sha256(artifact)
     declared = raw.get("sha256")
     if declared is not None and str(declared) != digest:
         raise ValueError("color correction snapshot hash mismatch")

@@ -490,7 +490,9 @@ void VulkanGSTrainer::executeEvalMetrics(
     const VulkanGSRendererUniforms& uniforms,
     VulkanGSPipelineBuffers& buffers,
     size_t val_idx,
-    const std::array<float, 3>& background
+    const std::array<float, 3>& background,
+    const std::array<uint32_t, 4>& roi_yxyx,
+    bool upload_reference
 ) {
     requireFTGSPPFloat32AtomicAdd();
     const size_t w = uniforms.image_width, h = uniforms.image_height;
@@ -532,15 +534,44 @@ void VulkanGSTrainer::executeEvalMetrics(
     shader_uniforms.background_b = background[2];
     shader_uniforms.ssim_c1 = 0.02f * 0.02f;
     shader_uniforms.ssim_c2 = 0.06f * 0.06f;
+    struct EvalReduceUniforms {
+        uint32_t width;
+        uint32_t height;
+        uint32_t roi_y0;
+        uint32_t roi_y1;
+        uint32_t prediction_clamp_mode;
+        uint32_t objective_mode;
+        float background_r;
+        float background_g;
+        float background_b;
+        uint32_t roi_x0;
+        uint32_t roi_x1;
+    } reduce_uniforms{
+        shader_uniforms.width,
+        shader_uniforms.height,
+        roi_yxyx[0],
+        roi_yxyx[1],
+        shader_uniforms.prediction_clamp_mode,
+        shader_uniforms.objective_mode,
+        shader_uniforms.background_r,
+        shader_uniforms.background_g,
+        shader_uniforms.background_b,
+        roi_yxyx[2],
+        roi_yxyx[3],
+    };
+    static_assert(sizeof(EvalReduceUniforms) == 11 * sizeof(uint32_t),
+        "FTGSPP eval reduction push-constant ABI changed");
 
     std::swap(reference.deviceBuffer, buffers.ref_image.deviceBuffer);
-    copyToDevice(reference);
+    if (upload_reference)
+        copyToDevice(reference);
     _VulkanBuffer reference_device = reference.deviceBuffer;
     _VulkanBuffer validity_device;
     if (image.has_custom_validity) {
         if (image.validity.empty())
             throw std::runtime_error("eval view validity is empty");
-        copyToDevice(image.validity);
+        if (upload_reference)
+            copyToDevice(image.validity);
         validity_device = image.validity.deviceBuffer;
         shader_uniforms.valid_pixel_count = image.valid_pixel_count;
         shader_uniforms.valid_window_count = image.valid_window_count;
@@ -581,7 +612,7 @@ void VulkanGSTrainer::executeEvalMetrics(
     memoryBarrier(COMPUTE_SHADER_WRITE, COMPUTE_SHADER_READ);
     clearDeviceBuffer(buffers.eval_metrics, 8);
     memoryBarrier(TRANSFER_WRITE, COMPUTE_SHADER_READ_WRITE);
-    executeCompute({{num_pixels,256}}, &shader_uniforms, 11 * sizeof(uint32_t),
+    executeCompute({{num_pixels,256}}, &reduce_uniforms, sizeof(reduce_uniforms),
         pipeline_ftgspp_eval_metrics,
         {buffers.pixel_state.deviceBuffer, reference_device, validity_device,
          ssim_map.deviceBuffer, buffers.eval_metrics.deviceBuffer, wc});

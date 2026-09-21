@@ -44,6 +44,8 @@ def node(**distributed):
     "init.velocity_estimator=median", "init.coverage_fraction=0.5",
     "init.isolate_source_scales=true", "init.time_anchor=true",
     "train.foreground_loss.alpha_weight=0.1",
+    "eval.lpips=true", "eval.lpips_device=cpu",
+    "eval.lpips_batch_size=2", "eval.lpips_min_roi_size=32",
 ])
 def test_removed_config_fields_are_rejected(removed):
     with pytest.raises(Exception, match="(not in|Key)"):
@@ -64,11 +66,16 @@ def test_versioned_resolved_artifact_ignores_retired_fields(tmp_path):
     artifact = OmegaConf.load(path)
     artifact.config.pipeline.retired_strategy = "historical-value"
     artifact.config.init.da3.retired_strategy = {"nested": True}
+    artifact.config.eval.lpips = True
+    artifact.config.eval.lpips_device = "cuda:0"
+    artifact.config.eval.lpips_batch_size = 8
+    artifact.config.eval.lpips_min_roi_size = 64
     OmegaConf.save(artifact, path)
 
     loaded = load_config(path)
     assert not hasattr(loaded.pipeline, "retired_strategy")
     assert not hasattr(loaded.init.da3, "retired_strategy")
+    assert not hasattr(loaded.eval, "lpips")
 
 
 @pytest.mark.parametrize("policy,factor", [

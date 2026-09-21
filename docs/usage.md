@@ -67,7 +67,9 @@ ftgspp eval --run data/my_capture/runs/my_capture --device 0
 
 A finished run already contains `gaussians.npz` (best hold-out joint
 PSNR+SSIM snapshot unless `train.export_best` is false) and
-`gaussians_4dgs.ply`. `ftgspp export` only writes another PLY path:
+`gaussians_4dgs.ply`. Standalone `ftgspp eval` streams the model SHA-256 check
+and loads only this selected model; it does not restore an optimizer checkpoint.
+`ftgspp export` only writes another PLY path:
 
 ```bash
 ftgspp export --model data/my_capture/runs/my_capture/gaussians.npz \
@@ -250,6 +252,28 @@ ftgspp eval --run data/my_scene/runs/my_foreground_scene --device 0 \
   --test-manifest data/my_scene/manifests/final_test.json
 ```
 
+LPIPS is an optional metric on this locked final-test command only. It never
+loads during training, checkpoint selection, or the training-end full
+validation. Install the `[lpips]` extra, then add `--lpips`:
+
+```bash
+bash scripts/setup.sh --with-lpips
+ftgspp eval --run data/my_scene/runs/my_foreground_scene --device 0 \
+  --test-manifest data/my_scene/manifests/final_test.json --lpips
+```
+
+Use `bash scripts/setup.sh --with-init --with-lpips` when the same environment
+must retain both raw-RGB initialization components as well.
+
+For scene mode it scores each complete RGB frame. For foreground mode it
+scores a black-composited ROI determined only by the reference mask. Equal
+image shapes are batched and consumed while rendering, so memory does not grow
+with the number of test views. `--lpips-device`, `--lpips-batch-size`, and
+`--lpips-min-size` control the optional worker. The default `auto` device
+matches the Vulkan GPU to CUDA when possible, reduces the batch after CUDA OOM,
+and can fall back to CPU. Results and per-view skip reasons are written only to
+`final_test_metrics.jsonl`.
+
 See [examples/final_test_manifest.example.json](../examples/final_test_manifest.example.json).
 Validation rejects any camera/frame, path, or RGB hash already used by
 training or checkpoint selection. Official evaluation is `ftgspp eval`.
@@ -257,9 +281,9 @@ Scripts under `dev/tools/` are unsupported research helpers.
 
 Optional extras: `[da3]`, `[lpips]`, `[birefnet]`, and `[tensorboard]`.
 `scripts/setup.sh --with-init` combines `[birefnet]` and `[da3]` for users
-starting from raw RGB. LPIPS is never part of the training loss and is off
-unless `eval.lpips` is enabled. The native model-flow renderer remains
-diagnostic only.
+starting from raw RGB. LPIPS is enabled only by `ftgspp eval --lpips` with a
+locked final-test manifest. The native model-flow renderer remains diagnostic
+only.
 
 SelfCap video layouts:
 

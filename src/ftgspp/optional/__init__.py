@@ -1,1 +1,1 @@
-"""Opt-in DA3 initialization and LPIPS evaluation; never imported by core."""
+"""Opt-in initialization and final-test metrics; never imported by core."""

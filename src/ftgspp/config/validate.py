@@ -237,14 +237,6 @@ def validate_static_config(config: AppConfig) -> None:
             raise ValueError(
                 "eval.background_colors entries must contain three finite values in [0, 1]"
             )
-    if int(config.eval.lpips_batch_size) <= 0:
-        raise ValueError("eval.lpips_batch_size must be greater than zero")
-    if int(config.eval.lpips_min_roi_size) < 32:
-        raise ValueError("eval.lpips_min_roi_size must be at least 32 pixels")
-    if bool(config.eval.lpips) and pipeline_mode != "foreground":
-        raise ValueError("eval.lpips=true requires pipeline.mode=foreground")
-    if not str(config.eval.lpips_device):
-        raise ValueError("eval.lpips_device must not be empty")
     if config.init.backend not in INIT_BACKENDS:
         raise ValueError(
             f"unsupported init.backend: {config.init.backend} "

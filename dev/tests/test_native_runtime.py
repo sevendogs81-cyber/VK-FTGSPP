@@ -399,6 +399,17 @@ class NativeRuntimeTests(unittest.TestCase):
             )
             native.bind_dynamic_view_image(0, True, reference)
             native.bind_dynamic_view_image(0, False, reference)
+            native.bind_dynamic_view_validity(
+                0, False, np.ones((height, width), np.uint8),
+            )
+            copied_reference, copied_validity = native.copy_bound_eval_inputs(0)
+            np.testing.assert_array_equal(
+                np.asarray(copied_reference)[..., :3], reference,
+            )
+            np.testing.assert_array_equal(
+                np.asarray(copied_reference)[..., 3], 255,
+            )
+            np.testing.assert_array_equal(np.asarray(copied_validity), 1)
             native.configure_ftgspp(
                 {
                     "color_correction": True,
@@ -458,6 +469,12 @@ class NativeRuntimeTests(unittest.TestCase):
             self.assertIn("ssim_sum", gpu)
             self.assertIn("foreground_squared_error_sum", gpu)
             self.assertGreater(float(gpu["valid_pixels"]), 0.0)
+            backgrounds = list(native.complete_eval_metrics_multi([
+                (0.0, 0.0, 0.0), (1.0, 1.0, 1.0),
+            ]))
+            self.assertEqual(len(backgrounds), 2)
+            for row in backgrounds:
+                self.assertGreater(float(dict(row)["valid_pixels"]), 0.0)
             native.submit_eval_rgb_readback()
             eval_components = np.asarray(
                 native.complete_eval_components(), dtype=np.float32,

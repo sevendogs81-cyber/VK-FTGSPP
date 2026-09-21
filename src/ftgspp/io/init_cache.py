@@ -10,17 +10,11 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
+from ftgspp.io.hashing import file_sha256
+
 DA3_SCHEMA = "ftgspp-da3-foreground-v1"
 DA3_CACHE_POINTER_SCHEMA = "ftgspp-da3-cache-pointer-v1"
 L3_SCHEMA = "ftgspp-init-l3-v1"
-
-
-def file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def canonical_json(payload: dict[str, object]) -> str:

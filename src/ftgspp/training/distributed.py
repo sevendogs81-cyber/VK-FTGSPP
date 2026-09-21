@@ -24,6 +24,7 @@ from typing import Callable, Mapping, Protocol, Sequence, TypeVar
 import numpy as np
 
 from ftgspp.config.schema import AppConfig
+from ftgspp.io.model import NativeGaussians
 from ftgspp.training.distributed_contract import (
     RELOCATION_MAX_DONOR_COPIES,
     assert_replicas_consistent,
@@ -74,6 +75,7 @@ class SynchronousBackend(Protocol):
     def schedule_eval_views(
         self, view_indices: Sequence[int], *, executor: Executor,
     ) -> None: ...
+    def upload_model(self, model: NativeGaussians) -> None: ...
     def supports_pair_exchange_gpu_merge(self) -> bool: ...
     def create_pair_exchange_gpu_merge_owner(
         self, *, world_size: int, bucket_bytes: int, sparse: bool, timeout_seconds: float,
@@ -931,6 +933,11 @@ class SynchronousBackendGroup:
         return self._parallel(
             lambda rank, backend: operation(rank, backend, shards[rank])
         )
+
+    def upload_model(self, model: NativeGaussians) -> None:
+        """Upload one immutable export snapshot to every eval replica."""
+
+        self._parallel(lambda _rank, backend: backend.upload_model(model))
 
     def begin_hard_separation(self) -> dict[str, int]:
         """Apply the deterministic gate split on every replica."""

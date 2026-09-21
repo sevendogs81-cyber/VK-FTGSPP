@@ -653,6 +653,29 @@ public:
         target.has_custom_validity = true;
     }
 
+    py::tuple copy_bound_eval_inputs(size_t view_idx) {
+        auto& target = trainer.get_val_image(view_idx);
+        const size_t height = (size_t)target.camera.h;
+        const size_t width = (size_t)target.camera.w;
+        const size_t pixels = height * width;
+        if (target.buffer.size() != 4 * pixels)
+            throw std::runtime_error("eval reference pixels are not bound");
+        if (!target.has_custom_validity || target.validity.size() != pixels)
+            throw std::runtime_error("eval validity is not bound");
+        py::array_t<uint8_t> image({height, width, size_t(4)});
+        py::array_t<uint8_t> validity({height, width});
+        auto image_out = image.mutable_unchecked<3>();
+        auto validity_out = validity.mutable_unchecked<2>();
+        {
+            py::gil_scoped_release release;
+            memcpy(image_out.mutable_data(0, 0, 0), target.buffer.data(), 4 * pixels);
+            uint8_t* valid = validity_out.mutable_data(0, 0);
+            for (size_t index = 0; index < pixels; ++index)
+                valid[index] = (target.validity[index] & 1u) ? 1u : 0u;
+        }
+        return py::make_tuple(std::move(image), std::move(validity));
+    }
+
     void release_gradient_host_copies() {
         // Gradient NumPy arrays and device buffers own their data after an
         // export/upload.  Keeping another std::vector copy per rank would add
@@ -2011,7 +2034,11 @@ public:
         }
     }
 
-    py::dict complete_eval_metrics(std::array<float, 3> background) {
+    py::dict complete_eval_metrics_impl(
+        std::array<float, 3> background,
+        std::array<uint32_t, 4> roi_yxyx,
+        bool upload_reference
+    ) {
         trainer.requireFTGSPPFloat32AtomicAdd();
         if (last_eval_view_idx_ >= trainer.num_val())
             throw std::out_of_range("complete_eval_metrics has no rendered eval view");
@@ -2039,7 +2066,8 @@ public:
                     continue;
                 }
                 trainer.executeEvalMetrics(
-                    config, uniforms, buffers, last_eval_view_idx_, background);
+                    config, uniforms, buffers, last_eval_view_idx_, background,
+                    roi_yxyx, upload_reference);
                 trainer.waitAllComputeSlots("eval_metrics");
                 const auto after = trainer.collectLastHarvestedOverflow();
                 if (after.overflow) {
@@ -2051,7 +2079,7 @@ public:
                     continue;
                 }
                 trainer.copyFromDevice(buffers.eval_metrics);
-                if (buffers.eval_metrics.size() < 6)
+                if (buffers.eval_metrics.size() < 8)
                     throw std::runtime_error("eval metrics buffer is incomplete");
                 se_sum = buffers.eval_metrics[0];
                 ssim_sum = buffers.eval_metrics[1];
@@ -2069,7 +2097,33 @@ public:
         result["foreground_samples"] = fg_pixels;
         result["valid_pixels"] = valid_pixels;
         result["valid_windows"] = valid_windows;
+        result["roi_ssim_sum"] = buffers.eval_metrics[6];
+        result["roi_valid_windows"] = buffers.eval_metrics[7];
         return result;
+    }
+
+    py::dict complete_eval_metrics(
+        std::array<float, 3> background,
+        std::array<uint32_t, 4> roi_yxyx = {0u, 0u, 0u, 0u}
+    ) {
+        return complete_eval_metrics_impl(background, roi_yxyx, true);
+    }
+
+    py::list complete_eval_metrics_multi(
+        const std::vector<std::array<float, 3>>& backgrounds,
+        std::array<uint32_t, 4> roi_yxyx = {0u, 0u, 0u, 0u}
+    ) {
+        if (backgrounds.empty())
+            throw std::invalid_argument(
+                "complete_eval_metrics_multi requires at least one background");
+        py::list results;
+        // Reuse the current F/T render and the first reference/mask upload.
+        // Only objective and SSIM reductions repeat for later backgrounds.
+        for (size_t index = 0; index < backgrounds.size(); ++index) {
+            results.append(complete_eval_metrics_impl(
+                backgrounds[index], roi_yxyx, index == 0));
+        }
+        return results;
     }
 
     void render_dynamic(float timestamp) {
@@ -3224,6 +3278,8 @@ PYBIND11_MODULE(_ftgspp_vk, m) {
              py::arg("view_idx"), py::arg("is_train"), py::arg("image"))
         .def("bind_dynamic_view_validity", &VkSplat::bind_dynamic_view_validity,
              py::arg("view_idx"), py::arg("is_train"), py::arg("validity"))
+        .def("copy_bound_eval_inputs", &VkSplat::copy_bound_eval_inputs,
+             py::arg("view_idx"))
         .def("get_pipeline_telemetry", &VkSplat::get_pipeline_telemetry)
         .def("release_dynamic_view_image", &VkSplat::release_dynamic_view_image,
              py::arg("view_idx"), py::arg("is_train"))
@@ -3340,7 +3396,11 @@ PYBIND11_MODULE(_ftgspp_vk, m) {
         .def("complete_eval_rgb", &VkSplat::complete_eval_rgb)
         .def("complete_eval_components", &VkSplat::complete_eval_components)
         .def("complete_eval_metrics", &VkSplat::complete_eval_metrics,
-             py::arg("background") = std::array<float, 3>{0.0f, 0.0f, 0.0f})
+             py::arg("background") = std::array<float, 3>{0.0f, 0.0f, 0.0f},
+             py::arg("roi_yxyx") = std::array<uint32_t, 4>{0u, 0u, 0u, 0u})
+        .def("complete_eval_metrics_multi", &VkSplat::complete_eval_metrics_multi,
+             py::arg("backgrounds"),
+             py::arg("roi_yxyx") = std::array<uint32_t, 4>{0u, 0u, 0u, 0u})
         .def("copy_pixel_rgb", &VkSplat::copy_pixel_rgb)
         .def("rasterizer_state", [](VkSplat& self) {
             py::gil_scoped_release release;

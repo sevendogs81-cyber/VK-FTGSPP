@@ -104,6 +104,29 @@ def _canonicalize_reference_rgba(rgb: np.ndarray) -> np.ndarray:
     return value
 
 
+def _reference_roi_yxyx(
+    image: np.ndarray | None,
+    validity: np.ndarray | None,
+) -> tuple[int, int, int, int]:
+    """Match foreground_reference_roi without importing training metrics."""
+
+    if image is None or validity is None or image.shape[-1] != 4:
+        return (0, 0, 0, 0)
+    mask = np.asarray(image[..., 3]) >= 128
+    valid = np.asarray(validity).squeeze() >= 0.5
+    ys, xs = np.nonzero(mask & valid)
+    if not len(xs):
+        return (0, 0, 0, 0)
+    height, width = mask.shape
+    padding = max(1, round(2 * max(mask.shape) / 1024))
+    return (
+        max(0, int(ys.min()) - padding),
+        min(height, int(ys.max()) + 1 + padding),
+        max(0, int(xs.min()) - padding),
+        min(width, int(xs.max()) + 1 + padding),
+    )
+
+
 class SharedRgbViewCache:
     """Thread-safe decoded-RGB(A) LRU shared by Vulkan replicas.
 
@@ -294,13 +317,21 @@ class NativeVulkanBackend:
         self._rgb_cache = SharedRgbViewCache(64)
         self._view_load_workers = 0
         self._bound_train_index: int | None = None
+        self._bound_eval_images: set[int] = set()
+        self._bound_eval_validity: set[int] = set()
+        self._eval_batch_prepared = False
         self._num_gaussians = 0
         self._image_objective = "scene_rgb_v1"
+        self._eval_background_colors: list[list[float]] = [[0.0, 0.0, 0.0]]
 
     def configure(self, config, scene_extent: float) -> None:
         lrs, schedules = config.train.lrs, config.train.lr_schedules
         self.max_duration = float(config.model.max_duration)
         self._image_objective = str(config.pipeline.image_objective)
+        self._eval_background_colors = [
+            [float(channel) for channel in color]
+            for color in config.eval.background_colors
+        ]
         self.native.configure_ftgspp({
             "max_steps": int(config.train.iterations),
             "max_sh_degree": int(config.init.sh_degree),
@@ -425,6 +456,9 @@ class NativeVulkanBackend:
         self.native.clear_dynamic_views()
         self._dataset = dataset
         self._bound_train_index = None
+        self._bound_eval_images.clear()
+        self._bound_eval_validity.clear()
+        self._eval_batch_prepared = False
         self._view_load_workers = int(workers)
         camera_to_index, camera_ids = self._camera_index_map(dataset)
         self._upload_dataset_lazy(
@@ -447,6 +481,17 @@ class NativeVulkanBackend:
 
     def view_cache_capacity(self) -> int:
         return int(self._rgb_cache.capacity)
+
+    def begin_evaluation_batch(self) -> None:
+        """Drain training once before a consecutive hold-out view batch."""
+
+        drain = getattr(self.native, "drain_eval", None)
+        if callable(drain):
+            drain()
+        self._eval_batch_prepared = True
+
+    def end_evaluation_batch(self) -> None:
+        self._eval_batch_prepared = False
 
     def _view_requests(
         self,
@@ -521,8 +566,12 @@ class NativeVulkanBackend:
     ) -> None:
         """Populate decoded eval references before metric reads."""
 
+        indices = tuple(
+            int(index) for index in view_indices
+            if int(index) not in self._bound_eval_images
+        )
         self._prefetch_views(
-            is_train=False, view_indices=view_indices, executor=executor,
+            is_train=False, view_indices=indices, executor=executor,
         )
 
     def schedule_eval_views(
@@ -533,8 +582,12 @@ class NativeVulkanBackend:
     ) -> None:
         """Decode future eval references without touching LRU order."""
 
+        indices = tuple(
+            int(index) for index in view_indices
+            if int(index) not in self._bound_eval_images
+        )
         self._schedule_views(
-            is_train=False, view_indices=view_indices, executor=executor,
+            is_train=False, view_indices=indices, executor=executor,
         )
 
     def cached_view_rgb(self, *, is_train: bool, index: int) -> np.ndarray:
@@ -1013,7 +1066,7 @@ class NativeVulkanBackend:
         background: np.ndarray | list[float],
         bind_validity: bool,
         read_components: bool,
-    ) -> tuple[dict[str, float], dict[str, np.ndarray] | None]:
+    ) -> tuple[dict[str, object], dict[str, np.ndarray] | None]:
         """Render one hold-out view and reduce ranking metrics on the GPU.
 
         Diagnostic F/T readback is opt-in because training-loop ranking does
@@ -1024,33 +1077,87 @@ class NativeVulkanBackend:
             raise RuntimeError("upload_dataset must be called before hold-out eval")
         begin = getattr(self.native, "begin_eval_val_view", None)
         complete_metrics = getattr(self.native, "complete_eval_metrics", None)
+        complete_metrics_multi = getattr(
+            self.native, "complete_eval_metrics_multi", None,
+        )
         bind_image = getattr(self.native, "bind_dynamic_view_image", None)
         bind_validity_fn = getattr(self.native, "bind_dynamic_view_validity", None)
+        copy_bound_inputs = getattr(
+            self.native, "copy_bound_eval_inputs", None,
+        )
         drain = getattr(self.native, "drain_eval", None)
         if not all(callable(fn) for fn in (begin, complete_metrics, bind_image)):
             raise RuntimeError(
                 "hold-out eval requires native GPU complete_eval_metrics; rebuild"
             )
+        stage_started = time.perf_counter()
+        index = int(view_index)
         color = np.asarray(background, dtype=np.float32).reshape(3)
-        rgb = self.cached_view_image(is_train=False, index=int(view_index))
-        bind_image(int(view_index), False, rgb)
+        rgb: np.ndarray | None = None
+        if index not in self._bound_eval_images:
+            rgb = self.cached_view_image(is_train=False, index=index)
+            bind_image(index, False, rgb)
+            self._bound_eval_images.add(index)
+        validity: np.ndarray | None = None
+        if (
+            read_components
+            and index in self._bound_eval_images
+            and index in self._bound_eval_validity
+            and callable(copy_bound_inputs)
+        ):
+            bound_rgb, bound_validity = copy_bound_inputs(index)
+            rgb = np.asarray(bound_rgb, dtype=np.uint8)
+            validity = np.asarray(bound_validity, dtype=np.uint8)
+        elif read_components and rgb is None:
+            # Compatibility fallback for an older native extension.
+            rgb = self.cached_view_image(is_train=False, index=index)
         if bind_validity:
             if not callable(bind_validity_fn):
                 raise RuntimeError(
                     "foreground eval requires bind_dynamic_view_validity"
                 )
-            views = self._dataset.eval_views
-            validity = views[int(view_index)].load_validity()
-            bind_validity_fn(
-                int(view_index),
-                False,
-                np.ascontiguousarray(validity >= 0.5, dtype=np.uint8),
-            )
-        if callable(drain):
+            if index not in self._bound_eval_validity:
+                validity = self._dataset.eval_views[index].load_validity()
+                bind_validity_fn(
+                    index, False,
+                    np.ascontiguousarray(validity >= 0.5, dtype=np.uint8),
+                )
+                self._bound_eval_validity.add(index)
+            elif read_components and validity is None:
+                validity = self._dataset.eval_views[index].load_validity()
+        prepared_at = time.perf_counter()
+        if callable(drain) and not self._eval_batch_prepared:
             drain()
+        drained_at = time.perf_counter()
         # Known validation cameras never consume trained per-camera affines.
         begin(int(view_index), False)
-        gpu = dict(complete_metrics((float(color[0]), float(color[1]), float(color[2]))))
+        rendered_at = time.perf_counter()
+        background_metrics: list[dict[str, float]] | None = None
+        metric_roi = _reference_roi_yxyx(rgb, validity)
+        if (
+            read_components
+            and callable(complete_metrics_multi)
+        ):
+            requested_backgrounds = [
+                (float(color[0]), float(color[1]), float(color[2])),
+                *[
+                    tuple(float(channel) for channel in value)
+                    for value in self._eval_background_colors[1:]
+                ],
+            ]
+            raw_backgrounds = complete_metrics_multi(
+                requested_backgrounds, metric_roi,
+            )
+            background_metrics = [
+                {str(key): float(value) for key, value in dict(row).items()}
+                for row in raw_backgrounds
+            ]
+            gpu = dict(background_metrics[0])
+        else:
+            gpu = dict(complete_metrics(
+                (float(color[0]), float(color[1]), float(color[2])),
+            ))
+        metrics_at = time.perf_counter()
         required = (
             "squared_error_sum",
             "ssim_sum",
@@ -1065,6 +1172,12 @@ class NativeVulkanBackend:
                 "complete_eval_metrics is missing " + ", ".join(missing)
             )
         gpu = {key: float(gpu[key]) for key in required}
+        if background_metrics:
+            for key in ("roi_ssim_sum", "roi_valid_windows"):
+                if key in background_metrics[0]:
+                    gpu[key] = float(background_metrics[0][key])
+        if background_metrics is not None:
+            gpu["background_metrics"] = background_metrics
         components = None
         if read_components:
             submit = getattr(self.native, "submit_eval_rgb_readback", None)
@@ -1083,6 +1196,18 @@ class NativeVulkanBackend:
                 "foreground": np.ascontiguousarray(state[..., :3]),
                 "transmittance": np.ascontiguousarray(state[..., 3]),
             }
+            if rgb is not None:
+                components["reference_image"] = rgb
+            if validity is not None:
+                components["validity"] = validity
+        completed_at = time.perf_counter()
+        gpu["stage_seconds"] = {
+            "reference_prepare": float(prepared_at - stage_started),
+            "queue_drain": float(drained_at - prepared_at),
+            "render_submit": float(rendered_at - drained_at),
+            "metric_reduce": float(metrics_at - rendered_at),
+            "component_readback": float(completed_at - metrics_at),
+        }
         return gpu, components
 
     def render_flow_diagnostic(self, view_index: int, end_timestamp: float) -> np.ndarray:
@@ -1350,6 +1475,9 @@ class NativeVulkanBackend:
             self.native = None
             self._dataset = None
             self._bound_train_index = None
+            self._bound_eval_images.clear()
+            self._bound_eval_validity.clear()
+            self._eval_batch_prepared = False
 
 
 def camera_extent(dataset: Scene) -> float:

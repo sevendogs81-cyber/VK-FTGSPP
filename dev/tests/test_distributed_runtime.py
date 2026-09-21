@@ -48,6 +48,7 @@ class _FakeBackend:
         self.closed = False
         self.apply_sync_capacity_calls: list[int] = []
         self.drain_structure_calls = 0
+        self.uploaded_models: list[object] = []
         self._collect_geometry_grad_stats = False
         self._geometry_grad_stats = {
             "grad_xyz_rms": 0.01,
@@ -72,6 +73,9 @@ class _FakeBackend:
     def schedule_train_views(self, view_indices, *, executor) -> None:
         self.scheduled_views = tuple(int(value) for value in view_indices)
         self.schedule_executor = executor
+
+    def upload_model(self, model) -> None:
+        self.uploaded_models.append(model)
 
     def backward_view(
         self, view_index: int, step: int, *, collect_loss: bool = True,
@@ -659,6 +663,15 @@ class DistributedRuntimeTests(unittest.TestCase):
                 lambda rank, _backend, values: (rank, values),
             )
         self.assertEqual(shards, [(0, (10, 12, 14)), (1, (11, 13))])
+
+    def test_eval_model_upload_is_broadcast_to_every_replica(self):
+        replicas = [_PairExchangeFakeBackend(0), _PairExchangeFakeBackend(1)]
+        model = object()
+        with SynchronousBackendGroup(replicas) as group:
+            group.upload_model(model)
+        self.assertTrue(all(
+            replica.uploaded_models == [model] for replica in replicas
+        ))
 
     def test_auto_maps_only_to_pair_exchange(self):
         replicas = [_PairExchangeFakeBackend(0), _PairExchangeFakeBackend(1)]

@@ -121,7 +121,9 @@ public:
         const VulkanGSRendererUniforms& uniforms,
         VulkanGSPipelineBuffers& buffers,
         size_t val_idx,
-        const std::array<float, 3>& background);
+        const std::array<float, 3>& background,
+        const std::array<uint32_t, 4>& roi_yxyx = {0u, 0u, 0u, 0u},
+        bool upload_reference = true);
     void executeFTGSPPMaterialize(const TrainerConfig &config, VulkanGSPipelineBuffers& buffers, float timestamp);
     void executeFTGSPPBackward(
         const TrainerConfig &config, const VulkanGSRendererUniforms& uniforms,

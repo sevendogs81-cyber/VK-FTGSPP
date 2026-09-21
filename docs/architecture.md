@@ -15,7 +15,7 @@ but is in development and not a supported user path.
   updates exist but are in development.
 - `src/ftgspp/io`: explicit NPZ models, V6 checkpoints, PLY.
 - `src/ftgspp/optional`: BiRefNet-HR masks, visual-hull/IBR preparation,
-  evaluation-only LPIPS, and lazy DA3 integration. CLI imports remain lazy.
+  final-test-only LPIPS, and lazy DA3 integration. CLI imports remain lazy.
 - `native/src/device`: buffers, compute/transfer submission, timing and telemetry.
 - `native/src/render`: projection/rasterization and adaptive dispatch selection.
 - `native/src/training`: backward, Adam, relocation and hard-separation kernels.
@@ -107,9 +107,16 @@ saving is enabled. One `gaussians.npz` is the standalone final model and comes
 from the best hold-out joint PSNR+SSIM score unless `train.export_best=false`.
 Training also writes `run.export_filename` (default `gaussians_4dgs.ply`);
 `ftgspp export` writes another PLY path. In-loop hold-out eval reduces PSNR and
-SSIM_2 on the GPU and
-does not compute foreground morphology/ROI diagnostics. After the selected export
-is chosen, a foreground run always writes the diagnostic suite to
+SSIM_2 on the GPU and does not compute foreground morphology/ROI diagnostics.
+Full foreground eval reuses one F/T render for every fixed background and
+reduces their PSNR/SSIM plus ROI SSIM on the GPU. CPU work is reserved for the
+final silhouette diagnostics. Synchronous replicas shard final validation
+views as well as in-loop ranking. LPIPS has no training YAML field and is not
+loaded by training or full validation. The explicit locked final-test command
+can attach a single-device LPIPS metric extension to the same render pass.
+It scores full frames for scene mode and fixed reference-foreground ROIs for
+foreground mode, batching equal shapes with bounded host memory. After the
+selected export is chosen, a foreground run always writes the diagnostic suite to
 `full_validation_metrics.jsonl` (and to `final_test_metrics.jsonl` when a locked
 final-test identity is present). `eval.full_validation_on_export` is removed.
 

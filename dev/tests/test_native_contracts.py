@@ -550,6 +550,8 @@ class NativeContractTests(unittest.TestCase):
         self.assertIn("submit_eval_rgb_readback", bindings)
         self.assertIn("complete_eval_rgb", bindings)
         self.assertIn("complete_eval_metrics", bindings)
+        self.assertIn("complete_eval_metrics_multi", bindings)
+        self.assertIn("copy_bound_eval_inputs", bindings)
         self.assertIn("drain_eval", bindings)
         self.assertIn("submitComputeReadback", bindings)
         self.assertIn("harvestNextComputeSlot", bindings)
@@ -563,6 +565,7 @@ class NativeContractTests(unittest.TestCase):
         self.assertNotIn("DeviceGuard", rerender)
         self.assertIn("complete_eval_rgb", backend)
         self.assertIn("complete_eval_metrics", backend)
+        self.assertIn("complete_eval_metrics_multi", backend)
         self.assertIn("evaluate_holdout_view", backend)
         holdout = backend[
             backend.index("def evaluate_holdout_view(") : backend.index(
@@ -594,7 +597,8 @@ class NativeContractTests(unittest.TestCase):
             "want_diagnostics = foreground_protocol and bool(full_validation)",
             evaluation,
         )
-        self.assertIn("ssim_workspace.ssim", evaluation)
+        self.assertIn("_foreground_roi_diagnostics(", evaluation)
+        self.assertIn("ssim_workspace.ssim", runner)
         self.assertIn("class _EvalSsimWorkspace", runner)
         self.assertNotIn("full_validation_on_export", evaluation)
         self.assertLess(
@@ -1395,14 +1399,14 @@ class NativeContractTests(unittest.TestCase):
         for field in ('"rank"', '"view"', '"frame"', '"camera"', '"timestamp"'):
             self.assertIn(field, helper)
 
-    def test_lpips_evaluation_is_unweighted_scalar_only(self):
+    def test_lpips_is_final_test_only_and_absent_from_training(self):
         plugin = (
             ROOT / "src" / "ftgspp" / "optional" / "lpips.py"
         ).read_text(encoding="utf-8")
-        self.assertIn("exclusively during evaluation", plugin)
+        self.assertIn("explicit locked final-test command", plugin)
+        self.assertIn("FinalTestLpipsMetric", plugin)
         self.assertIn("evaluate_lpips_vgg_unnormalized", plugin)
         self.assertIn('reduction="none"', plugin)
-        self.assertNotIn("LpipsPlugin", plugin)
         self.assertNotIn("require_gradient", plugin)
 
         runner = (ROOT / "src" / "ftgspp" / "training" / "runner.py").read_text(
@@ -1411,9 +1415,9 @@ class NativeContractTests(unittest.TestCase):
         evaluation = runner[
             runner.index("def _evaluate(") : runner.index("def _optimizer_update(")
         ]
-        self.assertIn("evaluate_lpips_vgg_unnormalized", evaluation)
-        self.assertIn("foreground_roi_lpips", evaluation)
-        self.assertIn("ssim_workspace.ssim(", evaluation)
+        self.assertNotIn("lpips", runner.lower())
+        self.assertIn("_foreground_roi_diagnostics(", evaluation)
+        self.assertIn("ssim_workspace.ssim(", runner)
         self.assertIn("want_diagnostics", evaluation)
 
         backend = (

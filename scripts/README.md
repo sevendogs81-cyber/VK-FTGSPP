@@ -13,10 +13,11 @@ source .venv/bin/activate
 The default requires the prepared initialization artifacts named by the
 configuration: foreground masks where applicable and a complete point-cloud
 set. `--with-birefnet` adds mask generation, `--with-da3` adds point generation,
-and `--with-init` installs both for raw-RGB preparation. These options are
-composable and keep model packages out of training-only environments. Each run
-synchronizes exactly the selected profile; pass both component flags together,
-or use `--with-init`, when both must remain installed.
+and `--with-init` installs both for raw-RGB preparation. `--with-lpips` adds
+TorchMetrics for optional locked final-test scoring; it does not add a training
+metric. These options are composable and keep model packages out of
+training-only environments. Each run synchronizes exactly the selected profile;
+pass all needed flags together on later setup runs.
 
 `--skip-apt` skips `apt-get` when every build dependency is already present.
 `--skip-doctor` skips the GPU check (useful on a CPU build machine).

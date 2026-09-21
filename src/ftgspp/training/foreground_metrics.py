@@ -13,8 +13,10 @@ def _safe_mean(values: np.ndarray) -> tuple[float | None, int]:
     return (float(np.mean(values)) if count else None), count
 
 
-def _psnr(prediction: np.ndarray, target: np.ndarray) -> float:
-    mse = float(np.mean((prediction.astype(np.float64) - target.astype(np.float64)) ** 2))
+def _psnr_from_sum(squared_error_sum: float, samples: int) -> float | None:
+    if samples <= 0:
+        return None
+    mse = float(squared_error_sum) / float(samples)
     return float("inf") if mse == 0.0 else float(-10.0 * np.log10(mse))
 
 
@@ -75,7 +77,7 @@ def foreground_reference_roi(
     """Return a deterministic reference-mask bounding ROI as y0,y1,x0,x1.
 
     The ROI is defined only by the reference foreground and validity, never by
-    the prediction.  This makes per-checkpoint SSIM/LPIPS directly comparable.
+    the prediction. This makes per-checkpoint ROI metrics directly comparable.
     """
 
     foreground = np.asarray(mask).squeeze() >= 0.5
@@ -137,7 +139,7 @@ def foreground_metrics(
         if foreground_count else 0.0
     )
     foreground_mse = (
-        float(np.mean(foreground_error[foreground_region]))
+        foreground_squared_error_sum / (3 * foreground_count)
         if foreground_count else None
     )
     dilated = _binary_morph(hard_target, tolerance, "dilate")
@@ -146,23 +148,27 @@ def foreground_metrics(
     inside = v & eroded
     leakage, leakage_count = _safe_mean(alpha[outside])
     holes, holes_count = _safe_mean((1.0 - alpha)[inside])
-    boundary_region = v & (_binary_morph(hard_target, tolerance, "dilate") ^ _binary_morph(hard_target, tolerance, "erode"))
-    boundary_mae, boundary_count = _safe_mean(np.abs(alpha - m)[boundary_region])
-    full_mae, full_count = _safe_mean(np.abs(alpha - m)[v])
+    boundary_region = v & (dilated ^ eroded)
+    absolute_mask_error = np.abs(alpha - m)
+    boundary_mae, boundary_count = _safe_mean(
+        absolute_mask_error[boundary_region],
+    )
+    full_mae, full_count = _safe_mean(absolute_mask_error[v])
     fixed: list[dict[str, object]] = []
     for raw_color in background_colors:
         color = np.asarray(raw_color, np.float32)
         pred, target = composite_v1(f, t, rgb, m, color)
-        squared_error_sum = float(np.sum(
-            (pred[v].astype(np.float64) - target[v].astype(np.float64)) ** 2,
-            dtype=np.float64,
-        ))
+        difference = pred[v].astype(np.float64)
+        difference -= target[v]
+        np.square(difference, out=difference)
+        squared_error_sum = float(np.sum(difference, dtype=np.float64))
+        samples = int(np.count_nonzero(v)) * 3
         fixed.append({
             "background": [float(x) for x in color],
-            "psnr": _psnr(pred[v], target[v]),
+            "psnr": _psnr_from_sum(squared_error_sum, samples),
             "valid_pixels": int(np.count_nonzero(v)),
             "squared_error_sum": squared_error_sum,
-            "samples": int(np.count_nonzero(v)) * 3,
+            "samples": samples,
         })
     return {
         "fixed_backgrounds": fixed,
@@ -216,13 +222,13 @@ def foreground_metrics(
         "foreground_interior_samples": holes_count,
         "boundary_mask_mae": boundary_mae,
         "boundary_mask_abs_error_sum": (
-            float(np.sum(np.abs(alpha-m)[boundary_region], dtype=np.float64))
+            float(np.sum(absolute_mask_error[boundary_region], dtype=np.float64))
             if boundary_count else 0.0
         ),
         "boundary_samples": boundary_count,
         "mask_mae": full_mae,
         "mask_abs_error_sum": float(
-            np.sum(np.abs(alpha-m)[v], dtype=np.float64)
+            np.sum(absolute_mask_error[v], dtype=np.float64)
         ),
         "valid_samples": full_count,
     }

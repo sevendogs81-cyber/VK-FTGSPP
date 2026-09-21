@@ -39,6 +39,7 @@ Options:
   --with-init       Install BiRefNet-HR and DA3 for raw-RGB initialization
   --with-birefnet   Install BiRefNet-HR mask generation
   --with-da3        Install DA3 point generation
+  --with-lpips      Install optional locked final-test LPIPS dependencies
   --skip-apt        Do not call apt-get (headers must already be present)
   --skip-doctor     Skip the GPU check after install
   --device N        Vulkan device id passed to ftgspp doctor (default: 0)
@@ -57,6 +58,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --with-birefnet) add_extra birefnet; shift ;;
     --with-da3) add_extra da3; shift ;;
+    --with-lpips) add_extra lpips; shift ;;
     --device)
       [[ $# -ge 2 ]] || { echo "error: --device needs an integer" >&2; exit 2; }
       DOCTOR_DEVICE="$2"
@@ -233,6 +235,12 @@ if "da3" in extras:
         "trimesh": "trimesh",
         "huggingface-hub": "huggingface_hub",
     })
+if "lpips" in extras:
+    required.update({
+        "torch": "torch",
+        "torchvision": "torchvision",
+        "torchmetrics": "torchmetrics",
+    })
 
 venv = Path(sys.prefix).resolve()
 versions = []
@@ -268,8 +276,9 @@ FastGS training runtime is installed.
 EOF
 
 if ((${#INSTALL_EXTRAS[@]})); then
-  echo "Initialization extras: $install_extras_csv"
-else
+  echo "Optional extras: $install_extras_csv"
+fi
+if [[ ",$install_extras_csv," != *,birefnet,* && ",$install_extras_csv," != *,da3,* ]]; then
   echo "Use prepared initialization artifacts, or rerun with --with-init."
 fi
 echo "See docs/usage.md for dataset preparation and training commands."

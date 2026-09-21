@@ -26,7 +26,7 @@ da3 = [
     "moviepy==1.0.3", "pillow>=10", "plyfile>=1.1", "trimesh>=4.4",
     "huggingface-hub>=0.35", "safetensors>=0.4",
 ]
-# Optional Torch dependencies for eval-time LPIPS. TorchMetrics'
+# Optional Torch dependencies for locked final-test LPIPS. TorchMetrics'
 # learned-perceptual implementation imports torchvision model definitions.
 lpips = ["torch>=2.5", "torchvision>=0.20", "torchmetrics>=1.6"]
 birefnet = [

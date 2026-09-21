@@ -28,12 +28,17 @@ The two initialization components can also be installed independently:
 point generation and CUDA-accelerated carving. The foreground pipeline mode is
 a data/training choice; it is not an installation profile.
 
+`--with-lpips` adds the optional locked final-test metric. It is composable with
+every initialization profile, for example `bash scripts/setup.sh --with-init
+--with-lpips`, and never enables LPIPS during training.
+
 | Available inputs | Setup command |
 |---|---|
 | Required masks and point-cloud set are already prepared | `bash scripts/setup.sh` |
 | Point clouds are ready; masks must be generated | `bash scripts/setup.sh --with-birefnet` |
 | Masks are ready; DA3 points or automatic carving bounds are needed | `bash scripts/setup.sh --with-da3` |
 | Start from raw RGB | `bash scripts/setup.sh --with-init` |
+| Add LPIPS to any profile | Add `--with-lpips` to the same setup command |
 
 Each setup run synchronizes the selected profile. Use `--with-init` or pass
 both component flags in the same command when both must remain installed.
@@ -74,7 +79,7 @@ copy is older.
 | Native training | NVIDIA driver and a Vulkan device accepted by `ftgspp doctor` | Driver/GPU must already exist |
 | BiRefNet-HR masks | PyTorch/TorchVision, Transformers, Safetensors, timm, Kornia, einops, and pinned `ZhengPeng7/BiRefNet_HR` | With `--with-birefnet` or `--with-init`; model weights require network or a populated Hugging Face cache |
 | DA3 points/carving | PyTorch/TorchVision, pinned `depth-anything-3==0.1.1`, Addict, evo, ImageIO/MoviePy, Pillow, plyfile, and trimesh | With `--with-da3` or `--with-init`; model weights require network or a populated cache |
-| LPIPS metrics | TorchMetrics and TorchVision | No; install `.[lpips]` |
+| Locked final-test LPIPS | PyTorch, TorchMetrics and TorchVision | With `--with-lpips`; only needed for `ftgspp eval --lpips` |
 | TensorBoard | TensorBoard | No; install `.[tensorboard]` |
 
 The pinned BiRefNet-HR repository publishes a broad
@@ -156,5 +161,24 @@ reviewed inference dependencies.
 ```bash
 uv sync --locked --no-dev --no-editable --extra da3
 ```
+
+LPIPS alone can be added to the core environment with:
+
+```bash
+uv sync --locked --no-dev --no-editable --extra lpips
+```
+
+Keep every required extra in the same exact sync command. For raw-RGB
+initialization plus final-test LPIPS, use:
+
+```bash
+uv sync --locked --no-dev --no-editable \
+  --extra birefnet --extra da3 --extra lpips
+```
+
+The first scored LPIPS batch downloads the roughly 528 MiB TorchVision VGG16
+weights when they are absent from the Torch cache (normally
+`~/.cache/torch/hub/checkpoints`). Training and ordinary validation never load
+TorchMetrics or these weights.
 
 See [usage.md](usage.md) for when each extra is required.

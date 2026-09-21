@@ -15,15 +15,15 @@ layout(binding=5) StructuredBuffer<TileWorkControl> work_control;
 struct Uniforms {
     uint image_width;
     uint image_height;
-    float l1_weight;
-    float ssim_grad_weight;
+    uint roi_y0;
+    uint roi_y1;
     uint prediction_clamp_mode;
     uint objective_mode;
     float background_r;
     float background_g;
     float background_b;
-    uint valid_pixel_count;
-    uint valid_window_count;
+    uint roi_x0;
+    uint roi_x1;
 };
 
 groupshared float se_values[256];
@@ -32,6 +32,8 @@ groupshared float fg_se_values[256];
 groupshared float fg_count_values[256];
 groupshared float pixel_count_values[256];
 groupshared float window_count_values[256];
+groupshared float roi_ssim_values[256];
+groupshared float roi_window_count_values[256];
 
 [numthreads(256, 1, 1)]
 void main(
@@ -49,6 +51,8 @@ void main(
     float fg_count = 0.0f;
     float pixel_count = 0.0f;
     float window_count = 0.0f;
+    float roi_ssim = 0.0f;
+    float roi_window_count = 0.0f;
     if (pixel < count) {
         const uint packed = reference_rgba[pixel];
         const FTGSPPObjectivePixel objective = ftgspp_objective_pixel(
@@ -76,6 +80,23 @@ void main(
                 ssim_sum += ssim_map[pixel*3u+channel].x;
             ssim = ssim_sum;
             window_count = 1.0f;
+            const uint y = pixel / u.image_width;
+            const uint x = pixel - y * u.image_width;
+            if (
+                u.roi_y1 > u.roi_y0 + 10u
+                && u.roi_x1 > u.roi_x0 + 10u
+            ) {
+                // Slang 2026.10 can miscompile one long unsigned comparison
+                // chain here; preserve the separately named axis predicates.
+                const bool inside_y =
+                    y >= u.roi_y0 + 5u && y + 5u < u.roi_y1;
+                const bool inside_x =
+                    x >= u.roi_x0 + 5u && x + 5u < u.roi_x1;
+                if (inside_y && inside_x) {
+                    roi_ssim = ssim_sum;
+                    roi_window_count = 1.0f;
+                }
+            }
         }
     }
 
@@ -86,6 +107,8 @@ void main(
     fg_count_values[lane] = fg_count;
     pixel_count_values[lane] = pixel_count;
     window_count_values[lane] = window_count;
+    roi_ssim_values[lane] = roi_ssim;
+    roi_window_count_values[lane] = roi_window_count;
     GroupMemoryBarrierWithGroupSync();
     [ForceUnroll]
     for (uint stride = 128u; stride > 0u; stride >>= 1u) {
@@ -96,6 +119,9 @@ void main(
             fg_count_values[lane] += fg_count_values[lane + stride];
             pixel_count_values[lane] += pixel_count_values[lane + stride];
             window_count_values[lane] += window_count_values[lane + stride];
+            roi_ssim_values[lane] += roi_ssim_values[lane + stride];
+            roi_window_count_values[lane] +=
+                roi_window_count_values[lane + stride];
         }
         GroupMemoryBarrierWithGroupSync();
     }
@@ -106,5 +132,7 @@ void main(
         eval_accum.InterlockedAddF32(12, fg_count_values[0]);
         eval_accum.InterlockedAddF32(16, pixel_count_values[0]);
         eval_accum.InterlockedAddF32(20, window_count_values[0]);
+        eval_accum.InterlockedAddF32(24, roi_ssim_values[0]);
+        eval_accum.InterlockedAddF32(28, roi_window_count_values[0]);
     }
 }

@@ -26,11 +26,16 @@ There is no implicit migration of old execution semantics.
   checkpoints are optional
   (`train.save_checkpoints`) and share `train.checkpoint_interval` with eval.
 - `scripts/setup.sh` now installs the Torch-free Vulkan training runtime by
-  default. Use `--with-birefnet`, `--with-da3`, or `--with-init`; the former
+  default. Use `--with-birefnet`, `--with-da3`, or `--with-init`; add
+  `--with-lpips` only for optional locked final-test LPIPS. The former
   aggregate `[foreground]` extra and `--core-only` switch are removed.
 - `FTGSPP_TRAIN_EVAL_INTERVAL` is removed. Mid-run hold-out eval uses
   `train.checkpoint_interval`. Set `save_checkpoints: false` to eval without
   writing ckpt files.
+- `eval.lpips`, `eval.lpips_device`, `eval.lpips_batch_size`, and
+  `eval.lpips_min_roi_size` are removed from training YAML. Optional LPIPS is
+  requested only on a locked test split with `ftgspp eval --lpips`; device,
+  batch size, and minimum region size are command-line options.
 - `eval.full_validation_on_export` is removed. Hold-out ranking (scene PSNR or
   foreground object PSNR, plus SSIM_2) always runs on the GPU. Foreground
   diagnostic metrics are computed after the best snapshot is selected, as a

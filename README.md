@@ -44,7 +44,8 @@ bash scripts/setup.sh --with-init
 ```
 
 That adds BiRefNet-HR and DA3. `--with-birefnet` and `--with-da3` install only
-one preparation capability. Full component requirements are in
+one preparation capability. `--with-lpips` adds the optional locked final-test
+metric without enabling it during training. Full component requirements are in
 [docs/install.md](docs/install.md).
 
 ## First training run

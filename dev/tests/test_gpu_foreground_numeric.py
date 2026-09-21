@@ -9,6 +9,8 @@ import numpy as np
 
 from ftgspp.training.backend import _shader_dir
 from tests.reference.composite_ssim import composite_l1_ssim_reference
+from ftgspp.training.objective import composite_v1
+from ftgspp.training.runner import _EvalSsimWorkspace
 
 
 def _native_class():
@@ -121,6 +123,52 @@ def _zero_regularizers(native) -> None:
 
 
 class ForegroundGpuNumericTests(unittest.TestCase):
+    def test_eval_roi_ssim_matches_cpu_crop(self):
+        native, _arrays = _setup_native(ssim_lambda=0.2)
+        height = width = 32
+        intrinsic = np.asarray([
+            [25.0, 0.0, width / 2],
+            [0.0, 24.0, height / 2],
+            [0.0, 0.0, 1.0],
+        ], np.float32)
+        reference = _reference_rgba(height, width)
+        validity = np.ones((height, width), np.uint8)
+        roi = (4, 29, 3, 28)
+        try:
+            native.add_dynamic_view_meta(
+                height, width, np.eye(4, dtype=np.float32), intrinsic,
+                0.5, 0, 0, False,
+            )
+            native.bind_dynamic_view_image(0, False, reference)
+            native.bind_dynamic_view_validity(0, False, validity)
+            native.begin_eval_val_view(0)
+            gpu = dict(native.complete_eval_metrics(
+                (0.0, 0.0, 0.0), roi,
+            ))
+            native.submit_eval_rgb_readback()
+            state = np.asarray(
+                native.complete_eval_components(), dtype=np.float32,
+            )
+            rgb = reference[..., :3].astype(np.float32) / 255.0
+            alpha = reference[..., 3].astype(np.float32) / 255.0
+            y0, y1, x0, x1 = roi
+            prediction, target = composite_v1(
+                state[y0:y1, x0:x1, :3],
+                state[y0:y1, x0:x1, 3],
+                rgb[y0:y1, x0:x1],
+                alpha[y0:y1, x0:x1],
+                np.zeros(3, np.float32),
+            )
+            expected = _EvalSsimWorkspace().ssim(
+                prediction, target, validity[y0:y1, x0:x1],
+            )
+            actual = float(gpu["roi_ssim_sum"]) / (
+                3.0 * float(gpu["roi_valid_windows"])
+            )
+            self.assertAlmostEqual(actual, expected, places=5)
+        finally:
+            native.cleanup()
+
     def test_scene_rgb_ignores_reference_alpha(self):
         reference = _reference_rgba(32, 32)
         opaque = reference.copy()
@@ -144,7 +192,14 @@ class ForegroundGpuNumericTests(unittest.TestCase):
                 native.backward_dynamic_view_from_loss_raw(0, 0)
             finally:
                 native.cleanup()
-        self.assertEqual(observed[0][0], observed[1][0])
+        self.assertEqual(set(observed[0][0]), set(observed[1][0]))
+        for key, expected in observed[0][0].items():
+            # Scalar loss reductions use unordered float atomics; pipeline
+            # scheduling may move the final sum by one FP32 ULP.
+            self.assertAlmostEqual(
+                float(observed[1][0][key]), float(expected), places=7,
+                msg=key,
+            )
         np.testing.assert_array_equal(observed[0][1], observed[1][1])
 
     def test_occluding_splats_full_backward_matches_multistep_finite_difference(self):
