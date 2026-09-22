@@ -46,6 +46,7 @@ from ftgspp.io.init_cache import (
 )
 from ftgspp.io.ply import read_point_ply, write_point_ply_atomic
 from ftgspp.optional.da3_evidence import target_depth_is_trusted
+from ftgspp.optional.torch_compute import available_torch_device, resolve_torch_device
 from ftgspp.optional.da3_schedule import (
     foreground_schedule_metadata,
     inference_pixel_cost,
@@ -361,6 +362,7 @@ def depth_to_points(
     max_points: int | None = None,
     rng: np.random.Generator | None = None,
     return_selection: bool = False,
+    device: str = "auto",
 ) -> tuple[np.ndarray, np.ndarray] | tuple[np.ndarray, np.ndarray, dict[str, object]]:
     """Convert one DA3 depth/RGB view into a world-space cloud.
 
@@ -421,11 +423,42 @@ def depth_to_points(
                 "xs": np.empty(0, np.int64),
             }
         return empty_xyz, empty_rgb
-    uv = np.stack((xs.astype(np.float32) + 0.5, ys.astype(np.float32) + 0.5), axis=1)
-    uv_h = np.concatenate((uv, np.ones((len(uv), 1), np.float32)), axis=1)
-    camera_xyz = (uv_h @ np.linalg.inv(intrinsic).T) * depth[ys, xs, None]
-    c2w = np.linalg.inv(_as_homogeneous(w2c))
-    world_xyz = camera_xyz @ c2w[:3, :3].T + c2w[:3, 3]
+    resolved_device, torch = (
+        available_torch_device(device)
+        if str(device).startswith("cuda") else
+        resolve_torch_device(device, purpose="DA3 unprojection")
+    )
+    uv = np.stack(
+        (xs.astype(np.float32) + 0.5, ys.astype(np.float32) + 0.5), axis=1,
+    )
+    if resolved_device.startswith("cuda"):
+        with torch.inference_mode():
+            uv_gpu = torch.as_tensor(uv, dtype=torch.float32, device=resolved_device)
+            uv_h_gpu = torch.cat((
+                uv_gpu,
+                torch.ones((len(uv_gpu), 1), dtype=torch.float32, device=resolved_device),
+            ), dim=1)
+            intrinsic_gpu = torch.as_tensor(
+                intrinsic, dtype=torch.float32, device=resolved_device,
+            )
+            selected_depth = torch.as_tensor(
+                np.ascontiguousarray(depth[ys, xs]),
+                dtype=torch.float32, device=resolved_device,
+            )
+            camera_xyz_gpu = (
+                uv_h_gpu @ torch.linalg.inv(intrinsic_gpu).T
+            ) * selected_depth[:, None]
+            c2w_gpu = torch.linalg.inv(torch.as_tensor(
+                _as_homogeneous(w2c), dtype=torch.float32, device=resolved_device,
+            ))
+            world_xyz = (
+                camera_xyz_gpu @ c2w_gpu[:3, :3].T + c2w_gpu[:3, 3]
+            ).cpu().numpy()
+    else:
+        uv_h = np.concatenate((uv, np.ones((len(uv), 1), np.float32)), axis=1)
+        camera_xyz = (uv_h @ np.linalg.inv(intrinsic).T) * depth[ys, xs, None]
+        c2w = np.linalg.inv(_as_homogeneous(w2c))
+        world_xyz = camera_xyz @ c2w[:3, :3].T + c2w[:3, 3]
     colors = np.asarray(rgb[ys, xs, :3], dtype=np.uint8)
     finite = np.isfinite(world_xyz).all(axis=1)
     if return_selection:
@@ -435,6 +468,7 @@ def depth_to_points(
             {
                 "ys": ys[finite],
                 "xs": xs[finite],
+                "device": resolved_device,
             },
         )
     return world_xyz[finite].astype(np.float32), colors[finite]
@@ -580,6 +614,149 @@ def _intrinsic_to_source(
     return np.ascontiguousarray(result, dtype=np.float32)
 
 
+def _geometric_consistency_filter_cuda(
+    xyz: np.ndarray,
+    *,
+    source_index: int,
+    depths: Sequence[np.ndarray],
+    extrinsics: np.ndarray,
+    intrinsics: np.ndarray,
+    foreground_masks: Sequence[np.ndarray],
+    validities: Sequence[np.ndarray],
+    min_consistent_views: int,
+    relative_tolerance: float,
+    absolute_tolerance: float,
+    return_diagnostics: bool,
+    mask_threshold: float,
+    torch,
+    device: str,
+    prepared: dict[str, object] | None = None,
+):
+    """CUDA projection and depth-evidence accumulation for DA3 clouds."""
+
+    with torch.inference_mode():
+        points = torch.as_tensor(xyz, dtype=torch.float32, device=device)
+        supports = torch.ones(len(points), dtype=torch.int16, device=device)
+        conflicts = torch.zeros(len(points), dtype=torch.int16, device=device)
+        residuals = []
+        evidence_count = 0
+        occluded_count = 0
+        unobservable_count = 0
+        prepared = {} if prepared is None else prepared
+        extrinsics_gpu = prepared.get("extrinsics")
+        if extrinsics_gpu is None:
+            extrinsics_gpu = torch.as_tensor(
+                extrinsics, dtype=torch.float32, device=device,
+            )
+        intrinsics_gpu = prepared.get("intrinsics")
+        if intrinsics_gpu is None:
+            intrinsics_gpu = torch.as_tensor(
+                intrinsics, dtype=torch.float32, device=device,
+            )
+        depth_tensors = prepared.get("depths")
+        validity_tensors = prepared.get("validities")
+        foreground_tensors = prepared.get("foreground_masks")
+        for target in range(len(depths)):
+            if target == int(source_index):
+                continue
+            transform = extrinsics_gpu[target]
+            camera = points @ transform[:3, :3].T + transform[:3, 3]
+            z = camera[:, 2]
+            k = intrinsics_gpu[target]
+            x = torch.round(
+                k[0, 0] * camera[:, 0] / z.clamp_min(1e-12)
+                + k[0, 2] - 0.5
+            ).long()
+            y = torch.round(
+                k[1, 1] * camera[:, 1] / z.clamp_min(1e-12)
+                + k[1, 2] - 0.5
+            ).long()
+            height, width = np.asarray(depths[target]).shape
+            inside = (
+                (z > 1e-8) & (x >= 0) & (x < width)
+                & (y >= 0) & (y < height)
+            )
+            ids = torch.nonzero(inside, as_tuple=False).flatten()
+            unobservable_count += int(len(points) - ids.numel())
+            if ids.numel() == 0:
+                continue
+            depth_gpu = (
+                depth_tensors[target] if depth_tensors is not None else
+                torch.as_tensor(
+                    np.ascontiguousarray(depths[target]),
+                    dtype=torch.float32, device=device,
+                )
+            )
+            validity_gpu = (
+                validity_tensors[target] if validity_tensors is not None else
+                torch.as_tensor(
+                    np.ascontiguousarray(validities[target]), device=device,
+                )
+            )
+            foreground_gpu = (
+                foreground_tensors[target] if foreground_tensors is not None else
+                torch.as_tensor(
+                    np.ascontiguousarray(foreground_masks[target]),
+                    dtype=torch.float32, device=device,
+                )
+            )
+            observed = depth_gpu[y[ids], x[ids]]
+            trusted = (
+                (validity_gpu[y[ids], x[ids]] >= 0.5)
+                & (foreground_gpu[y[ids], x[ids]] >= float(mask_threshold))
+                & torch.isfinite(observed) & (observed > 1e-8)
+            )
+            if not bool(torch.any(trusted)):
+                continue
+            ids = ids[trusted]
+            observed = observed[trusted]
+            tolerance = torch.maximum(
+                float(relative_tolerance) * observed,
+                torch.full_like(observed, float(absolute_tolerance)),
+            )
+            delta = z[ids] - observed
+            residuals.append(torch.abs(delta) / observed.clamp_min(1e-12))
+            evidence_count += ids.numel()
+            agree = torch.abs(delta) <= tolerance
+            behind = delta > tolerance
+            ahead = delta < -tolerance
+            supports[ids[agree]] += 1
+            conflicts[ids[ahead]] += 1
+            occluded_count += int(torch.count_nonzero(behind).item())
+        keep = (supports >= int(min_consistent_views)) & (conflicts == 0)
+        if not return_diagnostics:
+            return (
+                keep.cpu().numpy(), supports.cpu().numpy(), conflicts.cpu().numpy(),
+            )
+        if residuals:
+            all_rel = torch.cat(residuals)
+            quantiles = torch.quantile(
+                all_rel, torch.tensor([0.5, 0.9, 0.99], device=device),
+            )
+            residual_report = {
+                "count": int(all_rel.numel()),
+                "p50": float(quantiles[0].item()),
+                "p90": float(quantiles[1].item()),
+                "p99": float(quantiles[2].item()),
+                "max": float(torch.max(all_rel).item()),
+            }
+        else:
+            residual_report = {
+                "count": 0, "p50": None, "p90": None, "p99": None, "max": None,
+            }
+        return (
+            keep.cpu().numpy(), supports.cpu().numpy(), conflicts.cpu().numpy(), {
+                "evidence_samples": int(evidence_count),
+                "occluded_samples": int(occluded_count),
+                "unobservable_samples": int(unobservable_count),
+                "relative_depth_error": residual_report,
+                "relative_depth_error_all": residual_report,
+                "mask_threshold": float(mask_threshold),
+                "device": device,
+            },
+        )
+
+
 def geometric_consistency_filter(
     xyz: np.ndarray,
     *,
@@ -594,10 +771,30 @@ def geometric_consistency_filter(
     absolute_tolerance: float,
     return_diagnostics: bool = False,
     mask_threshold: float = 0.5,
+    device: str = "auto",
+    _prepared_cuda: dict[str, object] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | tuple[
     np.ndarray, np.ndarray, np.ndarray, dict[str, object]
 ]:
     """Return keep/support/conflict arrays using conservative depth evidence."""
+
+    resolved_device, torch = (
+        available_torch_device(device)
+        if str(device).startswith("cuda") else
+        resolve_torch_device(device, purpose="DA3 geometric consistency")
+    )
+    if resolved_device.startswith("cuda"):
+        return _geometric_consistency_filter_cuda(
+            xyz, source_index=source_index, depths=depths,
+            extrinsics=extrinsics, intrinsics=intrinsics,
+            foreground_masks=foreground_masks, validities=validities,
+            min_consistent_views=min_consistent_views,
+            relative_tolerance=relative_tolerance,
+            absolute_tolerance=absolute_tolerance,
+            return_diagnostics=return_diagnostics,
+            mask_threshold=mask_threshold, torch=torch, device=resolved_device,
+            prepared=_prepared_cuda,
+        )
 
     points = np.asarray(xyz, np.float64)
     supports = np.ones(len(points), np.int16)
@@ -676,6 +873,7 @@ def geometric_consistency_filter(
         "relative_depth_error": residual_report,
         "relative_depth_error_all": residual_report,
         "mask_threshold": float(mask_threshold),
+        "device": "cpu",
     }
 
 
@@ -688,6 +886,7 @@ def _fuse_view_clouds(
     max_points: int,
     rng: np.random.Generator,
     report: dict[str, object] | None = None,
+    device: str = "auto",
 ) -> tuple[np.ndarray, np.ndarray, int, float]:
     """Voxel-fuse multi-view unprojections, then spatially cap the dense cache.
 
@@ -702,6 +901,11 @@ def _fuse_view_clouds(
             "confidence and sky filters; inspect empty masks and processed-coordinate "
             "alignment before changing thresholds"
         )
+    resolved_device, _torch = (
+        available_torch_device(device)
+        if str(device).startswith("cuda") else
+        resolve_torch_device(device, purpose="DA3 voxel fusion")
+    )
     per_view = pre_fuse_per_view_cap(int(max_points), len(points))
     trimmed: list[tuple[np.ndarray, np.ndarray]] = []
     for xyz, rgb in points:
@@ -740,7 +944,7 @@ def _fuse_view_clouds(
             raise ValueError("init.da3.voxel_size must be a positive finite length")
         voxel_diag = {"mode": "explicit", "voxel_size": size}
     fused_xyz, fused_rgb, _winner = voxel_fuse_points(
-        xyz, rgb, voxel_size=size,
+        xyz, rgb, voxel_size=size, device=resolved_device,
     )
     if len(fused_xyz) > int(max_points):
         sample_diag: dict[str, object] = {}
@@ -757,6 +961,7 @@ def _fuse_view_clouds(
         "fused_count": int(len(fused_xyz)),
         "final_voxel_size": float(size),
         "pre_unproject_cap_per_view": int(per_view),
+        "device": resolved_device,
     })
     if report is not None:
         report.update(voxel_diag)
@@ -958,6 +1163,7 @@ def _cloud_from_prediction(
     validity: np.ndarray | None = None,
     max_points: int | None = None,
     rng: np.random.Generator | None = None,
+    device: str = "auto",
 ) -> tuple[np.ndarray, np.ndarray]:
     if prediction.processed_images is None or prediction.intrinsics is None:
         raise RuntimeError("DA3 did not return processed images/intrinsics")
@@ -983,6 +1189,7 @@ def _cloud_from_prediction(
         max_points=max_points,
         rng=rng,
         return_selection=False,
+        device=device,
     )
 
 
@@ -1029,6 +1236,7 @@ def _prediction_bundle(
     depth_scale: float,
     max_points_per_view: int | None = None,
     rng: np.random.Generator | None = None,
+    device: str = "auto",
 ) -> _PredictionBundle:
     _validate_prediction_depth_type(prediction, options)
     masks, validities, transforms = _prediction_side_inputs(
@@ -1046,6 +1254,7 @@ def _prediction_bundle(
             depth_scale=depth_scale,
             foreground_mask=masks[index], validity=validities[index],
             max_points=max_points_per_view, rng=rng,
+            device=device,
         )
         raw_clouds.append((xyz, rgb))
     return _PredictionBundle(
@@ -1061,7 +1270,7 @@ def _prediction_bundle(
 
 
 def _filter_prediction_bundles(
-    bundles: Sequence[_PredictionBundle], options: Any,
+    bundles: Sequence[_PredictionBundle], options: Any, *, device: str = "auto",
 ) -> tuple[list[tuple[np.ndarray, np.ndarray]], dict[str, object]]:
     """Run consistency over all synchronized cameras, independent of chunks."""
 
@@ -1134,7 +1343,39 @@ def _filter_prediction_bundles(
         raise RuntimeError(
             "DA3 consistency requires "
             f"{minimum} views but only {len(raw_clouds)} synchronized views are available"
+        )
+    resolved_device, torch = (
+        available_torch_device(device)
+        if str(device).startswith("cuda") else
+        resolve_torch_device(device, purpose="DA3 geometric consistency")
     )
+    prepared_cuda = None
+    if resolved_device.startswith("cuda") and minimum > 1:
+        prepared_cuda = {
+            "extrinsics": torch.as_tensor(
+                extrinsics, dtype=torch.float32, device=resolved_device,
+            ),
+            "intrinsics": torch.as_tensor(
+                intrinsics, dtype=torch.float32, device=resolved_device,
+            ),
+            "depths": [
+                torch.as_tensor(
+                    np.ascontiguousarray(value),
+                    dtype=torch.float32, device=resolved_device,
+                ) for value in depths
+            ],
+            "foreground_masks": [
+                torch.as_tensor(
+                    np.ascontiguousarray(value),
+                    dtype=torch.float32, device=resolved_device,
+                ) for value in masks
+            ],
+            "validities": [
+                torch.as_tensor(
+                    np.ascontiguousarray(value), device=resolved_device,
+                ) for value in validities
+            ],
+        }
     for index, (xyz, rgb) in enumerate(raw_clouds):
         if not len(xyz) or minimum <= 1:
             clouds.append((xyz, rgb))
@@ -1155,6 +1396,8 @@ def _filter_prediction_bundles(
             absolute_tolerance=absolute,
             return_diagnostics=True,
             mask_threshold=mask_threshold,
+            device=resolved_device,
+            _prepared_cuda=prepared_cuda,
         )
         low = support < minimum
         depth_conflict = conflict > 0
@@ -1207,6 +1450,7 @@ def _filter_prediction_bundles(
         "global_consistency_views": len(raw_clouds),
         "mask_threshold": mask_threshold,
         "primary_reject_reason": primary_reject,
+        "device": resolved_device,
     }
 
 
@@ -1219,14 +1463,18 @@ def _clouds_from_prediction(
     depth_scale: float,
     max_points_per_view: int | None = None,
     rng: np.random.Generator | None = None,
+    device: str = "auto",
 ) -> tuple[list[tuple[np.ndarray, np.ndarray]], dict[str, object]]:
     bundle = _prediction_bundle(
         prediction, views, extrinsics, options,
         depth_scale=depth_scale,
         max_points_per_view=max_points_per_view,
         rng=rng,
+        device=device,
     )
-    clouds, diagnostics = _filter_prediction_bundles([bundle], options)
+    clouds, diagnostics = _filter_prediction_bundles(
+        [bundle], options, device=device,
+    )
     diagnostics["pre_unproject_cap_per_view"] = (
         None if max_points_per_view is None else int(max_points_per_view)
     )
@@ -1460,6 +1708,7 @@ def _fuse_keyframe_cloud(
     max_points: int,
     rng: np.random.Generator,
     allow_empty: bool,
+    device: str = "auto",
 ) -> tuple[np.ndarray, np.ndarray, int, float, dict[str, object]]:
     report: dict[str, object] = {}
     try:
@@ -1467,6 +1716,7 @@ def _fuse_keyframe_cloud(
             clouds, voxel_size=voxel_size, voxel_ratio=voxel_ratio,
             target_extent=_target_extent(options), max_points=max_points, rng=rng,
             report=report,
+            device=device,
         )
     except RuntimeError:
         if not allow_empty:
@@ -1572,7 +1822,7 @@ def generate_da3_points(
                     {camera: value[2] for camera, value in geometry.items()},
                 )
             if root != base:
-                publish_cache_pointer(base, root, manifest_path, manifest["fingerprint"])
+                publish_cache_pointer(base, root, manifest_path)
             return DA3PointClouds(points, cache_root=root, generated=False)
 
         with tempfile.TemporaryDirectory(prefix=".building-", dir=base) as staging:
@@ -1589,7 +1839,7 @@ def generate_da3_points(
                 # holds its path, even when that generation is damaged.
                 root = base / f"{root.name}-{uuid.uuid4().hex[:12]}"
             os.rename(temporary, root)
-            publish_cache_pointer(base, root, root / "manifest.json", manifest["fingerprint"])
+            publish_cache_pointer(base, root, root / "manifest.json")
             if not getattr(dataset, "calibration_available", True):
                 cameras = {
                     camera: working_dataset.view(frames[0], camera)
@@ -1681,6 +1931,8 @@ def _generate_da3_points(
     logger.info("DA3 pixel cost %s", inference_pixel_cost(native_hw, int(schedule.process_res)))
     with timer.stage("model_load"):
         model, device = _load_model(options, fallback_gpu=int(config.run.gpu))
+    postprocess_device, _postprocess_torch = available_torch_device(device)
+    logger.info("DA3 postprocessing device: %s", postprocess_device)
     try:
         # The model source is content/commit identified above; avoid copying every
         # tensor back to CPU just to derive a redundant state-dict hash.
@@ -1777,6 +2029,7 @@ def _generate_da3_points(
                         depth_scale=chunk_scale,
                         max_points_per_view=reference_per_view_cap,
                         rng=rng,
+                        device=postprocess_device,
                     )
                 reference_bundles.append(bundle)
                 reference_bundle_cameras.append(list(camera_chunk))
@@ -1826,7 +2079,7 @@ def _generate_da3_points(
             )
             with timer.stage("global_consistency"):
                 reference_clouds, global_diagnostics = _filter_prediction_bundles(
-                    [unique_reference_bundle], options,
+                    [unique_reference_bundle], options, device=postprocess_device,
                 )
             for row in diagnostics_rows:
                 if int(row["frame"]) == reference_frame:
@@ -1836,6 +2089,7 @@ def _generate_da3_points(
                     reference_clouds, options=options, voxel_size=voxel_size,
                     voxel_ratio=voxel_ratio, max_points=max_points, rng=rng,
                     allow_empty=bool(getattr(options, "foreground_only", False)),
+                    device=postprocess_device,
                 )
             result.append((xyz, rgb))
             with timer.stage("cache_write"):
@@ -1907,6 +2161,7 @@ def _generate_da3_points(
                         depth_scale=1.0,
                         max_points_per_view=per_view_cap,
                         rng=rng,
+                        device=postprocess_device,
                     )
                 frame_bundles.append(bundle)
                 diagnostics_rows.append({
@@ -1924,7 +2179,7 @@ def _generate_da3_points(
                 })
             with timer.stage("global_consistency"):
                 frame_clouds, global_diagnostics = _filter_prediction_bundles(
-                    frame_bundles, options,
+                    frame_bundles, options, device=postprocess_device,
                 )
             for row in diagnostics_rows[frame_diagnostic_start:]:
                 row["global_geometry"] = _serializable_geometry(global_diagnostics)
@@ -1933,6 +2188,7 @@ def _generate_da3_points(
                     frame_clouds, options=options, voxel_size=voxel_size,
                     voxel_ratio=voxel_ratio, max_points=max_points, rng=rng,
                     allow_empty=bool(getattr(options, "foreground_only", False)),
+                    device=postprocess_device,
                 )
             result.append((xyz, rgb))
             with timer.stage("cache_write"):
@@ -2019,6 +2275,7 @@ def _generate_da3_points(
                 "resolution": int(schedule.process_res),
                 "method": str(getattr(options, "process_res_method", "upper_bound_resize")),
                 "depth_type": str(getattr(options, "depth_type", "camera_z")),
+                "postprocess_device": postprocess_device,
             },
             "max_views": max_views,
             "use_sky_mask": bool(schedule.use_sky_mask),
@@ -2084,7 +2341,6 @@ def _generate_da3_points(
         manifest["source_identity"] = {
             "schema": source["schema"],
             "set_sha256": source["set_sha256"],
-            "git_patch_sha256": source["git_patch_sha256"],
         }
         encoded = json.dumps(manifest, sort_keys=True, separators=(",", ":"), allow_nan=False)
         fingerprint = hashlib.sha256(encoded.encode("utf-8")).hexdigest()

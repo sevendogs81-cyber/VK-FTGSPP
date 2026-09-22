@@ -712,7 +712,6 @@ def test_birefnet_hr_cuda_oom_batch_fallback(
         "ftgspp.io.provenance.source_identity",
         lambda: {
             "schema": "test-source-v1", "set_sha256": "b" * 64,
-            "git_patch_sha256": "c" * 64,
         },
     )
 
@@ -1040,6 +1039,54 @@ def test_visual_hull_cuda_matches_cpu_when_available(tmp_path):
     )
     np.testing.assert_allclose(cuda, cpu, atol=0.0)
     assert cuda_diagnostics["device"] == "cuda"
+
+
+def test_point_filter_and_ibr_cuda_match_cpu_when_available(tmp_path):
+    torch = pytest.importorskip("torch")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    views = []
+    for camera, value in enumerate((10, 20, 30, 200)):
+        w2c = np.eye(4, dtype=np.float32)
+        w2c[2, 3] = float(camera)
+        views.append(
+            _synthetic_view(
+                tmp_path, camera, (value, value, value), w2c=w2c,
+            )
+        )
+    points = np.asarray([[0, 0, 4], [0.6, 0, 4], [100, 0, 2]], np.float32)
+    cpu_keep, cpu_diagnostics = filter_points_by_visual_hull(
+        points, views, device="cpu",
+    )
+    cuda_keep, cuda_diagnostics = filter_points_by_visual_hull(
+        points, views, device="cuda",
+    )
+    default_keep, default_diagnostics = filter_points_by_visual_hull(
+        points, views,
+    )
+    np.testing.assert_array_equal(cuda_keep, cpu_keep)
+    np.testing.assert_array_equal(default_keep, cuda_keep)
+    assert default_diagnostics["device"].startswith("cuda")
+    assert cuda_diagnostics["visible_histogram"] == cpu_diagnostics["visible_histogram"]
+    assert cuda_diagnostics["support_histogram"] == cpu_diagnostics["support_histogram"]
+    for mode in ("visibility_robust", "depth_rank_top3"):
+        cpu = color_points_ibr(
+            points, views, mode=mode, source_search_radius=0, device="cpu",
+        )
+        cuda = color_points_ibr(
+            points, views, mode=mode, source_search_radius=0, device="cuda",
+        )
+        default = color_points_ibr(
+            points, views, mode=mode, source_search_radius=0,
+        )
+        assert default.device.startswith("cuda")
+        np.testing.assert_array_equal(cuda.keep, cpu.keep)
+        np.testing.assert_array_equal(default.keep, cuda.keep)
+        np.testing.assert_array_equal(cuda.rgb, cpu.rgb)
+        np.testing.assert_array_equal(cuda.source_count, cpu.source_count)
+        np.testing.assert_allclose(
+            cuda.disagreement, cpu.disagreement, atol=1e-5, equal_nan=True,
+        )
 
 
 def test_ibr_depth_rank_top3_and_neighbor_z_buffer_are_explicit():

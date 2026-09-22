@@ -76,6 +76,7 @@ def voxel_fuse_points(
     rgb: np.ndarray,
     *,
     voxel_size: float,
+    device: str = "auto",
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Keep one real candidate per occupied voxel.
 
@@ -93,14 +94,71 @@ def voxel_fuse_points(
         raise ValueError("voxel_size must be a positive finite length")
     origin = points.min(axis=0)
     keys = np.floor((points - origin) / np.float32(size)).astype(np.int64)
-    inverse = _row_inverse(keys)
-    voxel_count = int(inverse.max()) + 1
     centers = (keys.astype(np.float32) + 0.5) * np.float32(size) + origin
     distance = np.linalg.norm(points - centers, axis=1)
+    if str(device).lower() != "cpu":
+        from ftgspp.optional.torch_compute import resolve_torch_device
+
+        resolved_device, torch = resolve_torch_device(
+            device, purpose="voxel fusion",
+        )
+        if resolved_device.startswith("cuda"):
+            with torch.inference_mode():
+                shifted = keys - keys.min(axis=0)
+                dimensions_cpu = shifted.max(axis=0) + 1
+                key_range = (
+                    int(dimensions_cpu[0]) * int(dimensions_cpu[1])
+                    * int(dimensions_cpu[2])
+                )
+                if key_range <= np.iinfo(np.int64).max:
+                    linear = (
+                        shifted[:, 0] * dimensions_cpu[1] * dimensions_cpu[2]
+                        + shifted[:, 1] * dimensions_cpu[2]
+                        + shifted[:, 2]
+                    )
+                    linear_gpu = torch.as_tensor(linear, device=resolved_device)
+                    _unique, inverse_gpu = torch.unique(
+                        linear_gpu, sorted=True, return_inverse=True,
+                    )
+                    distance_gpu = torch.as_tensor(
+                        distance, dtype=torch.float32, device=resolved_device,
+                    )
+                    voxel_count = int(torch.max(inverse_gpu).item()) + 1
+                    minimum_gpu = torch.full(
+                        (voxel_count,), float("inf"),
+                        dtype=torch.float32, device=resolved_device,
+                    )
+                    minimum_gpu.scatter_reduce_(
+                        0, inverse_gpu, distance_gpu,
+                        reduce="amin", include_self=True,
+                    )
+                    indices_gpu = torch.arange(
+                        len(points), dtype=torch.int64, device=resolved_device,
+                    )
+                    candidates_gpu = torch.where(
+                        distance_gpu == minimum_gpu[inverse_gpu],
+                        indices_gpu,
+                        torch.full_like(indices_gpu, -1),
+                    )
+                    winner_gpu = torch.full(
+                        (voxel_count,), -1,
+                        dtype=torch.int64, device=resolved_device,
+                    )
+                    # CPU mergesort overwrites equal-distance candidates in
+                    # input order, so the greatest source index wins a tie.
+                    winner_gpu.scatter_reduce_(
+                        0, inverse_gpu, candidates_gpu,
+                        reduce="amax", include_self=True,
+                    )
+                    winner = np.sort(winner_gpu.cpu().numpy())
+                    return points[winner], colors[winner], winner
+    inverse = _row_inverse(keys)
+    voxel_count = int(inverse.max()) + 1
     rank = -distance
     order = np.argsort(rank, kind="mergesort")
     winner = np.empty(voxel_count, dtype=np.int64)
     winner[inverse[order]] = order
+    winner.sort()
     return points[winner], colors[winner], winner
 
 

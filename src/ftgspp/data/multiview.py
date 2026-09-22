@@ -7,15 +7,17 @@ identity, frame/camera coverage and time-offset semantics have one owner.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence, TypeVar
 
 import numpy as np
+
+from ftgspp.io.hashing import file_sha256
 
 FRAME_INDEX_WIDTH = 6
 TIME_OFFSET_FILENAMES = ("timecode.json", "t_offsets.json", "time_offsets.json")
@@ -225,12 +227,8 @@ def load_image_manifest(
     start: int,
     stop: int,
     reject_empty: bool = True,
-) -> tuple[
-    list[int],
-    list[int],
-    list[list[Path]],
-    dict[tuple[int, int], float] | None,
-]:
+    return_hashes: bool = False,
+) -> tuple:
     """Load a rectangular image grid from ``ftgspp-dataset-v1``.
 
     Paths are resolved relative to the manifest. Explicit timestamps are
@@ -256,7 +254,8 @@ def load_image_manifest(
         raise ValueError("frame range is empty")
     selected = set(frames)
     base = manifest_path.parent
-    rows: dict[tuple[int, int], tuple[Path, float | None]] = {}
+    rows: dict[tuple[int, int], tuple[Path, float | None, str | None]] = {}
+    declared_checks: dict[Path, str] = {}
     timestamp_fields = 0
     for index, raw in enumerate(payload["views"]):
         if not isinstance(raw, dict):
@@ -297,11 +296,12 @@ def load_image_manifest(
                 raise ValueError(
                     f"dataset manifest view row {index} has an invalid rgb_sha256"
                 )
-            actual_digest = hashlib.sha256(path.read_bytes()).hexdigest()
-            if actual_digest != declared_digest:
+            previous = declared_checks.get(path)
+            if previous is not None and previous != declared_digest:
                 raise ValueError(
-                    f"dataset manifest RGB content hash mismatch: {path}"
+                    f"dataset manifest declares conflicting RGB hashes: {path}"
                 )
+            declared_checks[path] = declared_digest
         raw_timestamp = raw.get("timestamp")
         timestamp: float | None = None
         if raw_timestamp is not None:
@@ -321,7 +321,28 @@ def load_image_manifest(
             raise ValueError(
                 f"duplicate dataset manifest view for frame={frame} camera={camera}"
             )
-        rows[key] = path, timestamp
+        rows[key] = path, timestamp, declared_digest
+    if declared_checks:
+        raw_workers = os.environ.get("FTGSPP_HASH_WORKERS", "8")
+        try:
+            requested_workers = max(1, int(raw_workers))
+        except ValueError:
+            requested_workers = 8
+        workers = min(requested_workers, len(declared_checks))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            computed = dict(zip(
+                declared_checks,
+                pool.map(file_sha256, declared_checks),
+                strict=True,
+            ))
+        mismatched = [
+            path for path, expected in declared_checks.items()
+            if computed[path] != expected
+        ]
+        if mismatched:
+            raise ValueError(
+                f"dataset manifest RGB content hash mismatch: {mismatched[0]}"
+            )
     first_cameras = sorted(camera for frame, camera in rows if frame == frames[0])
     if not first_cameras:
         raise ValueError(
@@ -351,6 +372,13 @@ def load_image_manifest(
         }
         if timestamp_fields else None
     )
+    if return_hashes:
+        hashes = {
+            key: str(value[2])
+            for key, value in rows.items()
+            if key[0] in selected and value[2] is not None
+        }
+        return frames, first_cameras, paths, timestamps, hashes
     return frames, first_cameras, paths, timestamps
 
 

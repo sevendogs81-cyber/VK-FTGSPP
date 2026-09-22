@@ -7,30 +7,9 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, is_dataclass, replace
 from typing import Any
 
-from ftgspp.io.provenance import stage_identity
-
 L1_ALGORITHM = "ftgspp-da3-l1-v1"
-L2_ALGORITHM = "ftgspp-da3-l2-v3"
+L2_ALGORITHM = "ftgspp-da3-l2-v4-cuda"
 L3_ALGORITHM = "ftgspp-init-l3-v4"
-
-L1_SOURCE_FILES = (
-    "src/ftgspp/optional/da3.py",
-    "src/ftgspp/optional/da3_schedule.py",
-    "src/ftgspp/training/init_plan.py",
-    "src/ftgspp/data/scene.py",
-    "src/ftgspp/io/provenance.py",
-)
-L2_SOURCE_FILES = L1_SOURCE_FILES + (
-    "src/ftgspp/optional/da3_evidence.py",
-    "src/ftgspp/training/point_sampling.py",
-    "src/ftgspp/io/init_cache.py",
-    "src/ftgspp/io/ply.py",
-)
-L3_SOURCE_FILES = (
-    "src/ftgspp/training/initialize.py",
-    "src/ftgspp/training/point_sampling.py",
-    "src/ftgspp/training/init_plan.py",
-)
 
 
 def initialization_seed(config: Any) -> int:
@@ -167,7 +146,6 @@ def l1_identity_payload(
         ),
         "foreground": None if foreground_metadata is None else dict(foreground_metadata),
         "seed": int(seed),
-        "stage_identity": stage_identity(L1_SOURCE_FILES),
     }
 
 
@@ -181,7 +159,6 @@ def l2_identity_payload(
     payload = dict(l1)
     payload["schema"] = "ftgspp-da3-l2-identity-v1"
     payload["algorithm"] = L2_ALGORITHM
-    payload["stage_identity"] = stage_identity(L2_SOURCE_FILES)
     payload["geometry"] = {
         "max_points": int(plan.max_points),
         "min_consistent_views": int(plan.min_consistent_views),
@@ -234,7 +211,6 @@ def l3_identity_payload(
         "seed": initialization_seed(config),
         "gate_init_logit": float(getattr(config.model, "gate_init_logit", -1.0)),
         "marginal_gating": bool(config.model.marginal_gating),
-        "stage_identity": stage_identity(L3_SOURCE_FILES),
     }
 
 

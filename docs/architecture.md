@@ -67,10 +67,11 @@ robust world bounds from that cache, then creates a mask-supported surface-band
 grid. Its coarse pass expands to sparse fine-grid indices, so projection work is
 limited to surviving regions; the CUDA path keeps vote arrays on-device and
 returns only selected indices. Point filtering retains DA3 samples supported by
-the silhouettes. Their
-training selectors are `init.backend=carving` and
+the silhouettes. Their training selectors are `init.backend=carving` and
 `init.backend=point_filtering`. Training verifies the selected method,
-dataset/source identity, keyframe set, and every PLY hash. `init.backend=points`
+dataset identity, keyframe set, and every PLY hash. Source identity remains
+audit metadata and emits a warning when it differs from the current runtime.
+`init.backend=points`
 remains the explicit generic/user-cloud escape hatch, while
 `init.backend=da3` consumes the foreground-aware DA3 cloud without either
 visual-hull preparation.

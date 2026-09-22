@@ -19,9 +19,35 @@ from ftgspp.optional.da3_schedule import (
     select_representative_camera_ids,
 )
 from ftgspp.training.point_sampling import auto_voxel_size
+from ftgspp.training.point_sampling import voxel_fuse_points
 
 
 class DA3ScheduleTests(unittest.TestCase):
+    def test_cuda_voxel_fusion_matches_cpu_when_available(self):
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("Torch is unavailable")
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA is unavailable")
+        rng = np.random.default_rng(8)
+        xyz = rng.normal(size=(10_000, 3)).astype(np.float32)
+        rgb = rng.integers(0, 256, (10_000, 3), dtype=np.uint8)
+        cpu = voxel_fuse_points(xyz, rgb, voxel_size=0.1, device="cpu")
+        cuda = voxel_fuse_points(xyz, rgb, voxel_size=0.1, device="cuda")
+        default = voxel_fuse_points(xyz, rgb, voxel_size=0.1)
+        for cuda_value, cpu_value in zip(cuda, cpu, strict=True):
+            np.testing.assert_array_equal(cuda_value, cpu_value)
+        for default_value, cuda_value in zip(default, cuda, strict=True):
+            np.testing.assert_array_equal(default_value, cuda_value)
+
+        report: dict[str, object] = {}
+        _fuse_view_clouds(
+            [(xyz, rgb)], voxel_size=0.1, max_points=len(xyz),
+            rng=np.random.default_rng(1), report=report,
+        )
+        self.assertTrue(str(report["device"]).startswith("cuda"))
+
     def test_auto_voxel_subsample_always_queries_full_tree(self):
         xyz = np.stack(
             (

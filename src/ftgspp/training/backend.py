@@ -1419,42 +1419,6 @@ class NativeVulkanBackend:
         values = method()
         return {str(key): int(value) for key, value in values.items()}
 
-    def hard_separation_digest(self) -> str:
-        """Hash every Gaussian's binary group and exact gate value.
-
-        This phase-boundary diagnostic downloads only the packed
-        velocity/gate buffer (not the full model) and prevents equal aggregate
-        counts from hiding different per-Gaussian static/dynamic assignments.
-        """
-
-        method = getattr(self.native, "hard_separation_gate_state", None)
-        if method is None:
-            raise NativeBackendUnavailable(
-                "the native module lacks hard_separation_gate_state; rebuild "
-                "a target with exact cross-replica gate verification support"
-            )
-        # The native entry returns an owning NumPy allocation and immediately
-        # releases its D2H staging vectors.  Reading the pybind property here
-        # would keep a second 4*N-float host copy alive indefinitely.
-        values = np.asarray(method(), dtype=np.float32)
-        if values.ndim != 2 or values.shape[1] != 4:
-            raise RuntimeError(
-                "native velocities_gates must have shape (N,4) for hard-"
-                f"separation verification, got {values.shape}"
-            )
-        if not np.isfinite(values).all():
-            raise RuntimeError(
-                "native hard-separation velocity/gate state contains a "
-                "non-finite value"
-            )
-        gates = np.ascontiguousarray(values[:, 3], dtype=np.float32)
-        groups = np.ascontiguousarray(gates > 0.0, dtype=np.uint8)
-        digest = hashlib.sha256()
-        digest.update(np.asarray([len(gates)], np.int64).tobytes())
-        digest.update(gates.tobytes())
-        digest.update(groups.tobytes())
-        return digest.hexdigest()
-
     def close(self) -> None:
         native = getattr(self, "native", None)
         try:

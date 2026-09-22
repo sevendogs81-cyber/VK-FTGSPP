@@ -62,43 +62,48 @@ class InitializeSamplingTests(unittest.TestCase):
                 root, _Dataset(), [0], expected_method="carving",
             ))
 
-    def test_carving_backend_requires_a_carving_manifest(self):
-        from ftgspp.io.provenance import source_identity
+    def test_carving_backend_accepts_supported_manifest_schemas(self):
+        for schema in (
+            "ftgspp-visual-hull-ibr-v2",
+            "ftgspp-visual-hull-ibr-v3",
+        ):
+            with (
+                self.subTest(schema=schema),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory)
+                ply = root / "f000000.ply"
+                ply.write_bytes(b"test-ply")
+                manifest = {
+                    "schema": schema,
+                    "method": "carving",
+                    "dataset_fingerprint": "test-dataset",
+                    "source_identity": {
+                        "set_sha256": "different-runtime",
+                    },
+                    "rows": [{
+                        "frame": 0,
+                        "ply": ply.name,
+                        "ply_sha256": hashlib.sha256(ply.read_bytes()).hexdigest(),
+                    }],
+                }
+                manifest_path = root / "manifest.json"
+                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+                (root / "completed.json").write_text(json.dumps({
+                    "schema": schema,
+                    "manifest_sha256": hashlib.sha256(
+                        manifest_path.read_bytes(),
+                    ).hexdigest(),
+                    "keyframes": 1,
+                }), encoding="utf-8")
 
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            ply = root / "f000000.ply"
-            ply.write_bytes(b"test-ply")
-            manifest = {
-                "schema": "ftgspp-visual-hull-ibr-v2",
-                "method": "carving",
-                "dataset_fingerprint": "test-dataset",
-                "source_identity": {
-                    "set_sha256": source_identity()["set_sha256"],
-                },
-                "rows": [{
-                    "frame": 0,
-                    "ply": ply.name,
-                    "ply_sha256": hashlib.sha256(ply.read_bytes()).hexdigest(),
-                }],
-            }
-            manifest_path = root / "manifest.json"
-            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-            (root / "completed.json").write_text(json.dumps({
-                "schema": "ftgspp-visual-hull-ibr-v2",
-                "manifest_sha256": hashlib.sha256(
-                    manifest_path.read_bytes(),
-                ).hexdigest(),
-                "keyframes": 1,
-            }), encoding="utf-8")
-
-            self.assertTrue(_valid_prepared_point_manifest(
-                root, _Dataset(), [0],
-                expected_method="carving",
-            ))
-            self.assertFalse(_valid_prepared_point_manifest(
-                root, _Dataset(), [0], expected_method="point_filtering",
-            ))
+                self.assertTrue(_valid_prepared_point_manifest(
+                    root, _Dataset(), [0],
+                    expected_method="carving",
+                ))
+                self.assertFalse(_valid_prepared_point_manifest(
+                    root, _Dataset(), [0], expected_method="point_filtering",
+                ))
 
     def test_adaptive_budget_is_exact_capacity_aware_and_linear_time(self):
         budgets = allocate_keyframe_budgets(

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from ftgspp.data.scene import View
+from ftgspp.optional.torch_compute import resolve_torch_device
 
 
 @dataclass(frozen=True)
@@ -16,9 +17,10 @@ class PointColorResult:
     keep: np.ndarray
     source_count: np.ndarray
     disagreement: np.ndarray
+    device: str = "cpu"
 
 
-IBR_COLOR_VERSION = "ftgspp-ibr-color-v3"
+IBR_COLOR_VERSION = "ftgspp-ibr-color-v4-cuda"
 
 
 def _nearest_legal_pixels(
@@ -66,6 +68,278 @@ def project_points(points: np.ndarray, view: View) -> tuple[np.ndarray, np.ndarr
     return u, v, z
 
 
+def _torch_masked_median(values, selected, *, torch):
+    """Match NumPy's even-sample median while keeping reductions on CUDA."""
+
+    expanded = selected
+    while expanded.ndim < values.ndim:
+        expanded = expanded.unsqueeze(-1)
+    expanded = expanded.expand_as(values)
+    ordered = torch.sort(
+        torch.where(expanded, values, torch.full_like(values, float("inf"))),
+        dim=1,
+    ).values
+    count = selected.sum(dim=1).long()
+    lower = ((count - 1) // 2).clamp_min(0)
+    upper = (count // 2).clamp_min(0)
+    if values.ndim == 3:
+        channels = values.shape[2]
+        lower_value = torch.gather(
+            ordered, 1, lower[:, None, None].expand(-1, 1, channels),
+        ).squeeze(1)
+        upper_value = torch.gather(
+            ordered, 1, upper[:, None, None].expand(-1, 1, channels),
+        ).squeeze(1)
+    else:
+        lower_value = torch.gather(ordered, 1, lower[:, None]).squeeze(1)
+        upper_value = torch.gather(ordered, 1, upper[:, None]).squeeze(1)
+    return (lower_value + upper_value) * 0.5
+
+
+def _color_points_ibr_cuda(
+    xyz: np.ndarray,
+    views: Sequence[View],
+    *,
+    torch,
+    device: str,
+    mask_threshold: float,
+    visibility_relative_tolerance: float,
+    min_sources: int,
+    mode: str,
+    depth_rank_views: int,
+    z_buffer_radius: int,
+    source_search_radius: int,
+    normals: np.ndarray | None,
+    angle_weight_power: float,
+) -> PointColorResult:
+    """CUDA implementation of projection, z-buffering and robust IBR."""
+
+    with torch.inference_mode():
+        points = torch.as_tensor(xyz, dtype=torch.float32, device=device)
+        normal_values = None
+        if normals is not None:
+            normal_values = torch.as_tensor(
+                normals, dtype=torch.float32, device=device,
+            )
+            normal_values = normal_values / torch.linalg.vector_norm(
+                normal_values, dim=1, keepdim=True,
+            ).clamp_min(1e-12)
+        view_count = len(views)
+        point_count = len(points)
+        colors = torch.zeros(
+            (view_count, point_count, 3), dtype=torch.uint8, device=device,
+        )
+        weights = torch.zeros(
+            (view_count, point_count), dtype=torch.float32, device=device,
+        )
+        depths = torch.full(
+            (view_count, point_count), float("inf"),
+            dtype=torch.float32, device=device,
+        )
+        available = torch.zeros(
+            (view_count, point_count), dtype=torch.bool, device=device,
+        )
+        for view_index, view in enumerate(views):
+            image = torch.as_tensor(
+                np.ascontiguousarray(view.load_rgb()[..., :3]), device=device,
+            )
+            mask = torch.as_tensor(
+                np.ascontiguousarray(view.load_mask()),
+                dtype=torch.float32, device=device,
+            )
+            validity = torch.as_tensor(
+                np.ascontiguousarray(view.load_validity() >= 0.5), device=device,
+            )
+            height, width = view.size
+            w2c = torch.as_tensor(view.w2c, dtype=torch.float32, device=device)
+            intrinsic = torch.as_tensor(
+                view.intrinsic, dtype=torch.float32, device=device,
+            )
+            camera = points @ w2c[:3, :3].T + w2c[:3, 3]
+            z = camera[:, 2]
+            u = intrinsic[0, 0] * camera[:, 0] / z.clamp_min(1e-12) + intrinsic[0, 2]
+            v = intrinsic[1, 1] * camera[:, 1] / z.clamp_min(1e-12) + intrinsic[1, 2]
+            x = torch.round(u - 0.5).long()
+            y = torch.round(v - 0.5).long()
+            inside = (
+                (z > 1e-8) & (x >= 0) & (x < width)
+                & (y >= 0) & (y < height)
+            )
+            ids = torch.nonzero(inside, as_tuple=False).flatten()
+            if ids.numel() == 0:
+                continue
+            legal = validity & (mask >= float(mask_threshold))
+            source_x = x[ids].clone()
+            source_y = y[ids].clone()
+            found = legal[source_y, source_x].clone()
+            for distance in range(1, int(source_search_radius) + 1):
+                offsets = []
+                for dy in range(-distance, distance + 1):
+                    for dx in range(-distance, distance + 1):
+                        if max(abs(dx), abs(dy)) == distance:
+                            offsets.append((dx * dx + dy * dy, dy, dx))
+                for _distance_squared, dy, dx in sorted(offsets):
+                    pending = ~found
+                    xx = x[ids] + dx
+                    yy = y[ids] + dy
+                    candidate_inside = (
+                        pending & (xx >= 0) & (xx < width)
+                        & (yy >= 0) & (yy < height)
+                    )
+                    safe_x = xx.clamp(0, width - 1)
+                    safe_y = yy.clamp(0, height - 1)
+                    accepted = candidate_inside & legal[safe_y, safe_x]
+                    source_x[accepted] = xx[accepted]
+                    source_y[accepted] = yy[accepted]
+                    found |= accepted
+            ids = ids[found]
+            source_x = source_x[found]
+            source_y = source_y[found]
+            if ids.numel() == 0:
+                continue
+            depth_buffer = torch.full(
+                (height * width,), float("inf"),
+                dtype=torch.float32, device=device,
+            )
+            pixel = y[ids] * width + x[ids]
+            depth_buffer.scatter_reduce_(
+                0, pixel, z[ids], reduce="amin", include_self=True,
+            )
+            depth_buffer = depth_buffer.reshape(height, width)
+            if int(z_buffer_radius) > 0:
+                radius = int(z_buffer_radius)
+                nearest = torch.full(
+                    (ids.numel(),), float("inf"),
+                    dtype=torch.float32, device=device,
+                )
+                for dy in range(-radius, radius + 1):
+                    for dx in range(-radius, radius + 1):
+                        xx = x[ids] + dx
+                        yy = y[ids] + dy
+                        query_inside = (
+                            (xx >= 0) & (xx < width)
+                            & (yy >= 0) & (yy < height)
+                        )
+                        candidate = depth_buffer[
+                            yy.clamp(0, height - 1), xx.clamp(0, width - 1)
+                        ]
+                        nearest = torch.minimum(
+                            nearest,
+                            torch.where(
+                                query_inside, candidate,
+                                torch.full_like(candidate, float("inf")),
+                            ),
+                        )
+            else:
+                nearest = depth_buffer[y[ids], x[ids]]
+            if mode == "visibility_robust":
+                tolerance = torch.maximum(
+                    torch.full_like(nearest, 1e-5),
+                    float(visibility_relative_tolerance) * nearest,
+                )
+                visible = z[ids] <= nearest + tolerance
+                ids = ids[visible]
+                source_x = source_x[visible]
+                source_y = source_y[visible]
+            if ids.numel() == 0:
+                continue
+            c2w = torch.linalg.inv(w2c)
+            to_camera = c2w[:3, 3] - points[ids]
+            ray_norm = torch.linalg.vector_norm(to_camera, dim=1)
+            squared_distance = (ray_norm * ray_norm).clamp_min(1e-6)
+            angle_weight = torch.ones_like(squared_distance)
+            if normal_values is not None and float(angle_weight_power) > 0.0:
+                direction = to_camera / ray_norm.clamp_min(1e-12)[:, None]
+                cosine = torch.clamp(
+                    torch.sum(normal_values[ids] * direction, dim=1), min=0.0,
+                )
+                front = cosine > 0.0
+                ids = ids[front]
+                source_x = source_x[front]
+                source_y = source_y[front]
+                squared_distance = squared_distance[front]
+                angle_weight = cosine[front] ** float(angle_weight_power)
+            colors[view_index, ids] = image[source_y, source_x, :3]
+            depths[view_index, ids] = z[ids]
+            weights[view_index, ids] = (
+                torch.ones_like(squared_distance)
+                if mode == "depth_rank_top3" else
+                mask[source_y, source_x] * angle_weight / squared_distance
+            )
+            available[view_index, ids] = True
+
+        rgb = torch.zeros((point_count, 3), dtype=torch.uint8, device=device)
+        count = torch.zeros(point_count, dtype=torch.int32, device=device)
+        disagreement = torch.full(
+            (point_count,), float("nan"), dtype=torch.float32, device=device,
+        )
+        aggregation_chunk = 262_144
+        for start in range(0, point_count, aggregation_chunk):
+            end = min(point_count, start + aggregation_chunk)
+            selected = available[:, start:end].clone()
+            if mode == "depth_rank_top3":
+                ranked = torch.zeros_like(selected)
+                ordered = torch.argsort(
+                    torch.where(
+                        selected, depths[:, start:end],
+                        torch.full_like(depths[:, start:end], float("inf")),
+                    ),
+                    dim=0, stable=True,
+                )
+                columns = torch.arange(end - start, device=device)
+                for rank in range(min(int(depth_rank_views), view_count)):
+                    row = ordered[rank]
+                    valid = selected[row, columns]
+                    ranked[row[valid], columns[valid]] = True
+                selected = ranked
+            active = torch.nonzero(
+                torch.any(selected, dim=0), as_tuple=False,
+            ).flatten()
+            if active.numel() == 0:
+                continue
+            chosen = selected[:, active].T
+            values = colors[:, start:end][:, active].permute(1, 0, 2).float()
+            sample_weights = weights[:, start:end][:, active].T
+            median = _torch_masked_median(values, chosen, torch=torch)
+            residual = torch.linalg.vector_norm(values - median[:, None, :], dim=2)
+            residual_median = _torch_masked_median(residual, chosen, torch=torch)
+            residual_mad = _torch_masked_median(
+                torch.abs(residual - residual_median[:, None]), chosen, torch=torch,
+            )
+            cutoff = residual_median + 2.5 * torch.clamp(residual_mad, min=1.0)
+            accepted = chosen & (residual <= cutoff[:, None])
+            accepted_weights = torch.where(
+                accepted, sample_weights, torch.zeros_like(sample_weights),
+            )
+            weight_sum = accepted_weights.sum(dim=1)
+            weighted_rgb = torch.einsum("nv,nvc->nc", accepted_weights, values)
+            zero_weight = weight_sum <= 0.0
+            if bool(torch.any(zero_weight)):
+                accepted_count = accepted.sum(dim=1).clamp_min(1)
+                fallback = torch.einsum(
+                    "nv,nvc->nc", accepted.float(), values,
+                ) / accepted_count[:, None]
+                weighted_rgb[zero_weight] = fallback[zero_weight]
+                weight_sum[zero_weight] = 1.0
+            output_ids = start + active
+            rgb[output_ids] = torch.clamp(
+                torch.round(weighted_rgb / weight_sum[:, None]), 0, 255,
+            ).to(torch.uint8)
+            accepted_count = accepted.sum(dim=1)
+            count[output_ids] = accepted_count.to(torch.int32)
+            disagreement[output_ids] = (
+                torch.where(accepted, residual, torch.zeros_like(residual)).sum(dim=1)
+                / accepted_count.clamp_min(1)
+            )
+        return PointColorResult(
+            rgb=rgb.cpu().numpy(),
+            keep=(count >= int(min_sources)).cpu().numpy(),
+            source_count=count.cpu().numpy(),
+            disagreement=disagreement.cpu().numpy(),
+            device=device,
+        )
+
+
 def color_points_ibr(
     points: np.ndarray,
     views: Sequence[View],
@@ -79,6 +353,7 @@ def color_points_ibr(
     source_search_radius: int = 2,
     normals: np.ndarray | None = None,
     angle_weight_power: float = 0.0,
+    device: str = "auto",
 ) -> PointColorResult:
     """Color points from strict foreground pixels with a per-view z-buffer."""
 
@@ -108,6 +383,21 @@ def color_points_ibr(
             raise ValueError("IBR normals must be a finite Nx3 array")
         lengths = np.linalg.norm(normal_values, axis=1, keepdims=True)
         normal_values = normal_values / np.maximum(lengths, 1e-12)
+    resolved_device, torch = resolve_torch_device(
+        device, purpose="IBR point coloring",
+    )
+    if resolved_device.startswith("cuda"):
+        return _color_points_ibr_cuda(
+            xyz, views, torch=torch, device=resolved_device,
+            mask_threshold=float(mask_threshold),
+            visibility_relative_tolerance=float(visibility_relative_tolerance),
+            min_sources=int(min_sources), mode=mode,
+            depth_rank_views=int(depth_rank_views),
+            z_buffer_radius=int(z_buffer_radius),
+            source_search_radius=int(source_search_radius),
+            normals=normal_values,
+            angle_weight_power=float(angle_weight_power),
+        )
     view_count = len(views)
     point_count = len(xyz)
     colors = np.zeros((view_count, point_count, 3), np.uint8)
@@ -241,4 +531,5 @@ def color_points_ibr(
         keep=count >= int(min_sources),
         source_count=count,
         disagreement=disagreement,
+        device="cpu",
     )

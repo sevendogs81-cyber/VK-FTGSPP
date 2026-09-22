@@ -323,6 +323,54 @@ class DA3InitializerTests(unittest.TestCase):
         self.assertLess(float(xyz[:, 1].min()), 15.0)
         self.assertGreater(float(xyz[:, 1].max()), 85.0)
 
+    def test_cuda_postprocessing_matches_cpu_when_available(self):
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("Torch is unavailable")
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA is unavailable")
+        rng = np.random.default_rng(4)
+        depth = rng.uniform(0.5, 3.0, (40, 60)).astype(np.float32)
+        rgb = rng.integers(0, 256, (40, 60, 3), dtype=np.uint8)
+        intrinsic = np.asarray(
+            [[50, 0, 30], [0, 50, 20], [0, 0, 1]], np.float32,
+        )
+        w2c = np.eye(4, dtype=np.float32)
+        cpu_xyz, cpu_rgb = depth_to_points(
+            depth, intrinsic, w2c, rgb, max_points=500,
+            rng=np.random.default_rng(2), device="cpu",
+        )
+        cuda_xyz, cuda_rgb = depth_to_points(
+            depth, intrinsic, w2c, rgb, max_points=500,
+            rng=np.random.default_rng(2), device="cuda",
+        )
+        np.testing.assert_allclose(cuda_xyz, cpu_xyz, atol=1e-6)
+        np.testing.assert_array_equal(cuda_rgb, cpu_rgb)
+        _default_xyz, _default_rgb, default_selection = depth_to_points(
+            depth, intrinsic, w2c, rgb, max_points=500,
+            rng=np.random.default_rng(2), return_selection=True,
+        )
+        self.assertTrue(str(default_selection["device"]).startswith("cuda"))
+        extrinsics = np.stack((w2c, w2c))
+        intrinsics = np.stack((intrinsic, intrinsic))
+        masks = [np.ones_like(depth), np.ones_like(depth)]
+        validities = [np.ones_like(depth), np.ones_like(depth)]
+        arguments = dict(
+            source_index=0, depths=[depth, depth], extrinsics=extrinsics,
+            intrinsics=intrinsics, foreground_masks=masks,
+            validities=validities, min_consistent_views=2,
+            relative_tolerance=0.02, absolute_tolerance=0.01,
+        )
+        cpu = geometric_consistency_filter(cpu_xyz[:300], **arguments, device="cpu")
+        cuda = geometric_consistency_filter(cpu_xyz[:300], **arguments, device="cuda")
+        for cuda_value, cpu_value in zip(cuda, cpu, strict=True):
+            np.testing.assert_array_equal(cuda_value, cpu_value)
+        default = geometric_consistency_filter(
+            cpu_xyz[:300], **arguments, return_diagnostics=True,
+        )
+        self.assertTrue(str(default[3]["device"]).startswith("cuda"))
+
     def test_camera_chunks_keep_anchor(self):
         self.assertEqual(_camera_chunks([0, 1, 2, 3, 4], 3), [[0, 1, 2], [0, 3, 4]])
 

@@ -22,35 +22,18 @@ from ftgspp.optional.point_color import (
     color_points_ibr,
     project_points,
 )
+from ftgspp.optional.torch_compute import resolve_torch_device
 from ftgspp.training.init_plan import initialization_seed
 from ftgspp.training.point_sampling import spatial_sample_indices
 
-VISUAL_HULL_SCHEMA = "ftgspp-visual-hull-ibr-v2"
+VISUAL_HULL_SCHEMA = "ftgspp-visual-hull-ibr-v3"
 VISUAL_HULL_METHODS = {"carving", "point_filtering"}
 
 
 def _resolve_carving_device(requested: str):
-    """Use CUDA when available without making Torch a core dependency."""
+    """Compatibility wrapper for the shared optional device resolver."""
 
-    value = str(requested).lower()
-    if value == "cpu":
-        return "cpu", None
-    if value != "auto" and not value.startswith("cuda"):
-        raise ValueError("visual-hull device must be auto, cpu, cuda, or cuda:<index>")
-    try:
-        import torch
-    except ImportError as exc:
-        if value == "auto":
-            return "cpu", None
-        raise RuntimeError(
-            "CUDA visual-hull carving requires Torch; rerun setup with "
-            "--with-init, --with-da3, or --with-birefnet"
-        ) from exc
-    if value == "auto":
-        return ("cuda", torch) if torch.cuda.is_available() else ("cpu", None)
-    if not torch.cuda.is_available():
-        raise RuntimeError("CUDA visual-hull carving was requested but is unavailable")
-    return value, torch
+    return resolve_torch_device(requested, purpose="visual-hull preparation")
 
 
 def _cuda_support_counts(
@@ -61,7 +44,8 @@ def _cuda_support_counts(
     device: str,
     min_views: int,
     support_fraction: float,
-) -> tuple[np.ndarray, np.ndarray]:
+    return_counts: bool = False,
+):
     """Return kept local ids and a small support histogram from CUDA.
 
     Visibility and support stay on the device.  Only selected indices and the
@@ -100,7 +84,15 @@ def _cuda_support_counts(
             torch.clamp(support.to(torch.int64), max=len(prepared_views)),
             minlength=len(prepared_views) + 1,
         ).cpu().numpy()
-    return kept, histogram
+        visible_histogram = torch.bincount(
+            torch.clamp(visible.to(torch.int64), max=len(prepared_views)),
+            minlength=len(prepared_views) + 1,
+        ).cpu().numpy()
+        counts = (
+            (support.cpu().numpy(), visible.cpu().numpy())
+            if return_counts else None
+        )
+    return kept, histogram, visible_histogram, counts
 
 
 def carve_visual_hull(
@@ -239,7 +231,7 @@ def carve_visual_hull(
         xyz = np.stack((axes[0][ix], axes[1][iy], axes[2][iz]), axis=1)
         if resolved_device.startswith("cuda"):
             try:
-                kept_local, chunk_histogram = _cuda_support_counts(
+                kept_local, chunk_histogram, _visible_histogram, _counts = _cuda_support_counts(
                     xyz, cuda_views,
                     torch=torch, device=resolved_device,
                     min_views=resolved_min_views,
@@ -333,6 +325,8 @@ def filter_points_by_visual_hull(
     min_views: int | None = None,
     support_fraction: float = 0.9,
     mask_dilation_pixels: int = 0,
+    device: str = "auto",
+    chunk_points: int = 1_000_000,
 ) -> tuple[np.ndarray, dict[str, object]]:
     """Conservatively retain an existing cloud inside calibrated silhouettes."""
 
@@ -348,37 +342,65 @@ def filter_points_by_visual_hull(
         raise ValueError("visual-hull support_fraction must be in [0, 1]")
     if int(mask_dilation_pixels) < 0:
         raise ValueError("mask_dilation_pixels cannot be negative")
-    visible = np.zeros(len(xyz), np.int16)
-    support = np.zeros(len(xyz), np.int16)
+    if int(chunk_points) <= 0:
+        raise ValueError("visual-hull chunk_points must be positive")
+    resolved_device, torch = _resolve_carving_device(device)
+    masks = []
+    validities = []
     for view in views:
         mask = view.load_mask() >= float(mask_threshold)
         if int(mask_dilation_pixels) > 0:
             mask = ndimage.binary_dilation(
                 mask, iterations=int(mask_dilation_pixels),
             )
-        validity = view.load_validity() >= 0.5
-        u, v, depth = project_points(xyz, view)
-        x = np.rint(u - 0.5).astype(np.int64)
-        y = np.rint(v - 0.5).astype(np.int64)
-        height, width = view.size
-        inside = (
-            (depth > 1e-8) & (x >= 0) & (x < width)
-            & (y >= 0) & (y < height)
+        masks.append(mask)
+        validities.append(view.load_validity() >= 0.5)
+    visible = np.zeros(len(xyz), np.int16)
+    support = np.zeros(len(xyz), np.int16)
+    keep = np.zeros(len(xyz), bool)
+    if resolved_device.startswith("cuda"):
+        prepared = [(
+            torch.as_tensor(view.w2c, dtype=torch.float32, device=resolved_device),
+            torch.as_tensor(view.intrinsic, dtype=torch.float32, device=resolved_device),
+            torch.as_tensor(mask, device=resolved_device),
+            torch.as_tensor(validity, device=resolved_device),
+            int(view.size[0]), int(view.size[1]),
+        ) for view, mask, validity in zip(views, masks, validities, strict=True)]
+        for start in range(0, len(xyz), int(chunk_points)):
+            end = min(len(xyz), start + int(chunk_points))
+            kept, _support_hist, _visible_hist, counts = _cuda_support_counts(
+                xyz[start:end], prepared, torch=torch, device=resolved_device,
+                min_views=resolved_min, support_fraction=float(support_fraction),
+                return_counts=True,
+            )
+            keep[start + kept] = True
+            assert counts is not None
+            support[start:end], visible[start:end] = counts
+    else:
+        for view, mask, validity in zip(views, masks, validities, strict=True):
+            u, v, depth = project_points(xyz, view)
+            x = np.rint(u - 0.5).astype(np.int64)
+            y = np.rint(v - 0.5).astype(np.int64)
+            height, width = view.size
+            inside = (
+                (depth > 1e-8) & (x >= 0) & (x < width)
+                & (y >= 0) & (y < height)
+            )
+            ids = np.flatnonzero(inside)
+            if not len(ids):
+                continue
+            ids = ids[validity[y[ids], x[ids]]]
+            visible[ids] += 1
+            support[ids] += mask[y[ids], x[ids]]
+        keep = (visible >= resolved_min) & (
+            support >= np.ceil(np.maximum(visible, 1) * float(support_fraction))
         )
-        ids = np.flatnonzero(inside)
-        if not len(ids):
-            continue
-        ids = ids[validity[y[ids], x[ids]]]
-        visible[ids] += 1
-        support[ids] += mask[y[ids], x[ids]]
-    keep = (visible >= resolved_min) & (
-        support >= np.ceil(np.maximum(visible, 1) * float(support_fraction))
-    )
     return keep, {
         "input_count": int(len(xyz)),
         "kept_count": int(np.count_nonzero(keep)),
         "min_views": resolved_min,
         "support_fraction": float(support_fraction),
+        "device": resolved_device,
         "visible_histogram": np.bincount(
             visible, minlength=len(views) + 1,
         ).tolist(),
@@ -471,7 +493,7 @@ def prepare_visual_hull_points(
         raise ValueError("--bounds is only valid with method=carving")
     if method == "carving" and sampling not in {"surface_band", "volume"}:
         raise ValueError("visual-hull sampling must be surface_band or volume")
-    if method == "carving" and int(chunk_points) <= 0:
+    if int(chunk_points) <= 0:
         raise ValueError("visual-hull chunk_points must be positive")
     if max_points is not None and int(max_points) <= 0:
         raise ValueError("visual-hull max_points must be positive when set")
@@ -540,7 +562,8 @@ def prepare_visual_hull_points(
             "kind": "not_applicable",
         }
     rows: list[dict[str, object]] = []
-    resolved_carving_device: str | None = None
+    resolved_preparation_device: str | None = None
+    resolved_coloring_device: str | None = None
     tolerance = float(config.init.da3.sync_tolerance_fraction) / float(scene.fps)
     seed = initialization_seed(config)
     rng = np.random.default_rng(seed)
@@ -568,7 +591,7 @@ def prepare_visual_hull_points(
                 chunk_points=chunk_points,
                 device=device,
             )
-            resolved_carving_device = str(diagnostics["device"])
+            resolved_preparation_device = str(diagnostics["device"])
             source_record: dict[str, object] = {
                 "kind": "carved_grid",
                 "bounds_source": bounds_source["kind"],
@@ -588,7 +611,9 @@ def prepare_visual_hull_points(
                 source_xyz, views, mask_threshold=mask_threshold,
                 min_views=min_views, support_fraction=support_fraction,
                 mask_dilation_pixels=mask_dilation_pixels,
+                device=device, chunk_points=chunk_points,
             )
+            resolved_preparation_device = str(diagnostics["device"])
             points = source_xyz[keep]
             source_record = {
                 "kind": "input_cloud_hull_filter",
@@ -605,6 +630,10 @@ def prepare_visual_hull_points(
             min_sources=color_min_sources, mode=color_mode,
             z_buffer_radius=z_buffer_radius,
             source_search_radius=source_search_radius,
+            device=device,
+        )
+        resolved_coloring_device = str(
+            getattr(colored, "device", resolved_preparation_device or "cpu")
         )
         points = points[colored.keep]
         rgb = colored.rgb[colored.keep]
@@ -658,9 +687,9 @@ def prepare_visual_hull_points(
         "geometry_source": (
             "carved_grid" if method == "carving" else "input_cloud_hull_filter"
         ),
-        "requested_device": device if method == "carving" else None,
-        "device": resolved_carving_device,
-        "chunk_points": int(chunk_points) if method == "carving" else None,
+        "requested_device": device,
+        "device": resolved_preparation_device,
+        "chunk_points": int(chunk_points),
         "input_points": None if input_root is None else str(input_root),
         "point_source": point_source,
         "coloring": {
@@ -671,6 +700,7 @@ def prepare_visual_hull_points(
             "z_buffer_radius": int(z_buffer_radius),
             "source_search_radius": int(source_search_radius),
             "robust_color": "weighted_median_mad_v1",
+            "device": resolved_coloring_device,
         },
         "max_points": None if max_points is None else int(max_points),
         "rows": rows,
@@ -679,7 +709,6 @@ def prepare_visual_hull_points(
     manifest["source_identity"] = {
         "schema": source["schema"],
         "set_sha256": source["set_sha256"],
-        "git_patch_sha256": source["git_patch_sha256"],
     }
     manifest_path = output / "manifest.json"
     temporary = output / f".manifest.{os.getpid()}.tmp"
@@ -735,7 +764,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument(
         "--device", default="auto",
-        help="carving projection device: auto, cpu, cuda, or cuda:<index>",
+        help="geometry projection and IBR device: auto, cpu, cuda, or cuda:<index>",
     )
     parser.add_argument(
         "--chunk-points", type=int, default=1_000_000,

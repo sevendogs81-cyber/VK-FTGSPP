@@ -122,7 +122,6 @@ class SynchronousBackend(Protocol):
     ) -> None: ...
     def begin_hard_separation(self) -> dict[str, int]: ...
     def resume_hard_separation(self) -> dict[str, int]: ...
-    def hard_separation_digest(self) -> str: ...
     def model(self): ...
     def optimizer_state(self) -> Mapping[str, np.ndarray]: ...
     def performance_snapshot(self) -> Mapping[str, object]: ...
@@ -962,15 +961,6 @@ class SynchronousBackendGroup:
             raise RuntimeError("hard-separation resume differs between replicas")
         self._recreate_collective_owner()
         return {str(key): int(value) for key, value in results[0].items()}
-
-    def hard_separation_digest(self) -> str:
-        """Verify that all replicas have the same post-split gate state."""
-        digests = self._parallel(
-            lambda _rank, backend: backend.hard_separation_digest()
-        )
-        if digests and any(value != digests[0] for value in digests[1:]):
-            raise RuntimeError("hard-separation gate state differs between replicas")
-        return str(digests[0]) if digests else ""
 
     def _sum_relocation_statistics(self) -> None:
         """Add per-rank relocation observations onto every replica."""

@@ -153,10 +153,13 @@ Carving uses CUDA automatically when Torch and a CUDA device are available,
 otherwise it uses NumPy on CPU. Projection is chunked and a CUDA OOM retries
 with a smaller chunk. With `--coarse-resolution`, the fine pass enumerates only
 cells covered by the dilated coarse hull. CUDA computes support and keep votes
-on-device and transfers only retained indices and diagnostics. `--device cpu`
-gives the deterministic CPU path. An explicit `--bounds ...` skips DA3-based
-bound estimation; `--input-points` derives bounds from an existing DA3/user PLY
-set.
+on-device and transfers only retained indices and diagnostics. The same
+`--device` setting covers point filtering and IBR coloring. In `auto` mode,
+all implemented projection, sparse z-buffer, robust color, unprojection,
+consistency, and voxel-fusion accelerators use CUDA whenever it is available.
+`--device cpu` forces the deterministic CPU path. An explicit `--bounds ...`
+skips DA3-based bound estimation; `--input-points` derives bounds from an
+existing DA3/user PLY set.
 
 The second method directly filters the generated/reused DA3 PLYs before IBR
 recoloring:
@@ -213,10 +216,13 @@ uv sync --locked --no-dev --no-editable --extra da3
 ```
 
 DA3 uses CUDA when available and otherwise falls back to CPU
-(`init.da3.device`). That ordinal can differ from the
-Vulkan `--devices` id used for training. `init.backend: da3` uses its cloud
-directly; uncalibrated captures must use DA3 because visual-hull projection
-requires a camera rig.
+(`init.da3.device`). Its unprojection, cross-view depth consistency, and voxel
+winner selection follow the resolved model device; masks, cache I/O, and
+control flow remain on CPU. The manifest records the postprocessing device and
+the L2 cache identity includes the CUDA-capable implementation version. That
+ordinal can differ from the Vulkan `--devices` id used for training.
+`init.backend: da3` uses its cloud directly; uncalibrated captures must use DA3
+because visual-hull projection requires a camera rig.
 
 ```bash
 ftgspp train --config examples/foreground_scene.yaml --devices 0 \

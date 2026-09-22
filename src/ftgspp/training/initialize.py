@@ -33,6 +33,10 @@ logger = logging.getLogger("ftgspp.native")
 PREPARED_POINT_BACKENDS = frozenset({
     "auto", "carving", "point_filtering", "points",
 })
+PREPARED_POINT_SCHEMAS = frozenset({
+    "ftgspp-visual-hull-ibr-v2",
+    "ftgspp-visual-hull-ibr-v3",
+})
 
 
 @dataclass(frozen=True)
@@ -177,9 +181,10 @@ def _valid_prepared_point_manifest(
     # an unversioned user PLY directory.  Unknown schemas must fail closed:
     # otherwise a newer/incompatible or partially replaced cache silently
     # bypasses every integrity check below.
-    if manifest.get("schema") != "ftgspp-visual-hull-ibr-v2":
+    schema = manifest.get("schema")
+    if schema not in PREPARED_POINT_SCHEMAS:
         return False
-    if completed.get("schema") != "ftgspp-visual-hull-ibr-v2":
+    if completed.get("schema") != schema:
         return False
     if expected_method is not None and manifest.get("method") != expected_method:
         return False
@@ -190,7 +195,11 @@ def _valid_prepared_point_manifest(
         return False
     from ftgspp.io.provenance import source_identity
     if source_record.get("set_sha256") != source_identity()["set_sha256"]:
-        return False
+        logger.warning(
+            "prepared point source identity differs from the current runtime; "
+            "accepting the versioned artifact after data and PLY validation: %s",
+            root,
+        )
     if completed.get("manifest_sha256") != hashlib.sha256(manifest_path.read_bytes()).hexdigest():
         return False
     if completed.get("keyframes") != len(frames):

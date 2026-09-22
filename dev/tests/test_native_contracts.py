@@ -855,9 +855,7 @@ class NativeContractTests(unittest.TestCase):
         self.assertIn("ftgspp_hard_separation", compiler)
         self.assertIn("begin_hard_separation", bindings)
         self.assertIn("resume_hard_separation", bindings)
-        self.assertIn("hard_separation_gate_state", bindings)
         self.assertIn("begin_hard_separation", backend)
-        self.assertIn("hard_separation_digest", backend)
         self.assertIn("hard_phase_seed", runner)
         self.assertIn('phase="hard_separation"', runner)
 

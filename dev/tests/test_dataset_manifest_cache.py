@@ -463,6 +463,31 @@ class DatasetManifestAndCacheTests(unittest.TestCase):
             third = _tiny_scene(root, paths).checkpoint_metadata()
             self.assertEqual(first["fingerprint"], third["fingerprint"])
 
+    def test_verified_view_hash_avoids_checkpoint_reread(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "000000.jpg"
+            path.write_bytes(b"manifest-verified-payload")
+            digest = _file_sha256(path)
+            view = _view(
+                path, frame=0, camera=7, timestamp=0.0,
+                rgb_sha256=digest,
+            )
+            scene = Scene(
+                frames=[0], cameras=[7], train_cameras=[7],
+                eval_cameras=[], camera_split_source="test",
+                train_views=[view], eval_views=[], fps=60.0,
+                source_root=root, time_offsets={7: 0.0},
+            )
+            with patch("ftgspp.data.scene._file_sha256") as hashed:
+                hashed.side_effect = AssertionError(
+                    "verified manifest content must not be hashed twice"
+                )
+                metadata = scene.checkpoint_metadata()
+            hashed.assert_not_called()
+            self.assertEqual(scene._content_hashes[path.as_posix()], digest)
+            self.assertEqual(metadata["manifest_entries"], 1)
+
     def test_view_content_change_invalidates_cached_fingerprint(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

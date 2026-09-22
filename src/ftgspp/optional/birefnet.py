@@ -706,14 +706,9 @@ def prepare_birefnet_masks(
         "source_identity": {
             "schema": source["schema"],
             "set_sha256": source["set_sha256"],
-            "git_patch_sha256": source["git_patch_sha256"],
         },
         "input_manifest": (
             str(view_manifest.expanduser().resolve()) if view_manifest is not None else None
-        ),
-        "input_manifest_sha256": (
-            _sha256(view_manifest.expanduser().resolve())
-            if view_manifest is not None else None
         ),
         "inference_resolution": BIREFNET_HR_RESOLUTION,
         "inference": {
@@ -754,7 +749,6 @@ def prepare_birefnet_masks(
             },
         },
         "qa_summary": os.path.relpath(qa_summary_path, manifest_path.parent),
-        "qa_summary_sha256": _sha256(qa_summary_path),
         "views": rows,
     }
     _atomic_json(manifest_path, manifest)

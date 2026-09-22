@@ -67,7 +67,6 @@ def _metadata(
     *, world_size: int = 2, policy: str = "unique", seed: int = 0,
 ) -> dict:
     return {
-        "checkpoint_schema": "ftgspp-vulkan-v6",
         "phase": "main",
         "phase_step": 7,
         "training": {
@@ -139,7 +138,7 @@ def _metadata(
 
 
 class CheckpointV6Tests(unittest.TestCase):
-    def test_source_tree_change_blocks_resume(self):
+    def test_source_tree_change_warns_on_resume(self):
         saved = _metadata()
         current = _metadata()
         saved["runtime"]["source_tree"] = {
@@ -148,12 +147,12 @@ class CheckpointV6Tests(unittest.TestCase):
         current["runtime"]["source_tree"] = {
             "schema": "ftgspp-source-tree-v1", "set_sha256": "source-b",
         }
-        with self.assertRaisesRegex(ResumeCompatibilityError, "source-tree"):
-            validate_resume_compatibility(
-                saved, current, allow_world_size_change=False,
-            )
+        warnings = validate_resume_compatibility(
+            saved, current, allow_world_size_change=False,
+        )
+        self.assertTrue(any("source-tree" in value for value in warnings))
 
-    def test_shader_provenance_recurses_with_portable_relative_paths(self):
+    def test_shader_provenance_recurses_and_hashes_complete_set(self):
         with tempfile.TemporaryDirectory() as directory:
             shader_root = Path(directory)
             generated = shader_root / "generated"
@@ -171,14 +170,8 @@ class CheckpointV6Tests(unittest.TestCase):
                 (radix_sort / "upsweep.spv").write_bytes(b"radix-v2")
                 second = collect_runtime_provenance(device_ids=[0])
 
-        self.assertEqual(
-            set(first["shaders"]["files"]),
-            {"generated/render.spv", "radix_sort/upsweep.spv"},
-        )
-        self.assertNotEqual(
-            first["shaders"]["files"]["radix_sort/upsweep.spv"],
-            second["shaders"]["files"]["radix_sort/upsweep.spv"],
-        )
+        self.assertEqual(first["shaders"]["file_count"], 2)
+        self.assertEqual(second["shaders"]["file_count"], 2)
         self.assertNotEqual(
             first["shaders"]["set_sha256"],
             second["shaders"]["set_sha256"],
@@ -260,7 +253,7 @@ class CheckpointV6Tests(unittest.TestCase):
         )
         self.assertTrue(any("optimizer trajectory" in value for value in warnings))
 
-    def test_collective_abi_algorithm_tree_and_topology_are_resume_contracts(self):
+    def test_collective_abi_algorithm_and_tree_are_resume_contracts(self):
         fields = {
             "abi": "ftgspp-pair-host-v2",
             "algorithm": "central_hierarchical_reduce_broadcast",
@@ -279,12 +272,10 @@ class CheckpointV6Tests(unittest.TestCase):
                     )
         saved = _metadata()
         saved["training"]["collective"]["topology"]["fingerprint"] = "other"
-        with self.assertRaisesRegex(
-            ResumeCompatibilityError, "topology fingerprint",
-        ):
-            validate_resume_compatibility(
-                saved, _metadata(), allow_world_size_change=False,
-            )
+        warnings = validate_resume_compatibility(
+            saved, _metadata(), allow_world_size_change=False,
+        )
+        self.assertTrue(any("topology fingerprint" in value for value in warnings))
 
     def test_sampling_policy_and_sampler_abi_are_resume_contracts(self):
         saved = _metadata(policy="unique")

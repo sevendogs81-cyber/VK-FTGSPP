@@ -2,10 +2,8 @@
 from __future__ import annotations
 
 import copy
-import importlib.util
 import json
 import multiprocessing
-import shutil
 import sys
 from contextlib import nullcontext
 from pathlib import Path
@@ -19,11 +17,9 @@ from omegaconf import OmegaConf
 
 from ftgspp.config.compose import resolve_config
 from ftgspp.data.scene import Scene
-from ftgspp.io import provenance
 from ftgspp.io.init_cache import publish_cache_pointer, resolve_published_cache_root
 from ftgspp.io.ply import write_point_ply
 from ftgspp.optional import da3
-from ftgspp.training.init_plan import L2_SOURCE_FILES
 from ftgspp.training.initialize import (
     KeyframeCloud, _initial_points, _valid_da3_cache, initialize_explicit,
 )
@@ -124,9 +120,8 @@ def test_cache_switch_avoids_model_load_and_pins_provenance(tmp_path, monkeypatc
     # Another configuration can publish its pointer between generation and
     # the caller recording provenance. The returned root must stay bound to A.
     base = a.cache_root.parent
-    b_manifest = json.loads((b.cache_root / "manifest.json").read_text())
     def publish_b():
-        publish_cache_pointer(base, b.cache_root, b.cache_root / "manifest.json", b_manifest["fingerprint"])
+        publish_cache_pointer(base, b.cache_root, b.cache_root / "manifest.json")
     publish_b()
     original = da3.generate_da3_points
     def switch_after_return(*args, **kwargs):
@@ -290,23 +285,6 @@ def test_concurrent_processes_share_one_completed_generation(tmp_path, fake_torc
                     proc.terminate()
                 proc.join(5)
         result.close()
-
-
-def test_wheel_stage_identity_tracks_real_packaged_source(tmp_path):
-    package = tmp_path / "site-packages" / "ftgspp"
-    (package / "io").mkdir(parents=True)
-    for relative in L2_SOURCE_FILES:
-        path = package / Path(relative).relative_to("src/ftgspp")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("version = 1\n")
-    shutil.copyfile(provenance.__file__, package / "io/provenance.py")
-    spec = importlib.util.spec_from_file_location("wheel_provenance", package / "io/provenance.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    before = module.stage_identity(L2_SOURCE_FILES)
-    assert set(before["files"].values()).isdisjoint({"missing", "unknown"})
-    (package / "optional/da3.py").write_text("version = 2\n")
-    assert module.stage_identity(L2_SOURCE_FILES)["set_sha256"] != before["set_sha256"]
 
 
 @pytest.mark.parametrize("payload", [[], None, {"schema": "ftgspp-da3-cache-pointer-v1", "directory": ".."}])

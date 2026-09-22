@@ -308,7 +308,13 @@ def _declared_sha256(value: object, *, field_name: str, manifest: Path) -> str:
     return digest
 
 
-def _read_mask_manifest(path: Path | None, base: Path) -> _MaskManifest:
+def _read_mask_manifest(
+    path: Path | None,
+    base: Path,
+    *,
+    verified_hashes: Mapping[str, str] | None = None,
+    manifest_sha256: str | None = None,
+) -> _MaskManifest:
     if path is None:
         return _MaskManifest({})
     if not path.is_file():
@@ -338,7 +344,7 @@ def _read_mask_manifest(path: Path | None, base: Path) -> _MaskManifest:
             ) from exc
         if not isinstance(marker, dict) or marker.get("schema") != schema:
             raise ValueError(f"BiRefNet completion marker schema mismatch: {marker_path}")
-        expected = _file_sha256(path)
+        expected = manifest_sha256 or _file_sha256(path)
         if marker.get("manifest_sha256") != expected:
             raise ValueError(
                 f"BiRefNet completion marker does not match mask manifest: {marker_path}"
@@ -404,7 +410,14 @@ def _read_mask_manifest(path: Path | None, base: Path) -> _MaskManifest:
             declared = resolved.get(hash_key)
             if file_path is not None and not Path(file_path).is_file():
                 raise FileNotFoundError(file_path)
-            if declared is not None and _file_sha256(Path(file_path)) != declared:
+            cached = (
+                verified_hashes.get(Path(file_path).as_posix())
+                if verified_hashes is not None and file_path is not None else None
+            )
+            if (
+                declared is not None
+                and (cached or _file_sha256(Path(file_path))) != declared
+            ):
                 raise ValueError(
                     f"mask manifest {hash_key} mismatch for camera/frame {key}: {file_path}"
                 )
@@ -714,7 +727,7 @@ def _load_da3_camera_manifest(
     ):
         logger.warning("ignoring DA3 camera rig with failed integrity checks: %s", path)
         return None
-    # Callers validate the request and stage identity with _valid_da3_cache
+    # Callers validate the request and semantic cache identity with _valid_da3_cache
     # against a provisional Scene before applying these camera parameters.
     try:
         with np.load(path, allow_pickle=False) as archive:
@@ -986,6 +999,9 @@ class View:
     validity_path: Path | None = None
     mask_source: str = "none"
     rgb_encoding: str = "straight"
+    rgb_sha256: str | None = None
+    mask_sha256: str | None = None
+    validity_sha256: str | None = None
 
     def load_mask(self) -> np.ndarray:
         """Return the transformed soft foreground mask in ``[0, 1]``."""
@@ -1133,6 +1149,9 @@ class Scene:
     evaluation_identity: dict[str, object] | None = None
     _checkpoint_metadata_cache: dict[str, object] | None = field(
         default=None, init=False, repr=False,
+    )
+    _content_hashes: dict[str, str] = field(
+        default_factory=dict, init=False, repr=False,
     )
 
     @property
@@ -1386,13 +1405,24 @@ class Scene:
 
         root = self.source_root.resolve() if self.source_root is not None else None
         hash_paths: list[Path | None] = []
+        known_hashes: dict[str, str] = {}
         for view in (*self.train_views, *self.eval_views):
-            hash_paths.append(_identity_rgb_path(view))
-            hash_paths.append(view.mask_path)
-            hash_paths.append(view.validity_path)
+            for path, digest in (
+                (_identity_rgb_path(view), view.rgb_sha256),
+                (view.mask_path, view.mask_sha256),
+                (view.validity_path, view.validity_sha256),
+            ):
+                if path is None:
+                    continue
+                if digest is None:
+                    hash_paths.append(path)
+                else:
+                    known_hashes[path.as_posix()] = str(digest)
         content_hashes = _file_sha256_many(
             hash_paths, cache_root=_view_hash_cache_root(self.source_root),
         )
+        content_hashes.update(known_hashes)
+        self._content_hashes = dict(content_hashes)
 
         def record(split: str, index: int, view: View) -> dict[str, object]:
             # Resolving thousands of local links to an NFS image tree can turn
@@ -1523,12 +1553,17 @@ class Scene:
                 root, config.data.frames.start, config.data.frames.stop,
             )
             explicit_timestamps = None
+            declared_rgb_hashes: dict[tuple[int, int], str] = {}
         else:
-            frames, camera_ids, paths, explicit_timestamps = load_image_manifest(
+            (
+                frames, camera_ids, paths, explicit_timestamps,
+                declared_rgb_hashes,
+            ) = load_image_manifest(
                 Path(view_manifest),
                 start=config.data.frames.start,
                 stop=config.data.frames.stop,
                 reject_empty=True,
+                return_hashes=True,
             )
         fps = float(config.data.fps)
         if not np.isfinite(fps) or fps <= 0.0:
@@ -1598,6 +1633,7 @@ class Scene:
         validity_root = getattr(mask_options, "validity_root", None)
         manifest_path = getattr(mask_options, "manifest_path", None)
         declared_mask_fingerprint = getattr(mask_options, "fingerprint", None)
+        actual_mask_fingerprint: str | None = None
         if declared_mask_fingerprint is not None and manifest_path is None:
             raise ValueError(
                 "data.masks.fingerprint requires data.masks.manifest_path"
@@ -1611,6 +1647,15 @@ class Scene:
         mask_manifest = _read_mask_manifest(
             Path(manifest_path) if manifest_path is not None else None,
             Path(manifest_path).parent if manifest_path is not None else root,
+            verified_hashes={
+                paths[frame_index][camera_index].as_posix(): digest
+                for frame_index, frame in enumerate(frames)
+                for camera_index, camera_id in enumerate(camera_ids)
+                if (digest := declared_rgb_hashes.get(
+                    (int(frame), int(camera_id))
+                )) is not None
+            },
+            manifest_sha256=actual_mask_fingerprint,
         )
         mask_rows = mask_manifest.rows
         train_set = set(train_ids)
@@ -1667,6 +1712,18 @@ class Scene:
                     validity_path=validity_path,
                     mask_source=mask_source,
                     rgb_encoding=str(getattr(mask_options, "rgb_encoding", "straight")),
+                    rgb_sha256=(
+                        mask_row.get("rgb_sha256")
+                        or declared_rgb_hashes.get((int(frame), int(camera_id)))
+                    ),
+                    mask_sha256=(
+                        mask_row.get("mask_sha256")
+                        if mask_path == mask_row.get("mask") else None
+                    ),
+                    validity_sha256=(
+                        mask_row.get("validity_sha256")
+                        if validity_path == mask_row.get("validity") else None
+                    ),
                 )
                 split = route_camera_split(camera_id, train_set, eval_set)
                 if split == "train":
@@ -1795,8 +1852,13 @@ def load_final_test_scene(training_scene: Scene, manifest_path: Path) -> Scene:
         (int(view.frame), int(view.camera_id)) for view in selection_views
     }
     selection_paths = {Path(view.path).resolve() for view in selection_views}
+    cached_hashes = getattr(training_scene, "_content_hashes", {})
     selection_rgb_hashes = {
-        _file_sha256(Path(view.path)) for view in selection_views
+        cached_hashes.get(
+            _identity_rgb_path(view).as_posix(),
+            getattr(view, "rgb_sha256", None),
+        ) or _file_sha256(Path(view.path))
+        for view in selection_views
     }
 
     def verify_hash(file_path: Path, value: object, label: str) -> str:
@@ -1980,6 +2042,9 @@ def load_final_test_scene(training_scene: Scene, manifest_path: Path) -> Scene:
             mask_path=mask_path, validity_path=validity_path,
             mask_source=mask_source,
             rgb_encoding=rgb_encoding,
+            rgb_sha256=rgb_sha256,
+            mask_sha256=mask_sha256,
+            validity_sha256=validity_sha256,
         ))
     camera_ids = sorted({int(view.camera_id) for view in views})
     frames = sorted({int(view.frame) for view in views})

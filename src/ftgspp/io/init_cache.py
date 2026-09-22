@@ -14,7 +14,6 @@ from ftgspp.io.hashing import file_sha256
 
 DA3_SCHEMA = "ftgspp-da3-foreground-v1"
 DA3_CACHE_POINTER_SCHEMA = "ftgspp-da3-cache-pointer-v1"
-L3_SCHEMA = "ftgspp-init-l3-v1"
 
 
 def canonical_json(payload: dict[str, object]) -> str:
@@ -83,14 +82,13 @@ def resolve_published_cache_root(root: Path) -> Path:
 
 
 def publish_cache_pointer(
-    base: Path, cache_root: Path, manifest_path: Path, fingerprint: str,
+    base: Path, cache_root: Path, manifest_path: Path,
 ) -> None:
     pointer = Path(base) / "current.json"
     write_json_atomic(pointer, {
         "schema": DA3_CACHE_POINTER_SCHEMA,
         "directory": cache_root.name,
         "manifest_sha256": file_sha256(manifest_path),
-        "manifest_fingerprint": fingerprint,
     })
 
 

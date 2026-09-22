@@ -3009,20 +3009,6 @@ public:
         return result;
     }
 
-    py::array_t<float> hard_separation_gate_state() {
-        // Return an owning diagnostic snapshot. buffer_to_array performs the
-        // required D2H copy; releasing native model host vectors afterwards
-        // prevents this phase-boundary check from pinning another 4*N floats
-        // (or any earlier model readback) for the rest of training.
-        py::array_t<float> result =
-            buffer_to_array<float, float>(buffers.velocities_gates, 4);
-        {
-            py::gil_scoped_release release;
-            release_model_host_copies();
-        }
-        return result;
-    }
-
     void configure_hard_separation_phase() {
         config.hard_separation = true;
         config.max_steps = 5000;
@@ -3263,8 +3249,6 @@ PYBIND11_MODULE(_ftgspp_vk, m) {
         .def("get_dynamic_gaussians", &VkSplat::get_dynamic_gaussians)
         .def("get_color_correction_params",
              &VkSplat::get_color_correction_params)
-        .def("hard_separation_gate_state",
-             &VkSplat::hard_separation_gate_state)
         .def("begin_hard_separation", &VkSplat::begin_hard_separation)
         .def("resume_hard_separation", &VkSplat::resume_hard_separation)
         .def("set_reference_image", &VkSplat::set_reference_image)

@@ -110,16 +110,23 @@ class ShaderCompiler:
         try:
             with open(checksum_path, 'r') as fp:
                 checksums = json.load(fp)
-        except:
+        except (OSError, json.JSONDecodeError):
             checksums = {}
+        return checksums.get(checksum_key) != checksum
 
-        if checksum_key in checksums and checksums[checksum_key] == checksum:
-            return False
-        
-        checksums[checksum_key] = checksum
+    def _record_checksums(self, updates: Dict[str, str]) -> None:
+        """Record source checksums only after every queued compile succeeds."""
+        if not updates:
+            return
+        checksum_path = self.config.shader_dst_path / "checksum.json"
+        try:
+            with open(checksum_path, 'r') as fp:
+                checksums = json.load(fp)
+        except (OSError, json.JSONDecodeError):
+            checksums = {}
+        checksums.update(updates)
         with open(checksum_path, 'w') as fp:
             json.dump(checksums, fp, indent=4)
-        return True
     
     def _compile_shader_slang(self, source_file: Path, job: ShaderJob,
                               target: Literal["glsl", "spirv", "host-callable"],
@@ -370,6 +377,7 @@ class ShaderCompiler:
         """Compile all shaders"""
         job_groups = self._create_shader_jobs()
         all_successful = True
+        pending_checksums: Dict[str, str] = {}
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.config.max_workers) as executor:
 
@@ -384,6 +392,7 @@ class ShaderCompiler:
                 
                 if not force and not self._should_compile(checksum_key, checksum):
                     continue
+                pending_checksums[checksum_key] = checksum
                 
                 print(f">>> Adding \"{source_file}\" to compilation queue")
                 
@@ -401,6 +410,7 @@ class ShaderCompiler:
                     all_successful = False
 
         if all_successful:
+            self._record_checksums(pending_checksums)
             manifest = [
                 ("generated/" + job.name + ".spv") if "." in source
                 else str(Path(source) / Path(job.name).with_suffix(".spv"))
