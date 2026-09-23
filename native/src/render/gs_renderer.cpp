@@ -116,9 +116,10 @@ VulkanGSPipeline::DeviceRequirement VulkanGSRenderer::getDeviceRequirement() {
         minSharedMemory
     };
 }
-void VulkanGSRenderer::initialize(const std::map<std::string, std::string> &spirv_paths, int device_id) {
+void VulkanGSRenderer::initialize(const std::map<std::string, std::string> &spirv_paths, int device_id,
+                                 bool forward_only, const DeviceInitOptions& options) {
 
-    VulkanGSPipeline::initialize(device_id);
+    VulkanGSPipeline::initialize(device_id, options);
     
     createComputePipeline(pipeline_projection_forward, spirv_paths.at("projection_forward"));
     createComputePipeline(
@@ -144,11 +145,13 @@ void VulkanGSRenderer::initialize(const std::map<std::string, std::string> &spir
     for (int i = 0; i < 2; ++i) {
         createComputePipeline(pipeline_compute_tile_ranges[i], spirv_paths.at("compute_tile_ranges"));
         createComputePipeline(pipeline_rasterize_forward[i], spirv_paths.at("rasterize_forward"));
+        if (!forward_only) {
         createComputePipeline(pipeline_rasterize_backward[0][i], spirv_paths.at("rasterize_backward_0"));
         createComputePipeline(pipeline_rasterize_backward[1][i], spirv_paths.at("rasterize_backward_1"));
         createComputePipeline(pipeline_rasterize_backward[2][i], spirv_paths.at("rasterize_backward_2"), 35840);
         createComputePipeline(pipeline_rasterize_backward[3][i], spirv_paths.at("rasterize_backward_3"), 41984);
         createComputePipeline(pipeline_rasterize_backward[4][i], spirv_paths.at("rasterize_backward_4"), 43008);
+        }
     }
     createComputePipeline(pipeline_cumsum.single_pass, spirv_paths.at("cumsum_single_pass"));
     createComputePipeline(pipeline_cumsum.block_scan, spirv_paths.at("cumsum_block_scan"));
@@ -287,6 +290,16 @@ void VulkanGSRenderer::executeGenerateKeys(
     PerfTimer::Timer<PerfTimer::GenerateKeys> timer(this);
     DEVICE_GUARD;
 
+    // Projection and prefix writes feed the indirect key emission in the same batch.
+    bufferMemoryBarrier({
+        {buffers.xy_vs.deviceBuffer, COMPUTE_SHADER_WRITE},
+        {buffers.inv_cov_vs_opacity.deviceBuffer, COMPUTE_SHADER_WRITE},
+        {buffers.depths.deviceBuffer, COMPUTE_SHADER_WRITE},
+        {buffers.rect_tile_space.deviceBuffer, COMPUTE_SHADER_WRITE},
+        {buffers.index_buffer_offset.deviceBuffer, COMPUTE_SHADER_WRITE},
+        {buffers.tile_invariant_status.deviceBuffer, TRANSFER_COMPUTE_SHADER_WRITE},
+    }, COMPUTE_SHADER_READ_WRITE);
+
     size_t num_elements = buffers.num_splats;
     if (buffers.tile_pair_capacity == 0)
         buffers.tile_pair_capacity = ftgspp::bootstrapTilePairCapacity(num_elements);
@@ -354,6 +367,8 @@ void VulkanGSRenderer::executeRasterizeForward(
         { buffers.sorted_gauss_idx().deviceBuffer, COMPUTE_SHADER_WRITE },
         { buffers.tile_ranges.deviceBuffer, COMPUTE_SHADER_WRITE },
         { buffers.rgb.deviceBuffer, COMPUTE_SHADER_WRITE },
+        { buffers.xy_vs.deviceBuffer, COMPUTE_SHADER_WRITE },
+        { buffers.inv_cov_vs_opacity.deviceBuffer, COMPUTE_SHADER_WRITE },
     }, COMPUTE_SHADER_READ);
 
     executeCompute(

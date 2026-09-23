@@ -234,6 +234,56 @@ def test_train_cli_rejects_more_than_two_devices(tmp_path, monkeypatch):
     assert raised.value.code == 2
 
 
+def test_train_cli_can_append_hs_from_retained_main_selection(
+    tmp_path, monkeypatch,
+):
+    from ftgspp.cli import main
+    from ftgspp.io.checkpoint import MAIN_SELECTED_CHECKPOINT
+
+    run = tmp_path / "run"
+    cfg = resolve_config(node(), base_dir=tmp_path).config
+    cfg.run.output_path = run
+    cfg.model.marginal_gating = True
+    save_resolved_config(cfg, run / "config.resolved.yaml")
+    selected = run / "ckpt" / MAIN_SELECTED_CHECKPOINT
+    selected.parent.mkdir(parents=True)
+    selected.write_bytes(b"selected checkpoint placeholder")
+    captured = {}
+
+    class Runner:
+        def __init__(self, config):
+            captured["config"] = config
+
+        def run(self):
+            return None
+
+    monkeypatch.setattr("ftgspp.training.runner.NativeRunner", Runner)
+    main(["train", "--resume", str(run), "--hard-separation"])
+    resumed = captured["config"]
+    assert resumed.train.hard_separation
+    assert resumed.train.resume
+    assert resumed.train.resume_checkpoint == selected
+    assert resumed.run.output_path == run
+
+
+def test_train_cli_append_hs_requires_retained_main_selection(
+    tmp_path, monkeypatch,
+):
+    from ftgspp.cli import main
+
+    run = tmp_path / "run"
+    cfg = resolve_config(node(), base_dir=tmp_path).config
+    cfg.run.output_path = run
+    save_resolved_config(cfg, run / "config.resolved.yaml")
+    monkeypatch.setattr(
+        "ftgspp.training.runner.NativeRunner",
+        lambda config: (_ for _ in ()).throw(AssertionError("should not train")),
+    )
+    with pytest.raises(SystemExit) as raised:
+        main(["train", "--resume", str(run), "--hard-separation"])
+    assert raised.value.code == 2
+
+
 def test_failed_overwrite_keeps_existing_config(tmp_path):
     cfg = resolve_config(node(), base_dir=tmp_path).config
     cfg.run.output_path.mkdir(parents=True)

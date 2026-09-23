@@ -271,15 +271,26 @@ void main(uint3 tid : SV_DispatchThreadID, uniform FTGSPPBackwardUniforms unifor
         g_times_durations[m1] = m;
         g_times_durations[m2] = v;
     }
-    // The hard-phase optimizer does not own velocity/gate parameters or moments.
-    if (uniforms.reserved0 < 0.5f) {
+    {
+        // Hard persistence freezes only the binary gate. Motion remains a
+        // trainable, independent property in both persistence groups.
+        const bool hard_phase = uniforms.reserved0 >= 0.5f;
         float4 x = velocities_gates[idx];
+        const float fixed_gate = x.w;
         float4 m = g_velocities_gates[m1];
         float4 v = g_velocities_gates[m2];
         ftgspp_fused_adam(
-            x, grad_velocity_gate, m, v, uniforms.step,
-            optimizer_batch_size,
-            float4(float3(uniforms.lr_velocities), uniforms.lr_gates));
+            x,
+            hard_phase ? float4(grad_velocity_gate.xyz, 0.0f) : grad_velocity_gate,
+            m, v, uniforms.step, optimizer_batch_size,
+            float4(
+                float3(uniforms.lr_velocities),
+                hard_phase ? 0.0f : uniforms.lr_gates));
+        if (hard_phase) {
+            x.w = fixed_gate;
+            m.w = 0.0f;
+            v.w = 0.0f;
+        }
         velocities_gates[idx] = x;
         g_velocities_gates[m1] = m;
         g_velocities_gates[m2] = v;

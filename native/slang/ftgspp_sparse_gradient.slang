@@ -8,8 +8,8 @@ uint active_sh_float_count(uint active_sh) {
 
 // Version 2 records carry only SH coefficients active at the current step.
 // Full degree 3 remains 66 words for backwards capacity planning.
-uint record_words(uint active_sh, bool hard_phase) {
-    return 18u + active_sh_float_count(active_sh) - (hard_phase ? 4u : 0u);
+uint record_words(uint active_sh) {
+    return 18u + active_sh_float_count(active_sh);
 }
 
 struct SparseGradientUniforms
@@ -61,15 +61,13 @@ void main(uint3 tid : SV_DispatchThreadID, uniform SparseGradientUniforms u)
         return;
     // The existing GPU cumsum is inclusive. Subtracting one gives the
     // exclusive active rank and guarantees records are strictly ID-sorted.
-    uint word = (inclusive - 1u) * record_words(u.active_sh, u.reserved != 0u);
+    uint word = (inclusive - 1u) * record_words(u.active_sh);
     records.Store(word++ * 4u, id);
     for (uint j = 0; j < 3; ++j) store_float(word++, grad_mean[3u*id+j]);
     for (uint j = 0; j < 4; ++j) store_float(word++, grad_scale_opacity[4u*id+j]);
     for (uint j = 0; j < 2; ++j) store_float(word++, grad_time_duration[2u*id+j]);
-    if (u.reserved == 0u) {
-        for (uint j = 0; j < 4; ++j)
-            store_float(word++, grad_velocity_gate[4u*id+j]);
-    }
+    for (uint j = 0; j < 4; ++j)
+        store_float(word++, grad_velocity_gate[4u*id+j]);
     const uint lane = id % SH_REORDER_SIZE;
     const uint block = id - lane;
     const uint sh_floats = active_sh_float_count(u.active_sh);
@@ -98,7 +96,7 @@ void main(uint3 tid : SV_DispatchThreadID, uniform SparseGradientUniforms u)
     const uint record = tid.x;
     if (record >= u.peer_count)
         return;
-    uint word = record * record_words(u.active_sh, u.reserved != 0u);
+    uint word = record * record_words(u.active_sh);
     const uint id = records.Load(word++ * 4u);
     if (id >= u.num_splats)
         return;
@@ -121,12 +119,10 @@ void main(uint3 tid : SV_DispatchThreadID, uniform SparseGradientUniforms u)
         precise float dest = grad_time_duration[2u*id+j];
         grad_time_duration[2u*id+j] = dest + contrib;
     }
-    if (u.reserved == 0u) {
-        for (uint j = 0; j < 4; ++j) {
-            precise float contrib = scale * load_float(word++);
-            precise float dest = grad_velocity_gate[4u*id+j];
-            grad_velocity_gate[4u*id+j] = dest + contrib;
-        }
+    for (uint j = 0; j < 4; ++j) {
+        precise float contrib = scale * load_float(word++);
+        precise float dest = grad_velocity_gate[4u*id+j];
+        grad_velocity_gate[4u*id+j] = dest + contrib;
     }
     const uint lane = id % SH_REORDER_SIZE;
     const uint block = id - lane;

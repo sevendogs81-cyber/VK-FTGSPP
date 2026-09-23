@@ -88,6 +88,7 @@ PACK_STRUCT(struct FTGSPPRelocationPlanUniforms {
     uint32_t include_gate;
     float opacity_threshold;
     uint32_t seed;
+    uint32_t group_relocation;
 });
 
 PACK_STRUCT(struct FTGSPPPeerMeanUniforms {
@@ -124,7 +125,7 @@ static_assert(sizeof(FTGSPPBackwardUniforms) == 192,
     "FTGSPP backward push-constant ABI changed");
 static_assert(sizeof(FTGSPPRelocationUniforms) == 16,
     "FTGSPP relocation push-constant ABI changed");
-static_assert(sizeof(FTGSPPRelocationPlanUniforms) == 16,
+static_assert(sizeof(FTGSPPRelocationPlanUniforms) == 20,
     "FTGSPP relocation-plan push-constant ABI changed");
 static_assert(sizeof(FTGSPPPeerMeanUniforms) == 24,
     "FTGSPP peer-mean push-constant ABI changed");
@@ -1084,8 +1085,7 @@ void VulkanGSTrainer::executeFTGSPPSparseGradientMerge(
         clearDeviceBuffer(buffers.grad_base_xyz_ws, 3 * n);
         clearDeviceBuffer(buffers.grad_base_log_scales_opacity, 4 * n);
         clearDeviceBuffer(buffers.grad_times_durations, 2 * n);
-        if (!config.hard_separation)
-            clearDeviceBuffer(buffers.grad_velocities_gates, 4 * n);
+        clearDeviceBuffer(buffers.grad_velocities_gates, 4 * n);
         clearDeviceBuffer(
             buffers.grad_sh_coeffs,
             16 * 3 * _CEIL_ROUND(n, SH_REORDER_SIZE));
@@ -1217,7 +1217,8 @@ void VulkanGSTrainer::executeFTGSPPRelocationPlanNative(
     if (n == 0) return;
     FTGSPPRelocationPlanUniforms u{
         (uint32_t)n, include_gate ? 1u : 0u,
-        config.min_opacity, seed ^ (uint32_t)step
+        config.min_opacity, seed ^ (uint32_t)step,
+        config.hard_separation ? 1u : 0u
     };
 
     clearDeviceBuffer(buffers.relocation_totals, 4);
@@ -1231,7 +1232,8 @@ void VulkanGSTrainer::executeFTGSPPRelocationPlanNative(
          buffers.relocation_totals.deviceBuffer});
     memoryBarrier(COMPUTE_SHADER_WRITE, COMPUTE_SHADER_READ);
 
-    resizeDeviceBuffer(buffers.relocation_cdf, n);
+    resizeDeviceBuffer(
+        buffers.relocation_cdf, config.hard_separation ? 2 * n : n);
     clearDeviceBuffer(buffers.relocation_status, 4);
     memoryBarrier(TRANSFER_WRITE, COMPUTE_SHADER_READ_WRITE);
     executeCompute({{n,SUBGROUP_SIZE}}, &u, sizeof(u),
@@ -1304,8 +1306,8 @@ void VulkanGSTrainer::executeFTGSPPHardSeparation(
     VulkanGSPipelineBuffers& buffers
 ) {
     const size_t n = buffers.num_splats;
-    // The legacy separation stage constructs a fresh Adam optimizer.  Reset
-    // every native moment buffer before starting its five-thousand-step pass.
+    // The separation stage constructs a fresh Adam optimizer. Reset every
+    // native moment buffer before starting its configured recovery pass.
     clearDeviceBuffer(buffers.g_xyz_ws, 2*3*n);
     clearDeviceBuffer(buffers.g_sh_coeffs_1, 16*3*_CEIL_ROUND(n,SH_REORDER_SIZE));
     clearDeviceBuffer(buffers.g_sh_coeffs_2, 16*3*_CEIL_ROUND(n,SH_REORDER_SIZE));

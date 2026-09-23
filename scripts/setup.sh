@@ -11,6 +11,7 @@ SLANG_URL="https://github.com/shader-slang/slang/releases/download/v${SLANG_VERS
 SLANG_SHA256="beddadd9b48151aa2d7b556056ea02b9826bde59d4d4fa827b33c5184e42a983"
 UV_VERSION="0.11.29"
 SLANG_PREFIX="${FTGSPP_SLANG_PREFIX:-$HOME/.local/slang-${SLANG_VERSION}}"
+WITH_VIEWER=0
 SKIP_APT=0
 SKIP_DOCTOR=0
 DOCTOR_DEVICE=0
@@ -36,6 +37,8 @@ the native extension, and run ftgspp doctor. Prepared initialization artifacts
 are required unless an initialization option is selected.
 
 Options:
+  --with-viewer     Build the optional GLFW/ImGui desktop viewer (X11)
+  --with-remote     Install the lightweight headless browser viewer server
   --with-init       Install BiRefNet-HR and DA3 for raw-RGB initialization
   --with-birefnet   Install BiRefNet-HR mask generation
   --with-da3        Install DA3 point generation
@@ -49,6 +52,8 @@ EOF
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --with-viewer) WITH_VIEWER=1; shift ;;
+    --with-remote) add_extra remote; shift ;;
     --skip-apt) SKIP_APT=1; shift ;;
     --skip-doctor) SKIP_DOCTOR=1; shift ;;
     --with-init)
@@ -99,6 +104,11 @@ if [[ ! -e /usr/include/vulkan/vulkan.h ]]; then
 fi
 if [[ ! -e /usr/include/glm/glm.hpp ]]; then
   need_apt+=(libglm-dev)
+fi
+if [[ "$WITH_VIEWER" -eq 1 ]]; then
+  for header_pkg in "X11/Xlib.h:libx11-dev" "X11/extensions/Xrandr.h:libxrandr-dev" "X11/extensions/Xinerama.h:libxinerama-dev" "X11/Xcursor/Xcursor.h:libxcursor-dev" "X11/extensions/XInput2.h:libxi-dev"; do
+    [[ -f "/usr/include/${header_pkg%%:*}" ]] || need_apt+=("${header_pkg##*:}")
+  done
 fi
 if ((${#need_apt[@]})) && [[ "$SKIP_APT" -eq 0 ]]; then
   if ! command -v apt-get >/dev/null 2>&1; then
@@ -189,6 +199,12 @@ sync_args=(sync --locked --no-dev --no-editable --python "$ROOT/.venv/bin/python
 for extra in "${INSTALL_EXTRAS[@]}"; do
   sync_args+=(--extra "$extra")
 done
+sync_args+=(--reinstall-package ftgspp-vulkan-community)
+if [[ "$WITH_VIEWER" -eq 1 ]]; then
+  sync_args+=(--config-setting cmake.define.FTGSPP_BUILD_VIEWER=ON)
+else
+  sync_args+=(--config-setting cmake.define.FTGSPP_BUILD_VIEWER=OFF)
+fi
 uv "${sync_args[@]}"
 
 install_extras_csv="$(IFS=,; echo "${INSTALL_EXTRAS[*]}")"
@@ -241,6 +257,8 @@ if "lpips" in extras:
         "torchvision": "torchvision",
         "torchmetrics": "torchmetrics",
     })
+if "remote" in extras:
+    required["websockets"] = "websockets"
 
 venv = Path(sys.prefix).resolve()
 versions = []

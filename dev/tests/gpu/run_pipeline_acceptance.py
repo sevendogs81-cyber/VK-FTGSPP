@@ -92,6 +92,7 @@ def main():
     parser.add_argument("--hard", action="store_true")
     parser.add_argument("--repeat", action="store_true", help="also measure independent full-run repeatability")
     args = parser.parse_args()
+    args.output = args.output.expanduser().resolve()
     if args.output.exists():
         raise FileExistsError(f"use a fresh output path: {args.output}")
     root = scene(args.output / "scene")
@@ -101,13 +102,20 @@ def main():
                  "fps":2., "scale":1., "train_cameras":[0,1], "eval_cameras":[2],
                  "masks":{"source":"alpha", "required":True,
                           "rgb_encoding":"straight"}},
-        "init": {"num_gaussians":32,"keyframe_stride":1,"sh_degree":3},
+        "init": {
+            "backend": "points", "points_path": str(root / "points_stride1"),
+            "num_gaussians":32, "keyframe_stride":1, "sh_degree":3,
+        },
         "model": {"marginal_gating":args.hard},
         "train": {"iterations":args.steps, "checkpoint_interval":max(1,args.steps//2),
                   "background":{"mode":"random_solid", "seed":19,
                                 "rank_policy":"shared", "hard_phase":"inherit"},
                   "hard_separation":args.hard, "color_correction":True,
                   "color_correction_start":0,
+                  "hard_separation_steps":args.steps if args.hard else 3000,
+                  "hard_relocation_steps":(
+                      [max(1, args.steps//2)] if args.hard and args.steps > 1 else []
+                  ),
                   "relocation":{"start":1,"stop":args.steps,"every":10}},
         "distributed": {"host_collective":{"bucket_mb":8}},
         "eval":{"frame_interval":1,
@@ -133,23 +141,33 @@ def main():
     saved_config = load_run_config(full)
     training_scene = Scene.from_config(saved_config)
     locked_root = args.output / "locked-final-test"
+    rgb_root = locked_root / "rgb"
     mask_root = locked_root / "masks"
+    rgb_root.mkdir(parents=True)
     mask_root.mkdir(parents=True)
     final_rows = []
-    for frame in range(2):
-        view = training_scene.view(frame, 2)
-        rgb_path = root / "images" / "2" / f"{frame:06d}.png"
-        decoded = cv2.imread(str(rgb_path), cv2.IMREAD_UNCHANGED)
+    for source_frame in range(2):
+        frame = source_frame + 2
+        source_path = root / "images" / "2" / f"{source_frame:06d}.png"
+        decoded = cv2.imread(str(source_path), cv2.IMREAD_UNCHANGED)
         if decoded is None or decoded.ndim != 3 or decoded.shape[2] != 4:
-            raise AssertionError(f"expected synthetic BGRA source: {rgb_path}")
+            raise AssertionError(f"expected synthetic BGRA source: {source_path}")
+        decoded = decoded.copy()
+        decoded[0, 0, 0] = np.uint8(int(decoded[0, 0, 0]) + 1)
+        rgb_path = rgb_root / f"{frame:06d}.png"
+        if not cv2.imwrite(str(rgb_path), decoded):
+            raise OSError(rgb_path)
         mask_path = mask_root / f"{frame:06d}.png"
         if not cv2.imwrite(str(mask_path), decoded[..., 3]):
             raise OSError(mask_path)
         final_rows.append({
             "camera_id": 2,
             "frame": frame,
-            "timestamp": float(view.timestamp),
-            "rgb_path": str(Path("..") / rgb_path.relative_to(args.output)),
+            "timestamp": float(
+                np.float32(frame / training_scene.fps)
+                - np.float32(training_scene.time_offsets[2])
+            ),
+            "rgb_path": str(rgb_path.relative_to(locked_root)),
             "rgb_sha256": hashlib.sha256(rgb_path.read_bytes()).hexdigest(),
             "mask_path": str(mask_path.relative_to(locked_root)),
             "mask_sha256": hashlib.sha256(mask_path.read_bytes()).hexdigest(),
@@ -192,7 +210,29 @@ def main():
         and identity.get("model_step") is not None
     ):
         raise AssertionError(f"incomplete final-test identity: {identity}")
-    checkpoints = sorted((full / "ckpt").glob("*.npz"))
+    selected_manifest = json.loads(
+        (full / "export_selection.json").read_text(encoding="utf-8")
+    )
+    selected_checkpoint = full / selected_manifest["checkpoint_artifact"]
+    if not selected_checkpoint.is_file():
+        raise AssertionError(
+            f"selected checkpoint is missing: {selected_checkpoint}"
+        )
+    expected_selected_name = (
+        "hard_final.npz" if args.hard else "main_selected.npz"
+    )
+    if selected_checkpoint.name != expected_selected_name:
+        raise AssertionError(
+            f"unexpected selected checkpoint: {selected_checkpoint.name}"
+        )
+    if args.hard and int(selected_manifest["step"]) != int(
+        selected_manifest["last_step"]
+    ):
+        raise AssertionError("hard separation must export its terminal model")
+    checkpoints = sorted(
+        path for path in (full / "ckpt").glob("*.npz")
+        if path.stem.isdigit()
+    )
     # Resume from an interior main step; with --hard also test a hard-phase cursor.
     selected = [checkpoints[0]]
     if args.hard:

@@ -79,9 +79,39 @@ After the configured point source exists:
 ftgspp train --config data/my_capture/ftgspp.yaml --devices 0
 ```
 
+## View and render results
+
+Headless PNG and optional FFmpeg video export work with the default install:
+
+```bash
+ftgspp render --run /path/to/run --camera 0 --time 1.25 \
+  --device 0 --output frames/still
+```
+
+For a local GLFW / Dear ImGui window, build the desktop option and open a run:
+
+```bash
+bash scripts/setup.sh --with-viewer
+ftgspp viewer --run /path/to/run --device 0
+```
+
+On an SSH GPU server without a display session, install the browser server and
+forward its loopback port:
+
+```bash
+bash scripts/setup.sh --with-remote
+ftgspp viewer --remote --run /path/to/run --device 0
+ssh -L 8765:127.0.0.1:8765 USER@SERVER
+```
+
+Open the exact tokenized URL printed by the server. Both viewers use the native
+Vulkan 4DGS renderer and support capture/free cameras, playback, screenshots,
+camera paths and export. See [viewer setup, controls and limits](docs/viewer.md).
+
 ## Next
 
 - [Foreground, DA3, SelfCap, research YAML](docs/usage.md)
+- [Local, SSH browser and headless viewers](docs/viewer.md)
 - [SelfCap train-only speed](docs/performance.md)
 - [Architecture](docs/architecture.md)
 - [Migration from older FTGSPP layouts](docs/migration.md)

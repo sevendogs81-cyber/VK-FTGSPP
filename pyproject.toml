@@ -16,6 +16,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-subtests>=0.14", "build>=1.2"]
+remote = ["websockets>=15,<16"]
 tensorboard = ["tensorboard>=2.18"]
 # DA3 publishes a broad application/training dependency list.  FTGSPP uses
 # only its inference API, so the uv metadata override below replaces that list
@@ -59,8 +60,12 @@ sdist.include = [
     "native/**/*.cpp", "native/**/*.h", "native/**/*.slang",
     "native/**/*.comp", "native/**/*.glsl", "native/*.py", "native/CMakeLists.txt",
     "native/shaders/radix_sort/LICENSE", "src/**/*.py", "src/**/*.yaml",
-    "dev/tests/**/*.py", "dev/tools/*.py", "dev/tools/README.md", "dev/README.md",
-    "docs/*.md", "scripts/setup.sh", "scripts/README.md",
+    "src/ftgspp/viewer/*.html",
+    "dev/tests/**/*.py", "dev/tests/*.cjs", "dev/tools/*.py", "dev/tools/README.md", "dev/README.md",
+    "docs/README.md", "docs/architecture.md", "docs/install.md",
+    "docs/migration.md", "docs/performance.md", "docs/usage.md",
+    "docs/viewer.md",
+    "scripts/setup.sh", "scripts/README.md",
     "examples/*.yaml", "examples/*.json",
     ".github/workflows/*.yml", "LICENSE", "LICENSES/*", "THIRD_PARTY.md",
     "CONTRIBUTING.md", "uv.lock",
@@ -72,6 +77,11 @@ sdist.exclude = [
     "docs/foreground_reconstruction_plan.md",
     "docs/initialization_pipeline_improvement_plan.md",
     "docs/validation.md",
+    "docs/viewer_plan.md",
+    "docs/viewer_performance.md",
+    "docs/viewer_rgba8.md",
+    "docs/viewer_benchmark_*.json",
+    "docs/viewer_rgba8_benchmark_*.json",
 ]
 
 [tool.pytest.ini_options]

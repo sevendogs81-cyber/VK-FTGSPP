@@ -32,6 +32,13 @@ a data/training choice; it is not an installation profile.
 every initialization profile, for example `bash scripts/setup.sh --with-init
 --with-lpips`, and never enables LPIPS during training.
 
+Viewer options are independent of training and initialization. `--with-viewer`
+builds the GLFW / Dear ImGui X11 window and installs its required X11 headers.
+`--with-remote` installs the lightweight `websockets` dependency for the SSH
+browser viewer; it needs no server display or desktop build. Headless
+`ftgspp render` is part of the core install. The two viewer flags can be
+combined with each other and with initialization or LPIPS flags.
+
 | Available inputs | Setup command |
 |---|---|
 | Required masks and point-cloud set are already prepared | `bash scripts/setup.sh` |
@@ -39,6 +46,8 @@ every initialization profile, for example `bash scripts/setup.sh --with-init
 | Masks are ready; DA3 points or automatic carving bounds are needed | `bash scripts/setup.sh --with-da3` |
 | Start from raw RGB | `bash scripts/setup.sh --with-init` |
 | Add LPIPS to any profile | Add `--with-lpips` to the same setup command |
+| Add the local desktop viewer | Add `--with-viewer` to the same setup command |
+| Add the SSH browser viewer | Add `--with-remote` to the same setup command |
 
 Each setup run synchronizes the selected profile. Use `--with-init` or pass
 both component flags in the same command when both must remain installed.
@@ -49,7 +58,8 @@ the wheel only provides the `ftgspp` command.
 ## What the script does
 
 1. Installs `build-essential`, `git`, `curl`, `libvulkan-dev`, and `libglm-dev`
-   with `apt-get` when they are missing (unless `--skip-apt`).
+   with `apt-get` when they are missing (unless `--skip-apt`). A
+   `--with-viewer` build also installs the required X11 development headers.
 2. Downloads Slang **2026.10** to `$HOME/.local/slang-2026.10` when `slangc`
    2026.10 is not already on `PATH`, and checks the same tarball checksum as
    CI (`beddadd9b481…`).
@@ -57,7 +67,8 @@ the wheel only provides the `ftgspp` command.
    is not already on `PATH`.
 4. Creates `.venv` with Python **3.12.x**, appends Slang to that venv's
    `activate` script, then synchronizes the locked core environment plus the
-   initialization components selected on the command line.
+   optional components selected on the command line, then rebuilds the wheel
+   with the selected desktop-viewer setting.
 5. Imports every selected component and rejects dependencies resolved from a
    foreign `.pth`/`PYTHONPATH` location outside `.venv`.
 6. Runs `ftgspp doctor --devices 0` unless `--skip-doctor`.
@@ -80,6 +91,8 @@ copy is older.
 | BiRefNet-HR masks | PyTorch/TorchVision, Transformers, Safetensors, timm, Kornia, einops, and pinned `ZhengPeng7/BiRefNet_HR` | With `--with-birefnet` or `--with-init`; model weights require network or a populated Hugging Face cache |
 | DA3 points/carving | PyTorch/TorchVision, pinned `depth-anything-3==0.1.1`, Addict, evo, ImageIO/MoviePy, Pillow, plyfile, and trimesh | With `--with-da3` or `--with-init`; model weights require network or a populated cache |
 | Locked final-test LPIPS | PyTorch, TorchMetrics and TorchVision | With `--with-lpips`; only needed for `ftgspp eval --lpips` |
+| SSH browser viewer | websockets 15.x | With `--with-remote`; server remains loopback-only and display-free |
+| Local desktop viewer | GLFW 3.4, Dear ImGui v1.91.9b and X11 development headers | With `--with-viewer`; archives are fetched by CMake using pinned SHA-256 values |
 | TensorBoard | TensorBoard | No; install `.[tensorboard]` |
 
 The pinned BiRefNet-HR repository publishes a broad
@@ -127,6 +140,12 @@ uv sync --locked --no-dev --no-editable
 ftgspp doctor --devices 0
 ```
 
+For the SSH browser viewer, add `--extra remote` to the `uv sync` command.
+For the local desktop viewer, install
+`libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev`, then build
+with `-C cmake.define.FTGSPP_BUILD_VIEWER=ON`. See [viewer.md](viewer.md) for
+the complete commands and runtime requirements.
+
 For both raw-RGB initialization components, replace the `uv sync` command with:
 
 ```bash
@@ -152,11 +171,11 @@ If `slangc: not found`, Python/CMake cannot find 3.12, or Vulkan headers are
 missing, stop and fix that step. Do not pass `--devices` with two ids: the
 first release trains on one GPU.
 
-Optional extras (`[lpips]`, `[birefnet]`, `[da3]`, and `[tensorboard]`) install
-into the same venv. `scripts/setup.sh --with-init` is a convenience profile
-that selects both `[birefnet]` and `[da3]` without duplicating their dependency
-declarations. The locked `[da3]` extra includes the pinned upstream package and
-reviewed inference dependencies.
+Optional extras (`[remote]`, `[lpips]`, `[birefnet]`, `[da3]`, and
+`[tensorboard]`) install into the same venv. `scripts/setup.sh --with-init` is a
+convenience profile that selects both `[birefnet]` and `[da3]` without
+duplicating their dependency declarations. The locked `[da3]` extra includes
+the pinned upstream package and reviewed inference dependencies.
 
 ```bash
 uv sync --locked --no-dev --no-editable --extra da3

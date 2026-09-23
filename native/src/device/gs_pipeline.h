@@ -27,12 +27,25 @@ union Uniform32_t {
 };
 
 
+struct DeviceInitOptions {
+    bool require_graphics = false;
+    std::vector<const char*> instance_extensions;
+    std::function<VkSurfaceKHR(VkInstance)> create_surface;
+};
+
 class VulkanGSPipeline {
 public:
     VulkanGSPipeline();
     ~VulkanGSPipeline();
 
-    void initialize(int device_id);
+    void initialize(int device_id, const DeviceInitOptions& options = {});
+    struct GraphicsContext {
+        VkInstance instance; VkPhysicalDevice physical_device; VkDevice device;
+        VkQueue queue; uint32_t queue_family; VkSurfaceKHR surface;
+    };
+    GraphicsContext graphicsContext() const {
+        return {instance, physical_device, device, command_queue, queue_family_index, surface_};
+    }
     void cleanup();
     void cleanupBuffers(VulkanGSPipelineBuffers& buffers);
 
@@ -161,6 +174,7 @@ public:
     void waitAllComputeSlots(const char* reason);
     void drainPackedTransfers();
     RetiredTileOverflow collectRetiredTileOverflow() const;
+    uint32_t lastForwardTileCount() const;
     RetiredTileOverflow collectLastHarvestedOverflow() const;
     void clearRetiredTileOverflow();
     void setSubmissionMeta(int64_t step, bool is_train);
@@ -178,6 +192,8 @@ protected:
     virtual DeviceRequirement getDeviceRequirement() = 0;
 
     bool enableValidationLayer = false;
+    DeviceInitOptions init_options_;
+    VkSurfaceKHR surface_ = VK_NULL_HANDLE;
 
     bool commandBatchInProgress = false;
     uint32_t timestampNumWritten = 0;

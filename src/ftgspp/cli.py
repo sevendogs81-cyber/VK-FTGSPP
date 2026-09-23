@@ -17,6 +17,7 @@ from ftgspp.io.export_selection import (
 from ftgspp.io.hashing import file_sha256
 
 _PREPARE_SUBCOMMANDS = {
+    "viewer": "publish portable viewer camera/time metadata from an existing run",
     "dataset": "index a rectangular image grid or validate a view manifest",
     "masks": "generate a BiRefNet mask cache (optional extra)",
     "points": "carve masks or hull-filter existing points, then apply IBR color",
@@ -46,6 +47,10 @@ def _dispatch_prepare(rest: list[str]) -> None:
         print(_prepare_help(), end="")
         return
     name = rest[0]
+    if name == "viewer":
+        from ftgspp.viewer.app import prepare_main
+        prepare_main(rest[1:])
+        return
     if name == "masks":
         from ftgspp.optional.birefnet import main as prepare_masks
         prepare_masks(rest[1:])
@@ -82,6 +87,10 @@ def _dispatch_prepare(rest: list[str]) -> None:
 
 def main(argv: list[str] | None = None) -> None:
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] in ("viewer", "render"):
+        from ftgspp.viewer.app import main as viewer_main
+        viewer_main(argv[1:], command=argv[0])
+        return
     if argv and argv[0] == "prepare":
         _dispatch_prepare(argv[1:])
         return
@@ -89,11 +98,14 @@ def main(argv: list[str] | None = None) -> None:
         prog="ftgspp",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
-            "prepare subcommands: dataset, masks, points, selfcap, final-test. "
+            "prepare subcommands: viewer, dataset, masks, points, selfcap, "
+            "final-test. "
             "See: ftgspp prepare --help"
         ),
     )
     commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("viewer", help="open the local or SSH browser viewer")
+    commands.add_parser("render", help="headless camera/path PNG and optional video export")
     doctor = commands.add_parser("doctor", help="check native devices without creating a run")
     doctor.add_argument("--devices", nargs="+", type=int, default=[0])
     train = commands.add_parser("train", help="train from YAML or resume a V6 run")
@@ -108,6 +120,13 @@ def main(argv: list[str] | None = None) -> None:
     train.add_argument(
         "--pipeline", choices=("scene", "foreground"),
         help="select the full-scene or foreground-target profile",
+    )
+    train.add_argument(
+        "--hard-separation", action="store_true",
+        help=(
+            "enable HS for a new run, or with --resume start HS from the "
+            "run's retained main-selected checkpoint"
+        ),
     )
     train.add_argument("--set", action="append", default=[], metavar="KEY=VALUE")
     evaluate = commands.add_parser("eval", help="evaluate a completed run")
@@ -165,6 +184,16 @@ def main(argv: list[str] | None = None) -> None:
             config.run.output_path = args.resume.resolve()
             config.train.resume = True
             config.run.overwrite_completed = True
+            if args.hard_separation:
+                from ftgspp.io.checkpoint import MAIN_SELECTED_CHECKPOINT
+                selected = args.resume.resolve() / "ckpt" / MAIN_SELECTED_CHECKPOINT
+                if not selected.is_file():
+                    parser.error(
+                        "the run has no retained main-selected checkpoint: "
+                        f"{selected}"
+                    )
+                config.train.hard_separation = True
+                config.train.resume_checkpoint = selected
         else:
             path = args.config.expanduser().resolve()
             node = OmegaConf.load(path)
@@ -191,6 +220,10 @@ def main(argv: list[str] | None = None) -> None:
             if args.pipeline:
                 overrides = OmegaConf.merge(
                     overrides, {"pipeline": {"mode": args.pipeline}},
+                )
+            if args.hard_separation:
+                overrides = OmegaConf.merge(
+                    overrides, {"train": {"hard_separation": True}},
                 )
             # YAML path overrides passed via CLI are relative to the invoking cwd.
             path_keys = ("data.root", "data.video_path", "data.calibration_path",

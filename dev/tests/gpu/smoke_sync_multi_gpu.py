@@ -426,7 +426,9 @@ def main() -> None:
             np.testing.assert_array_equal(value, natives[1].get_optimizer_state()[key],
                                           err_msg="before hard split: " + key)
         # Exercise the destructive phase boundary once: every replica must
-        # produce the same binary gate assignment and static velocities.
+        # produce the same binary persistence assignment without changing
+        # motion merely because a Gaussian is persistent.
+        before_hard = [native.get_dynamic_gaussians() for native in natives]
         _stage("running hard separation gate split")
         with ThreadPoolExecutor(max_workers=2) as executor:
             separation = list(executor.map(
@@ -435,13 +437,16 @@ def main() -> None:
         if any(dict(value) != dict(separation[0]) for value in separation[1:]):
             raise AssertionError(f"hard split counts diverged: {separation}")
         hard_states = [native.get_dynamic_gaussians() for native in natives]
-        for state in hard_states:
+        for before, state in zip(before_hard, hard_states, strict=True):
             velocities_gates = np.asarray(state["velocities_gates"])
             gates = velocities_gates[:, 3]
             if not np.all(np.isin(gates, (-100.0, 100.0))):
                 raise AssertionError("hard separation left non-binary gate values")
-            if np.any(np.abs(velocities_gates[gates > 0.0, :3]) > 1e-7):
-                raise AssertionError("hard separation left static velocities")
+            np.testing.assert_array_equal(
+                velocities_gates[:, :3],
+                np.asarray(before["velocities_gates"])[:, :3],
+                err_msg="hard persistence changed velocities",
+            )
         np.testing.assert_array_equal(
             np.asarray(hard_states[0]["velocities_gates"]),
             np.asarray(hard_states[1]["velocities_gates"]),
@@ -478,7 +483,11 @@ def main() -> None:
         for key in hard_optimizer[0]:
             if key != "relocation_stats":
                 np.testing.assert_array_equal(hard_optimizer[0][key], hard_optimizer[1][key], err_msg=key)
-        assert not np.any(hard_optimizer[0]["g_velocities_gates"])
+        velocity_gate_moments = np.asarray(
+            hard_optimizer[0]["g_velocities_gates"]
+        )
+        assert np.any(velocity_gate_moments[..., :3])
+        assert not np.any(velocity_gate_moments[..., 3])
         print(
             "FTGSPP Vulkan pair sync smoke passed:",
             f"devices={args.devices}",

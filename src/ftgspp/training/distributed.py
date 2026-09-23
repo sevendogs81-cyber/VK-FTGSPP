@@ -120,8 +120,8 @@ class SynchronousBackend(Protocol):
         require_dead_destinations: bool = True,
         require_alive_donors: bool = True,
     ) -> None: ...
-    def begin_hard_separation(self) -> dict[str, int]: ...
-    def resume_hard_separation(self) -> dict[str, int]: ...
+    def begin_hard_separation(self, steps: int = 3000) -> dict[str, int]: ...
+    def resume_hard_separation(self, steps: int = 3000) -> dict[str, int]: ...
     def model(self): ...
     def optimizer_state(self) -> Mapping[str, np.ndarray]: ...
     def performance_snapshot(self) -> Mapping[str, object]: ...
@@ -938,25 +938,25 @@ class SynchronousBackendGroup:
 
         self._parallel(lambda _rank, backend: backend.upload_model(model))
 
-    def begin_hard_separation(self) -> dict[str, int]:
+    def begin_hard_separation(self, steps: int = 3000) -> dict[str, int]:
         """Apply the deterministic gate split on every replica."""
         results = self._parallel(
-            lambda _rank, backend: backend.begin_hard_separation()
+            lambda _rank, backend: backend.begin_hard_separation(steps)
         )
         if not results:
-            return {"marginalized": 0, "kept": 0}
+            return {"persistent": 0, "transient": 0}
         if any(dict(value) != dict(results[0]) for value in results[1:]):
             raise RuntimeError("hard-separation split differs between replicas")
         self._recreate_collective_owner()
         return {str(key): int(value) for key, value in results[0].items()}
 
-    def resume_hard_separation(self) -> dict[str, int]:
+    def resume_hard_separation(self, steps: int = 3000) -> dict[str, int]:
         """Restore hard-phase optimizer settings on every replica."""
         results = self._parallel(
-            lambda _rank, backend: backend.resume_hard_separation()
+            lambda _rank, backend: backend.resume_hard_separation(steps)
         )
         if not results:
-            return {"marginalized": 0, "kept": 0}
+            return {"persistent": 0, "transient": 0}
         if any(dict(value) != dict(results[0]) for value in results[1:]):
             raise RuntimeError("hard-separation resume differs between replicas")
         self._recreate_collective_owner()
@@ -1055,9 +1055,9 @@ class SynchronousBackendGroup:
                 "all_dead": True,
             }
         reported_alive = int(plan.get("alive", mapping.size - reported_relocated))
-        if reported_alive + reported_relocated != mapping.size:
+        if reported_alive + reported_relocated > mapping.size:
             raise RuntimeError(
-                "native relocation plan alive count does not match mapping"
+                "native relocation plan alive/relocated counts exceed topology"
             )
         # The GPU sampler does not cap MCMC copies.  Drop extras here so the
         # broadcast mapping stays inside relocate_dynamic's [0, 50] contract.

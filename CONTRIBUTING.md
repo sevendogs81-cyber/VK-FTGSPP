@@ -22,7 +22,9 @@ may change without notice.
 
 Do not commit generated SPIR-V, extension binaries, datasets, weights, runs, or
 the local-only notes `docs/foreground_reconstruction_plan.md`,
-`docs/initialization_pipeline_improvement_plan.md`, and `docs/validation.md`.
+`docs/initialization_pipeline_improvement_plan.md`, `docs/validation.md`,
+`docs/viewer_plan.md`, `docs/viewer_performance.md`, `docs/viewer_rgba8.md`, or
+the raw `docs/viewer*_benchmark_*.json` measurements.
 Keep optional Torch imports out of the ordinary CLI/training path.
 
 Report issues with the command/config, doctor output, package/build versions and

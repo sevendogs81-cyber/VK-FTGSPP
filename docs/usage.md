@@ -65,9 +65,36 @@ ftgspp train --resume data/my_capture/runs/my_capture
 ftgspp eval --run data/my_capture/runs/my_capture --device 0
 ```
 
-A finished run already contains `gaussians.npz` (best hold-out joint
-PSNR+SSIM snapshot unless `train.export_best` is false) and
-`gaussians_4dgs.ply`. Standalone `ftgspp eval` streams the model SHA-256 check
+Hard separation (HS) is optional. When it is enabled in the initial
+configuration, ordinary training first selects its best hold-out snapshot and
+HS starts from that snapshot. A run originally completed without HS can add it
+later without retraining the ordinary phase:
+
+```bash
+ftgspp train --resume data/my_capture/runs/my_capture --hard-separation
+```
+
+This requires `model.marginal_gating: true` in the original run. The ordinary
+selection is retained as `ckpt/main_selected.npz`; an HS run additionally
+retains `ckpt/hard_final.npz`. These phase checkpoints contain the model,
+its matching color correction and the run identity needed for the phase
+handoff. Numbered checkpoints and `latest.json` remain exact Adam resume state.
+The default HS schedule is 3000 optimizer steps with one group-local relocation
+at local step 1500. It can be adjusted without changing the main schedule:
+
+```yaml
+train:
+  hard_separation_steps: 3000
+  hard_relocation_steps: [1500]  # [] disables HS relocation
+```
+
+HS relocation always scores donors from opacity and accumulated image gradient;
+the main phase may still use `train.relocation.score_mode: gate_included`.
+
+A finished run already contains `gaussians.npz` and `gaussians_4dgs.ply`.
+For a main-only run this is the best hold-out joint PSNR+SSIM snapshot unless
+`train.export_best` is false; for an HS run it is the terminal HS model.
+Standalone `ftgspp eval` streams the model SHA-256 check
 and loads only this selected model; it does not restore an optimizer checkpoint.
 `ftgspp export` only writes another PLY path:
 
@@ -78,8 +105,14 @@ ftgspp export --model data/my_capture/runs/my_capture/gaussians.npz \
 
 Checkpoints are V6 only. Hold-out eval shares `train.checkpoint_interval`
 with optional optimizer snapshots (`train.save_checkpoints`).
-`train.hard_separation` stays off unless you also enable
-`model.marginal_gating`.
+The `scene` profile enables color correction, marginal gating,
+gate-included relocation scoring, and hard separation by default. The
+`foreground` profile enables marginal gating and gate-included relocation
+scoring while leaving color correction and hard separation off. Explicit YAML
+settings override these profile defaults. When HS is enabled, it binarizes
+persistent/transient gates, preserves and refines velocity independently,
+restricts relocation to the same gate group, and exports the terminal hard-phase
+model.
 
 Leave DA3 sizing knobs unset. The total experiment budget remains
 `init.num_gaussians`; initialization dynamically resolves DA3 work from that
@@ -127,8 +160,8 @@ The pipeline pins `ZhengPeng7/BiRefNet_HR` model code and weights to an audited
 revision and uses its 2048-square inference size. CUDA uses float16 weights and
 autocast and starts with a batch of two; an
 out-of-memory batch is retried at a smaller size. Use `--precision float32` for
-a numerical control, `--batch-size 1` for a fixed low-memory run, or pin
-select another model revision with `--model-revision`. The resolved model,
+a numerical control, `--batch-size 1` for a fixed low-memory run, or select a
+specific model revision with `--model-revision`. The resolved model,
 revision, resolution, precision, effective batch sizes and throughput are
 recorded in the manifest. Image decode/hash is prefetched on CPU while the
 current batch runs; restored masks, optional raw arrays and QA overlays are
@@ -285,7 +318,8 @@ Validation rejects any camera/frame, path, or RGB hash already used by
 training or checkpoint selection. Official evaluation is `ftgspp eval`.
 Scripts under `dev/tools/` are unsupported research helpers.
 
-Optional extras: `[da3]`, `[lpips]`, `[birefnet]`, and `[tensorboard]`.
+Optional extras: `[da3]`, `[lpips]`, `[birefnet]`, `[remote]`, and
+`[tensorboard]`.
 `scripts/setup.sh --with-init` combines `[birefnet]` and `[da3]` for users
 starting from raw RGB. LPIPS is enabled only by `ftgspp eval --lpips` with a
 locked final-test manifest. The native model-flow renderer remains diagnostic

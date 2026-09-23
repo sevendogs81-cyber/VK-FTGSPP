@@ -14,10 +14,14 @@ but is in development and not a supported user path.
   updates, two phase schedules, evaluation and bounded image prefetch. Pair
   updates exist but are in development.
 - `src/ftgspp/io`: explicit NPZ models, V6 checkpoints, PLY.
+- `src/ftgspp/viewer`: viewer asset validation, sessions, camera paths,
+  headless export and the loopback SSH browser server.
 - `src/ftgspp/optional`: BiRefNet-HR masks, visual-hull/IBR preparation,
   final-test-only LPIPS, and lazy DA3 integration. CLI imports remain lazy.
 - `native/src/device`: buffers, compute/transfer submission, timing and telemetry.
-- `native/src/render`: projection/rasterization and adaptive dispatch selection.
+- `native/src/render`: projection/rasterization, adaptive dispatch selection and
+  the reusable offscreen viewer renderer.
+- `native/src/viewer`: optional GLFW / Dear ImGui presentation and controls.
 - `native/src/training`: backward, Adam, relocation and hard-separation kernels.
 - `native/src/collective`: session-scoped pair transport and generation state.
 - `native/src/bindings`: NumPy/Python boundary; `common` holds native configuration.
@@ -92,9 +96,16 @@ document them as a user workflow.
 
 ## Phases and persistence
 
-Main training and the 5000-step hard-separation phase share one optimizer-update
-implementation. Hard separation has its own local Adam step, seed, LR/freezes and
-fresh moments; resume restores phase configuration without splitting twice.
+Main training and the hard-separation phase share one optimizer-update
+implementation. Hard separation defaults to 3000 steps with one group-local
+relocation at local step 1500. It has its own local Adam step, seed, LR/freezes
+and fresh moments. It binarizes persistence without zeroing motion, keeps gates
+fixed, continues low-rate velocity optimization, uses opacity-and-gradient donor
+scoring within each persistence group, and exports the terminal hard-phase state.
+Before the split, the
+runner restores the selected main-phase model rather than using the last main
+step. The same retained handoff lets a completed non-HS run add HS later. Resume
+restores phase configuration without splitting twice.
 A phase barrier recreates the pair mailbox and its generation counter.
 Phase-specific relocation/checkpoint hooks still have separate schedule loops.
 
@@ -104,8 +115,13 @@ state. The saved effective YAML is loaded without rescaling LR or schedule lengt
 `train.checkpoint_interval` is the shared hold-out eval and optional checkpoint
 cadence; `train.save_checkpoints` decides whether optimizer snapshots are written.
 One numbered checkpoint is written and latest.json is atomically replaced when
-saving is enabled. One `gaussians.npz` is the standalone final model and comes
-from the best hold-out joint PSNR+SSIM score unless `train.export_best=false`.
+saving is enabled. Independently of that cadence, `main_selected.npz` retains
+the selected ordinary model and matching color affine for an optional HS
+handoff; HS writes `hard_final.npz` for its terminal result. These omit
+main-phase Adam arrays because HS deliberately starts with fresh moments. One
+`gaussians.npz` is the standalone final model. Main-only runs use the best
+hold-out joint PSNR+SSIM score unless `train.export_best=false`; HS runs use the
+terminal hard-phase state.
 Training also writes `run.export_filename` (default `gaussians_4dgs.ply`);
 `ftgspp export` writes another PLY path. In-loop hold-out eval reduces PSNR and
 SSIM_2 on the GPU and does not compute foreground morphology/ROI diagnostics.
@@ -136,4 +152,6 @@ CMake 3.24+ (scikit-build-core may download CMake). The shader job manifest
 drives compilation and the installed resource manifest used at startup. All
 generated artifacts go to build directories or installed package resources.
 Examples stay in the git checkout and sdist; they are not installed by the
-wheel.
+wheel. The default wheel is headless and includes offscreen rendering plus the
+browser asset; `FTGSPP_BUILD_VIEWER=ON` additionally compiles the X11
+GLFW / Dear ImGui module.

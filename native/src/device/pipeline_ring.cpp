@@ -812,3 +812,9 @@ void VulkanGSPipeline::setSubmissionMeta(int64_t step, bool is_train) {
 void VulkanGSPipeline::recordTileWorkReadback(const _VulkanBuffer& src) {
     tile_work_readback_src_ = src;
 }
+
+uint32_t VulkanGSPipeline::lastForwardTileCount() const {
+    if(!compute_ring_cursor_)return 0;
+    const auto& slot=compute_slots_[(compute_ring_cursor_-1)%kComputeRingDepth];
+    return slot.wc_valid?slot.wc.exact_count:0;
+}

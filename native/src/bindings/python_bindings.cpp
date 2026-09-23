@@ -2,6 +2,8 @@
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
 #include "render/gs_renderer.h"
+#include "render/forward_pass.h"
+#include "bindings/view_renderer_binding.h"
 #include "device/buffer.h"
 #include "training/gs_trainer.h"
 #include "collective/host_mailbox_owner.h"
@@ -743,8 +745,7 @@ public:
     }
 
     size_t sparse_record_words() const {
-        return 18u + active_sh_float_count(uniforms.active_sh)
-            - (config.hard_separation ? 4u : 0u);
+        return 18u + active_sh_float_count(uniforms.active_sh);
     }
 
     std::vector<PackedGradientEntry> packed_gradient_entries(
@@ -776,11 +777,7 @@ public:
             "grad_base_log_scales_opacity",
             buffers.grad_base_log_scales_opacity, 4*n);
         add("grad_times_durations", buffers.grad_times_durations, 2*n);
-        // Hard separation freezes velocity/gate parameters and both moments;
-        // their rank-local raw buffer is cleared by the optimizer but is never
-        // consumed. Omitting it from the exchange is therefore exact.
-        if (!config.hard_separation)
-            add("grad_velocities_gates", buffers.grad_velocities_gates, 4*n);
+        add("grad_velocities_gates", buffers.grad_velocities_gates, 4*n);
         add(
             "grad_sh_coeffs_reordered", buffers.grad_sh_coeffs,
             16*3*_CEIL_ROUND(n, SH_REORDER_SIZE));
@@ -854,10 +851,7 @@ public:
                 "grad_base_log_scales_opacity",
                 buffers.grad_base_log_scales_opacity, 4*n);
             add("grad_times_durations", buffers.grad_times_durations, 2*n);
-            // Dense fallback keeps the explicit ABI stable inside one phase;
-            // the coordinator recreates its mailbox at hard separation.
-            if (!config.hard_separation)
-                add("grad_velocities_gates", buffers.grad_velocities_gates, 4*n);
+            add("grad_velocities_gates", buffers.grad_velocities_gates, 4*n);
             add(
                 "grad_sh_coeffs_reordered", buffers.grad_sh_coeffs,
                 16*3*_CEIL_ROUND(n, SH_REORDER_SIZE));
@@ -3011,7 +3005,6 @@ public:
 
     void configure_hard_separation_phase() {
         config.hard_separation = true;
-        config.max_steps = 5000;
         config.means_lr = 0.001f*1.6e-4f;
         config.means_lr_final = config.means_lr;
         // The reference hard phase creates a fresh Gaussian optimizer with
@@ -3031,8 +3024,9 @@ public:
         // image-loss chain, but it is not part of the fresh hard-phase Adam
         // optimizer and FTGSPP assigns no L_cc regularizer in this phase.
         config.color_reg = 0.0f;
-        config.velocities_lr = 0.0f;
-        config.velocities_lr_final = 0.0f;
+        // Keep motion independent from persistence. The binary gate remains
+        // fixed, while velocities adapt at the main phase's terminal LR.
+        config.velocities_lr = config.velocities_lr_final;
         config.gates_lr = 0.0f;
         gradient_state = GradientState::Idle;
         gradient_step = -1;
@@ -3053,31 +3047,31 @@ public:
             trainer.copyFromDevice(buffers.relocation_status);
         }
         py::dict result;
-        const uint32_t marginalized = buffers.relocation_status.empty()
+        const uint32_t persistent = buffers.relocation_status.empty()
             ? 0u : buffers.relocation_status[0];
-        result["marginalized"] = marginalized;
-        result["kept"] = (uint32_t)buffers.num_splats-marginalized;
+        result["persistent"] = persistent;
+        result["transient"] = (uint32_t)buffers.num_splats-persistent;
         return result;
     }
 
     py::dict resume_hard_separation() {
-        // A resumed checkpoint already contains binary gates, zeroed dynamic
-        // velocities, and the exact Adam moments saved during separation.
+        // A resumed checkpoint already contains binary persistence gates and
+        // the exact model/Adam state saved during the hard phase.
         // Only restore phase-local runtime hyperparameters; never dispatch the
         // destructive split shader or clear any moment buffer here.
         trainer.requireFTGSPPFloat32AtomicAdd();
         configure_hard_separation_phase();
-        uint32_t marginalized = 0u;
+        uint32_t persistent = 0u;
         {
             py::gil_scoped_release release;
             trainer.copyFromDevice(buffers.velocities_gates);
             for (size_t i = 0; i < buffers.num_splats; ++i)
-                marginalized +=
+                persistent +=
                     buffers.velocities_gates[4*i+3] > 0.0f ? 1u : 0u;
         }
         py::dict result;
-        result["marginalized"] = marginalized;
-        result["kept"] = (uint32_t)buffers.num_splats - marginalized;
+        result["persistent"] = persistent;
+        result["transient"] = (uint32_t)buffers.num_splats - persistent;
         return result;
     }
 
@@ -3159,10 +3153,8 @@ public:
     }
 
     void dynamic_forward(float timestamp) {
-        auto deviceGuard = DeviceGuard(&trainer);
-        dynamic_projection_forward(timestamp);
-        process_tiles();
-        rasterize_forward();
+        ftgspp::forward_dynamic(trainer, uniforms, buffers, timestamp,
+                               config.max_duration, config.marginal_threshold);
     }
 
 
@@ -3237,6 +3229,7 @@ public:
 
 PYBIND11_MODULE(_ftgspp_vk, m) {
     m.doc() = "Standalone FTGSPP dynamic Vulkan training kernel";
+    ftgspp::bind_view_renderer(m);
     
     py::class_<VkSplat>(m, "FTGSPPVulkan")
         .def(py::init<>())

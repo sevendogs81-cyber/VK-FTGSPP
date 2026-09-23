@@ -46,6 +46,7 @@ def test_setup_separates_training_and_initialization_dependencies():
     } <= da3
     assert "foreground" not in extras
     assert "torchmetrics" not in birefnet | da3
+    assert extras["remote"] == ["websockets>=15,<16"]
     assert project["tool"]["uv"]["dependency-metadata"] == [{
         "name": "depth-anything-3",
         "version": "0.1.1",
@@ -58,6 +59,8 @@ def test_setup_separates_training_and_initialization_dependencies():
     assert "--with-init)" in setup
     assert "--with-birefnet)" in setup
     assert "--with-da3)" in setup
+    assert "--with-viewer)" in setup
+    assert "--with-remote)" in setup
     assert "--core-only" not in setup
     assert '"depth-anything-3": "depth_anything_3.api"' in setup
     assert "resolved outside .venv" in setup

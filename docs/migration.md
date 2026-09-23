@@ -21,8 +21,11 @@ There is no implicit migration of old execution semantics.
   arbitrary batch-size setting, host gradient uploader or CPU gradient reducer.
   Unknown native configuration fields fail explicitly.
 - Initialization stays in memory. The redundant standalone separated.npz is gone.
-  The final standalone model is gaussians.npz, selected by the hold-out
-  joint PSNR+SSIM score (`train.export_best`, default true). Optimizer
+  The final standalone model is gaussians.npz. A main-only run selects it by
+  hold-out joint PSNR+SSIM (`train.export_best`, default true); an enabled hard
+  separation phase starts from that main selection and exports its terminal
+  state. `ckpt/main_selected.npz` retains the phase handoff and
+  `ckpt/hard_final.npz` retains the terminal hard-phase state. Optimizer
   checkpoints are optional
   (`train.save_checkpoints`) and share `train.checkpoint_interval` with eval.
 - `scripts/setup.sh` now installs the Torch-free Vulkan training runtime by

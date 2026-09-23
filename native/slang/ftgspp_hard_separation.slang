@@ -1,9 +1,9 @@
 #include "config.slang"
 
-// Convert the learned continuous gate into two fixed groups.  Positive gate
-// logits are the marginalised/static group; non-positive logits remain in the
-// dynamic group.  The dynamic velocity is cleared for static splats and all
-// velocity/gate Adam moments are reset before the dedicated phase starts.
+// Convert the learned continuous persistence gate into two fixed groups.
+// Positive logits become persistent and non-positive logits become transient.
+// Persistence and motion are independent: velocities are preserved, while the
+// gate/velocity Adam moments are reset before the dedicated phase starts.
 layout(binding=0) RWStructuredBuffer<float4> velocities_gates;
 layout(binding=1) RWStructuredBuffer<float4> velocity_gate_moments;
 layout(binding=2) RWByteAddressBuffer status;
@@ -20,9 +20,8 @@ void main(uint3 tid : SV_DispatchThreadID, uniform Uniforms u) {
     const uint i = tid.x;
     if (i >= u.num_splats) return;
     float4 value = velocities_gates[i];
-    const bool marginalize = value.w > 0.0f;
-    if (marginalize) {
-        value.xyz = float3(0.0f);
+    const bool persistent = value.w > 0.0f;
+    if (persistent) {
         value.w = 100.0f;
         status.InterlockedAdd(0, 1u);
     } else {

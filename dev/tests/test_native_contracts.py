@@ -336,7 +336,9 @@ class NativeContractTests(unittest.TestCase):
             "write_t3_float3(float3(0), idx, raw_grad_base_xyz_ws);", adam
         )
         self.assertIn("velocities_gates[idx] = x;", adam)
-        self.assertIn("if (uniforms.reserved0 < 0.5f)", adam)
+        self.assertIn("const bool hard_phase = uniforms.reserved0 >= 0.5f", adam)
+        self.assertIn("const float fixed_gate = x.w", adam)
+        self.assertIn("x.w = fixed_gate", adam)
         self.assertIn("is_sh_skipped(uniforms.step, cid, num_sh)", adam)
 
     def test_cpp_keeps_split_multi_gpu_and_fused_single_gpu_paths(self):
@@ -859,6 +861,25 @@ class NativeContractTests(unittest.TestCase):
         self.assertIn("hard_phase_seed", runner)
         self.assertIn('phase="hard_separation"', runner)
 
+        split = (SLANG / "ftgspp_hard_separation.slang").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("value.xyz =", split)
+        self.assertIn("const bool persistent = value.w > 0.0f", split)
+        for name in (
+            "ftgspp_fused_dynamic_backward_adam.slang",
+            "ftgspp_explicit_adam.slang",
+        ):
+            adam = (SLANG / name).read_text(encoding="utf-8")
+            self.assertIn("const float fixed_gate = x.w", adam)
+            self.assertIn("float4(grad_velocity_gate.xyz, 0.0f)", adam)
+
+        self.assertIn("best_model = None", runner)
+        self.assertIn("best_metrics = None", runner)
+        self.assertIn("local_step in hard_relocation_steps", runner)
+        self.assertIn("relocation_score=opacity_gradient", runner)
+        self.assertNotIn("500 < local_step < 3000", runner)
+
     def test_color_adam_is_disabled_during_hard_separation(self):
         cpp = (ROOT / "native" / "src" / "training" / "gs_trainer.cpp").read_text(
             encoding="utf-8"
@@ -987,7 +1008,9 @@ class NativeContractTests(unittest.TestCase):
         shader = (SLANG / "ftgspp_relocation_plan.slang").read_text(
             encoding="utf-8"
         )
-        self.assertIn("donor_cdf[u.num_splats - 1u]", shader)
+        self.assertIn("u.group_relocation", shader)
+        self.assertIn("donor_cdf[u.num_splats + i]", shader)
+        self.assertIn("const uint donor = lo - begin", shader)
         self.assertNotIn("donor_cdf[i] /= cumulative", shader)
 
     def test_multi_rank_relocation_skips_redundant_host_roundtrips(self):

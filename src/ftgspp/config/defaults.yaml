@@ -101,6 +101,8 @@ train:
   color_correction_start: 3000
   color_corrector_weight: 0.001
   hard_separation: false
+  hard_separation_steps: 3000
+  hard_relocation_steps: [1500]
   seed: 0
   resume: false
   resume_checkpoint: null

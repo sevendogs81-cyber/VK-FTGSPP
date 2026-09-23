@@ -32,7 +32,8 @@ public:
     VulkanGSRenderer();
     ~VulkanGSRenderer();
 
-    void initialize(const std::map<std::string, std::string> &spirv_paths, int device_id);
+    void initialize(const std::map<std::string, std::string> &spirv_paths, int device_id,
+                    bool forward_only = false, const DeviceInitOptions& options = {});
     void cleanup();
 
     void executeProjectionForward(const VulkanGSRendererUniforms& uniforms, VulkanGSPipelineBuffers& buffers, size_t alloc_reserve=0);

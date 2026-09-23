@@ -222,6 +222,10 @@ class TrainConfig:
     color_correction_start: int = 3000
     color_corrector_weight: float = 1e-3
     hard_separation: bool = False
+    hard_separation_steps: int = 3000
+    hard_relocation_steps: list[int] = field(
+        default_factory=lambda: [1500]
+    )
     seed: int = 0
     resume: bool = False
     resume_checkpoint: Path | None = None

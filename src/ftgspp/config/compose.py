@@ -73,6 +73,15 @@ def _pipeline_profile_defaults(config: DictConfig) -> DictConfig:
     """
 
     mode = str(OmegaConf.select(config, "pipeline.mode", default="scene"))
+    if mode == "scene":
+        return OmegaConf.create({
+            "model": {"marginal_gating": True},
+            "train": {
+                "color_correction": True,
+                "hard_separation": True,
+                "relocation": {"score_mode": "gate_included"},
+            },
+        })
     if mode != "foreground":
         return OmegaConf.create({})
     raw_mask_source = OmegaConf.select(config, "data.masks.source", default=None)
@@ -103,10 +112,14 @@ def _pipeline_profile_defaults(config: DictConfig) -> DictConfig:
         },
     }
     profile: dict[str, object] = {
+        "model": {"marginal_gating": True},
         "data": {"masks": masks},
         # Carving consumes only a provenance-checked visual-hull point set.
         "init": init_profile,
-        "train": {"background": {"mode": "random_solid"}},
+        "train": {
+            "background": {"mode": "random_solid"},
+            "relocation": {"score_mode": "gate_included"},
+        },
         "eval": {
             "selector": "foreground_psnr",
         },

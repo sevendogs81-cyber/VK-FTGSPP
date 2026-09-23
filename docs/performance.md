@@ -1,9 +1,10 @@
 # Training speed (SelfCap)
 
 Head-to-head on the six SelfCap clips (`dance1`, `dance2`, `corgi1`, `corgi2`,
-`bike1`, `bike2`): 60 frames, 500k Gaussians, 30k optimizer steps, one training
-view per step, NVIDIA RTX 4090. **Every rate below is train-only.** Hold-out
-eval is stripped out of both implementations.
+`bike1`, `bike2`): 60 frames, 500k Gaussians, 30k main-phase optimizer steps,
+one training view per step, NVIDIA RTX 4090. **Every rate below is train-only.**
+Hold-out eval and the separate hard-separation phase are excluded from both
+implementations, so the time tables are not total default run times.
 
 | Label in the tables | Implementation | What was trained |
 |---|---|---|
@@ -40,7 +41,7 @@ with less log-sync noise.
 | bike2 | 54.1 | 18.5 | 106.0 | 9.4 | 118.3 | **1.96×** |
 | **Unweighted avg** | **49.2** | **20.3** | **114.5** | **8.7** | **125.2** | **2.33×** |
 
-## Scene RGB — time for 30k train steps, eval excluded
+## Scene RGB — time for 30k main-phase steps, eval and HS excluded
 
 Wall time implied by the train-only rates above (`30000 / it/s`). Lower is
 better.

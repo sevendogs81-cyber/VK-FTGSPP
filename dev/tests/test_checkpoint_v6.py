@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import tempfile
@@ -116,10 +117,14 @@ def _metadata(
             "max_duration": 1.0,
             "sh_degree": 3,
             "color_correction": True,
+            "hard_separation": False,
         },
         "algorithm": {
             "sha256": "algorithm-a",
-            "config": {"optimizer": {"iterations": 30_000}},
+            "config": {
+                "optimizer": {"iterations": 30_000},
+                "hard_separation": False,
+            },
         },
         "runtime": {
             "native_abi": "abi-1",
@@ -238,6 +243,45 @@ class CheckpointV6Tests(unittest.TestCase):
         )
         self.assertEqual(backend.model_calls, 1)
         self.assertEqual(backend.optimizer_calls, 0)
+
+    def test_supplied_model_avoids_model_download_for_selected_handoff(self):
+        backend = _SnapshotBackend()
+        selected = _model()
+        snapshot = capture_checkpoint_snapshot(
+            backend, 29_999, model=selected, optimizer_state={},
+            metadata={**_metadata(), "checkpoint_role": "selected"},
+        )
+        self.assertIs(snapshot.model, selected)
+        self.assertEqual(backend.model_calls, 0)
+        self.assertEqual(backend.optimizer_calls, 0)
+
+    def test_selected_main_handoff_only_allows_enabling_hs(self):
+        saved = _metadata()
+        current = copy.deepcopy(saved)
+        current["model_config"]["hard_separation"] = True
+        current["algorithm"]["sha256"] = "algorithm-hs"
+        current["algorithm"]["config"]["hard_separation"] = True
+        with self.assertRaisesRegex(
+            ResumeCompatibilityError, "hard_separation",
+        ):
+            validate_resume_compatibility(
+                saved, current, allow_world_size_change=False,
+            )
+        self.assertEqual(
+            validate_resume_compatibility(
+                saved, current, allow_world_size_change=False,
+                allow_hard_separation_enable=True,
+            ),
+            [],
+        )
+        current["algorithm"]["config"]["optimizer"]["iterations"] = 20_000
+        with self.assertRaisesRegex(
+            ResumeCompatibilityError, "algorithm configuration",
+        ):
+            validate_resume_compatibility(
+                saved, current, allow_world_size_change=False,
+                allow_hard_separation_enable=True,
+            )
 
     def test_world_size_change_requires_explicit_acknowledgement(self):
         saved = _metadata(world_size=2)

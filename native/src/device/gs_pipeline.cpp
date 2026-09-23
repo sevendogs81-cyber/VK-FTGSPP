@@ -75,7 +75,8 @@ VulkanGSPipeline::~VulkanGSPipeline() {
     }
 }
 
-void VulkanGSPipeline::initialize(int device_id) {
+void VulkanGSPipeline::initialize(int device_id, const DeviceInitOptions& options) {
+    init_options_ = options;
 
     if (device != VK_NULL_HANDLE || instance != VK_NULL_HANDLE)
         _THROW_ERROR("VulkanGSPipeline is already initialized");
@@ -99,7 +100,27 @@ void VulkanGSPipeline::initialize(int device_id) {
 #endif
 
     createInstance();
+    if (init_options_.create_surface)
+        surface_ = init_options_.create_surface(instance);
     selectPhysicalDevice(device_id);
+    if (surface_ != VK_NULL_HANDLE || init_options_.require_graphics) {
+        uint32_t count = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(physical_device, &count, nullptr);
+        std::vector<VkQueueFamilyProperties> families(count);
+        vkGetPhysicalDeviceQueueFamilyProperties(physical_device, &count, families.data());
+        queue_family_index = UINT32_MAX;
+        for (uint32_t i = 0; i < count; ++i) {
+            VkBool32 present = VK_TRUE;
+            if (surface_ != VK_NULL_HANDLE)
+                vkGetPhysicalDeviceSurfaceSupportKHR(physical_device, i, surface_, &present);
+            const auto required = VK_QUEUE_COMPUTE_BIT | VK_QUEUE_GRAPHICS_BIT;
+            if (present && (families[i].queueFlags & required) == required && families[i].timestampValidBits) {
+                queue_family_index = i; break;
+            }
+        }
+        if (queue_family_index == UINT32_MAX)
+            throw std::runtime_error("Selected Vulkan GPU has no compute/graphics/present queue for this display");
+    }
     createDevice();
     createCommandPool();
     createFence();
@@ -237,6 +258,10 @@ void VulkanGSPipeline::cleanup() {
         }
     }
     
+    if (instance != VK_NULL_HANDLE && surface_ != VK_NULL_HANDLE) {
+        vkDestroySurfaceKHR(instance, surface_, nullptr);
+        surface_ = VK_NULL_HANDLE;
+    }
     if (instance != VK_NULL_HANDLE) {
         vkDestroyInstance(instance, nullptr);
         instance = VK_NULL_HANDLE;
@@ -259,6 +284,8 @@ void VulkanGSPipeline::createInstance() {
     create_info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
     create_info.pNext = VK_NULL_HANDLE;
     create_info.pApplicationInfo = &app_info;
+    create_info.enabledExtensionCount = (uint32_t)init_options_.instance_extensions.size();
+    create_info.ppEnabledExtensionNames = init_options_.instance_extensions.data();
 
     if (enableValidationLayer) {
         static const char* validation_layer_name = "VK_LAYER_KHRONOS_validation";
@@ -588,8 +615,11 @@ void VulkanGSPipeline::createDevice() {
         hasSubgroupSizeControl = supported.subgroupSizeControl == VK_TRUE &&
             supported.computeFullSubgroups == VK_TRUE;
     }
+    VkPhysicalDeviceVulkan11Features vulkan11_supported{};
+    vulkan11_supported.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
     VkPhysicalDeviceVulkan12Features vulkan12_supported = {};
     vulkan12_supported.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+    vulkan12_supported.pNext = &vulkan11_supported;
     VkPhysicalDeviceFeatures2 supported_v12{};
     supported_v12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
     supported_v12.pNext = &vulkan12_supported;
@@ -600,6 +630,14 @@ void VulkanGSPipeline::createDevice() {
     vulkan12_features.timelineSemaphore =
         vulkan12_supported.timelineSemaphore;
     vulkan12_features.pNext = VK_NULL_HANDLE;
+
+    VkPhysicalDeviceVulkan11Features vulkan11_features{};
+    vulkan11_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+    if (surface_ != VK_NULL_HANDLE || init_options_.require_graphics) {
+        if (!vulkan11_supported.shaderDrawParameters)
+            throw std::runtime_error("Viewer requires Vulkan shaderDrawParameters");
+        vulkan11_features.shaderDrawParameters = VK_TRUE;
+    }
 
     float queue_priority = 1.0f;
     VkDeviceQueueCreateInfo queue_create_info = {};
@@ -634,6 +672,11 @@ void VulkanGSPipeline::createDevice() {
         feature_chain = &atomic_float_features;
     vulkan12_features.pNext = feature_chain;
 
+    if (surface_ != VK_NULL_HANDLE || init_options_.require_graphics) {
+        vulkan11_features.pNext = vulkan12_features.pNext;
+        vulkan12_features.pNext = &vulkan11_features;
+    }
+
     VkDeviceCreateInfo create_info = {};
     create_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     create_info.pQueueCreateInfos = &queue_create_info;
@@ -641,6 +684,8 @@ void VulkanGSPipeline::createDevice() {
     create_info.pEnabledFeatures = &enabledFeatures;
 
     std::vector<const char*> device_extensions;
+    if (surface_ != VK_NULL_HANDLE)
+        device_extensions.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
     if (hasSubgroupSizeControl)
         device_extensions.push_back(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
     if (hasAtomicFloatExtension)
@@ -944,7 +989,8 @@ void VulkanGSPipeline::bufferMemoryBarrier(
         barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         barrier.buffer = buffer.buffer;
         barrier.offset = 0;
-        barrier.size = buffer.size;
+        // Storage descriptors cover allocation capacity, including retained resize slack.
+        barrier.size = buffer.allocSize;
         barriers.push_back(barrier);
         srcStageFlags |= toStageMask(srcMask);
     }

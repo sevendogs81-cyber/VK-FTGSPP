@@ -5,6 +5,10 @@ resume attempts.  A :class:`CheckpointSnapshot` owns one model/optimizer host
 download; the same snapshot is written once to an immutable numbered NPZ and
 ``latest.json`` is atomically replaced with a small pointer.  This avoids the
 historical second multi-gigabyte GPU download for ``latest.npz``.
+
+Selected phase-boundary checkpoints use the same container but intentionally
+carry only the chosen model and matching color affine: hard separation resets
+Adam moments before its first update. They never advance ``latest.json``.
 """
 
 from __future__ import annotations
@@ -38,6 +42,11 @@ if TYPE_CHECKING:
 
 FORMAT = 6
 LATEST_MANIFEST = "latest.json"
+MAIN_SELECTED_CHECKPOINT = "main_selected.npz"
+HARD_FINAL_CHECKPOINT = "hard_final.npz"
+MAIN_SELECTED_ROLE = "ftgspp-main-selected-handoff-v1"
+HARD_FINAL_ROLE = "ftgspp-hard-final-v1"
+SELECTED_MODEL_ROLE = "ftgspp-selected-model-v1"
 NATIVE_ABI = "ftgspp-vulkan-community-explicit-v6-abi-v4-validity"
 SINGLE_VIEW_SAMPLING = (
     "numpy-pcg64(phase_seed+phase_local_optimizer_step)-v2"
@@ -340,10 +349,8 @@ def _algorithm_config(config: AppConfig) -> dict[str, object]:
             ),
             "background": background_metadata(config.train.background),
         },
-        # These values are currently native/Python pipeline constants rather
-        # than Hydra options. Persist them in the semantic hash so changing a
-        # shader/C++ constant cannot silently resume with a different objective
-        # merely because the user-facing config stayed identical.
+        # Persist compiled and phase-level numerical semantics alongside the
+        # user-facing optimizer configuration.
         "native_optimization_contract": {
             "image": {
                 "l1_weight": 0.8,
@@ -400,16 +407,22 @@ def _algorithm_config(config: AppConfig) -> dict[str, object]:
                 "opacity_max": 1.0 - float(np.finfo(np.float32).eps),
             },
             "hard_separation": {
-                "steps": 5000,
+                "steps": int(config.train.hard_separation_steps),
                 "means_lr": 0.001 * 1.6e-4,
                 "scale_regularization": 0.001,
                 "opacity_regularization": 0.001,
                 "gate_regularization": 0.0,
                 "color_regularization": 0.0,
-                "freeze_explicit_velocity_gate": True,
+                "freeze_persistence_gate": True,
+                "velocity_lr": "main_final",
                 "freeze_color_parameters": True,
+                "relocation_groups": "binary_persistence",
+                "relocation_steps": [
+                    int(step) for step in config.train.hard_relocation_steps
+                ],
+                "relocation_score_mode": "default",
+                "start_model": "selected_main",
                 "phase_local_sampling_step": True,
-                "phase_local_relocation_window": "500<step<3000,every=100",
             },
         },
         "relocation": {
@@ -422,6 +435,13 @@ def _algorithm_config(config: AppConfig) -> dict[str, object]:
             "score_mode_start": int(relocation.score_mode_start),
         },
         "hard_separation": bool(config.train.hard_separation),
+        "hard_phase": {
+            "steps": int(config.train.hard_separation_steps),
+            "relocation_steps": [
+                int(step) for step in config.train.hard_relocation_steps
+            ],
+            "relocation_score_mode": "default",
+        },
     }
     return dict(_jsonable(values))
 
@@ -608,12 +628,13 @@ def capture_checkpoint_snapshot(
     backend: NativeVulkanBackend,
     iteration: int,
     *,
+    model: NativeGaussians | None = None,
     optimizer_state: Mapping[str, np.ndarray] | None = None,
     metadata: Mapping[str, object] | None = None,
 ) -> CheckpointSnapshot:
     """Download model/optimizer exactly once and freeze a host snapshot."""
 
-    model = backend.model()
+    snapshot_model = backend.model() if model is None else model
     optimizer = backend.optimizer_state() if optimizer_state is None else optimizer_state
     legacy_field_keys = sorted(
         str(key) for key in optimizer if str(key).startswith("field_")
@@ -624,13 +645,13 @@ def capture_checkpoint_snapshot(
             f"state: {legacy_field_keys}"
         )
     manifest = dict(_jsonable(metadata or {}))
-    model_arrays = model.arrays()
+    model_arrays = snapshot_model.arrays()
     manifest["layout"] = {
         "model": _array_layout(model_arrays),
         "optimizer": _array_layout(optimizer),
     }
     return CheckpointSnapshot(
-        model=model,
+        model=snapshot_model,
         optimizer=optimizer,
         iteration=int(iteration),
         metadata=manifest,
@@ -778,6 +799,7 @@ def validate_resume_compatibility(
     current: Mapping[str, object],
     *,
     allow_world_size_change: bool,
+    allow_hard_separation_enable: bool = False,
 ) -> list[str]:
     """Reject semantic resume mismatches and return non-fatal warnings."""
 
@@ -888,16 +910,73 @@ def validate_resume_compatibility(
     current_model = dict(current.get("model_config", {}))
     for key in (
         "velocity_model", "marginal_gating", "max_duration", "sh_degree",
-        "color_correction", "hard_separation",
+        "color_correction",
     ):
         if saved_model.get(key) != current_model.get(key):
             errors.append(
                 f"model_config.{key} changed from {saved_model.get(key)!r} "
                 f"to {current_model.get(key)!r}"
             )
+    saved_hard = saved_model.get("hard_separation")
+    current_hard = current_model.get("hard_separation")
+    hard_enable = bool(
+        allow_hard_separation_enable
+        and saved_hard is False
+        and current_hard is True
+    )
+    if saved_hard != current_hard and not hard_enable:
+        errors.append(
+            "model_config.hard_separation changed from "
+            f"{saved_hard!r} to {current_hard!r}"
+        )
     saved_algorithm = dict(saved.get("algorithm", {}))
     current_algorithm = dict(current.get("algorithm", {}))
-    if saved_algorithm.get("sha256") != current_algorithm.get("sha256"):
+    algorithm_matches = (
+        saved_algorithm.get("sha256") == current_algorithm.get("sha256")
+    )
+
+    def align_inert_hard_phase(
+        saved_config: dict[str, object],
+        current_config: dict[str, object],
+    ) -> None:
+        """Ignore HS-only settings when the loaded model has not entered HS."""
+
+        if "hard_phase" in current_config:
+            saved_config["hard_phase"] = current_config["hard_phase"]
+        if "native_optimization_contract" in current_config:
+            saved_native = dict(
+                saved_config.get("native_optimization_contract", {})
+            )
+            current_native = dict(
+                current_config["native_optimization_contract"]
+            )
+            saved_native["hard_separation"] = current_native.get(
+                "hard_separation"
+            )
+            saved_config["native_optimization_contract"] = saved_native
+
+    if hard_enable and not algorithm_matches:
+        saved_algorithm_config = dict(saved_algorithm.get("config", {}))
+        current_algorithm_config = dict(current_algorithm.get("config", {}))
+        # HS-only settings do not affect the retained main model. A selected
+        # main handoff may therefore enable and configure its optional HS
+        # consumer while every main-phase setting remains identical.
+        saved_algorithm_config["hard_separation"] = True
+        align_inert_hard_phase(
+            saved_algorithm_config, current_algorithm_config,
+        )
+        algorithm_matches = saved_algorithm_config == current_algorithm_config
+    elif not bool(saved_hard) and not bool(current_hard) and not algorithm_matches:
+        saved_algorithm_config = dict(saved_algorithm.get("config", {}))
+        current_algorithm_config = dict(current_algorithm.get("config", {}))
+        # Disabled HS settings are inert and may be changed before a main-only
+        # resume. This also keeps checkpoints written before these fields were
+        # introduced resumable.
+        align_inert_hard_phase(
+            saved_algorithm_config, current_algorithm_config,
+        )
+        algorithm_matches = saved_algorithm_config == current_algorithm_config
+    if not algorithm_matches:
         errors.append(
             "algorithm configuration changed (loss/LR/relocation/color/"
             "hard-separation contract differs from the checkpoint)"

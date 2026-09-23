@@ -73,3 +73,14 @@ The Vulkan model-flow endpoint is a diagnostic renderer and is not
 part of the native training graph or default metrics. MEMFOF and other
 reference-flow evaluators are intentionally not bundled; users who need such
 comparisons must run them externally.
+
+## Optional desktop viewer
+
+The `FTGSPP_BUILD_VIEWER=ON` build statically includes
+[GLFW 3.4](https://github.com/glfw/glfw/tree/3.4) (zlib/libpng license) and
+[Dear ImGui v1.91.9b](https://github.com/ocornut/imgui/tree/v1.91.9b) (MIT),
+including its GLFW and Vulkan backends. Their license texts are distributed in
+`LICENSES/GLFW-ZLIB.txt` and `LICENSES/IMGUI-MIT.txt`. Archive SHA-256 pins are
+recorded in `native/CMakeLists.txt`. These dependencies are absent from the
+headless build. EasyVolcap informed the interaction design; no EasyVolcap
+runtime or source code is bundled.

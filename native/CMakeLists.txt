@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 project(FTGSPPVulkan)
 
+option(FTGSPP_BUILD_VIEWER "Build optional GLFW/ImGui desktop viewer" OFF)
 option(FTGSPP_VULKAN_VALIDATION "Enable VK_LAYER_KHRONOS_validation" OFF)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -56,25 +57,29 @@ if(NOT glm_FOUND)
 endif()
 
 # Source files
-set(SOURCES
+set(CORE_SOURCES
     src/device/buffer.cpp
     src/render/scheduler.cpp
     src/device/gs_pipeline.cpp
     src/device/pipeline_ring.cpp
     src/render/gs_renderer.cpp
-    src/training/gs_trainer.cpp
+    src/render/forward_pass.cpp
+    src/render/view_renderer.cpp
     src/device/perf_timer.cpp
-    src/collective/host_mailbox_owner.cpp
-    src/collective/sync_generation_state.cpp
-    src/bindings/python_bindings.cpp
 )
 
 # Create the Python module
-pybind11_add_module(_ftgspp_vk ${SOURCES})
+add_library(ftgspp_core STATIC ${CORE_SOURCES})
+set_target_properties(ftgspp_core PROPERTIES POSITION_INDEPENDENT_CODE ON CXX_VISIBILITY_PRESET hidden)
+target_include_directories(ftgspp_core PUBLIC src)
+target_link_libraries(ftgspp_core PUBLIC Vulkan::Vulkan glm::glm Threads::Threads)
+pybind11_add_module(_ftgspp_vk src/training/gs_trainer.cpp
+    src/collective/host_mailbox_owner.cpp src/collective/sync_generation_state.cpp
+    src/bindings/python_bindings.cpp)
 target_include_directories(_ftgspp_vk PRIVATE src)
 
 # Link libraries
-target_link_libraries(_ftgspp_vk PRIVATE 
+target_link_libraries(_ftgspp_vk PRIVATE ftgspp_core
     Vulkan::Vulkan
     glm::glm
     Threads::Threads
@@ -99,11 +104,11 @@ endif()
 
 # Compiler-specific options
 if(FTGSPP_VULKAN_VALIDATION)
-    target_compile_definitions(_ftgspp_vk PRIVATE ENABLE_VULKAN_VALIDATION_LAYER=1)
+    target_compile_definitions(ftgspp_core PUBLIC ENABLE_VULKAN_VALIDATION_LAYER=1)
 endif()
 
 if(DEFINED OPTIMIZATION_LEVEL)
-    target_compile_definitions(_ftgspp_vk PRIVATE
+    target_compile_definitions(ftgspp_core PUBLIC
         "OPTIMIZATION_LEVEL=${OPTIMIZATION_LEVEL}")
 endif()
 
@@ -134,3 +139,45 @@ add_custom_target(ftgspp_shaders ALL
 add_dependencies(_ftgspp_vk ftgspp_shaders)
 install(DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/shaders/"
     DESTINATION ftgspp/shaders FILES_MATCHING PATTERN "*.spv" PATTERN "manifest.json")
+
+if(BUILD_TESTING)
+    add_executable(viewer_pack_test tests/viewer_pack_test.cpp)
+    target_link_libraries(viewer_pack_test PRIVATE ftgspp_core)
+    add_dependencies(viewer_pack_test ftgspp_shaders)
+    # Compute GPU required; run explicitly with a chosen Vulkan device.
+endif()
+
+if(FTGSPP_BUILD_VIEWER)
+    include(FetchContent)
+    set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+    set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
+    set(GLFW_BUILD_WAYLAND OFF CACHE BOOL "" FORCE)
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+    FetchContent_Declare(glfw
+        URL https://codeload.github.com/glfw/glfw/tar.gz/refs/tags/3.4
+        URL_HASH SHA256=c038d34200234d071fae9345bc455e4a8f2f544ab60150765d7704e08f3dac01)
+    FetchContent_Declare(imgui
+        URL https://codeload.github.com/ocornut/imgui/tar.gz/refs/tags/v1.91.9b
+        URL_HASH SHA256=8e1bbc76c71d74fef2fb85db7e7ca8eba13d6a86623c54992b60162db554ffdb)
+    FetchContent_MakeAvailable(glfw imgui)
+    add_library(ftgspp_imgui STATIC
+        ${imgui_SOURCE_DIR}/imgui.cpp ${imgui_SOURCE_DIR}/imgui_draw.cpp
+        ${imgui_SOURCE_DIR}/imgui_tables.cpp ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+        ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
+        ${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp)
+    target_include_directories(ftgspp_imgui PUBLIC ${imgui_SOURCE_DIR})
+    target_link_libraries(ftgspp_imgui PUBLIC glfw Vulkan::Vulkan)
+    pybind11_add_module(_ftgspp_viewer src/viewer/presenter.cpp src/viewer/viewer_app.cpp
+        src/bindings/viewer_bindings.cpp)
+    target_link_libraries(_ftgspp_viewer PRIVATE ftgspp_core ftgspp_imgui)
+    add_dependencies(_ftgspp_viewer ftgspp_shaders)
+    install(TARGETS _ftgspp_viewer DESTINATION ftgspp)
+    if(BUILD_TESTING)
+        add_executable(viewer_display_test tests/viewer_display_test.cpp src/viewer/presenter.cpp)
+        target_link_libraries(viewer_display_test PRIVATE ftgspp_core ftgspp_imgui)
+        add_dependencies(viewer_display_test ftgspp_shaders)
+        # GPU-dependent: run explicitly with a chosen Vulkan device.
+    endif()
+endif()

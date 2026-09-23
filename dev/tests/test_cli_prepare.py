@@ -9,7 +9,7 @@ def test_top_level_help_lists_prepare_subcommands(capsys):
     else:
         raise AssertionError("expected --help to exit")
     text = " ".join(capsys.readouterr().out.split())
-    for name in ("dataset", "masks", "points", "selfcap", "final-test"):
+    for name in ("viewer", "dataset", "masks", "points", "selfcap", "final-test"):
         assert name in text
     assert "ftgspp prepare --help" in text
 
@@ -17,7 +17,7 @@ def test_top_level_help_lists_prepare_subcommands(capsys):
 def test_prepare_help_lists_subcommands_not_selfcap_only(capsys):
     main(["prepare", "--help"])
     text = capsys.readouterr().out
-    for name in ("dataset", "masks", "points", "selfcap", "final-test"):
+    for name in ("viewer", "dataset", "masks", "points", "selfcap", "final-test"):
         assert name in text
     assert "SelfCap layout adapter" in text
     assert "--scene-root" not in text
@@ -28,6 +28,7 @@ def test_prepare_without_subcommand_prints_help(capsys):
     text = capsys.readouterr().out
     assert "usage: ftgspp prepare" in text
     assert "dataset" in text
+    assert "viewer" in text
     assert "selfcap" in text
 
 

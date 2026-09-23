@@ -1399,11 +1399,12 @@ class NativeVulkanBackend:
             int(step), str(mode), bool(include_gate), int(seed) & 0xFFFFFFFF)
         return {str(key): value for key, value in values.items()}
 
-    def begin_hard_separation(self) -> dict[str, int]:
+    def begin_hard_separation(self, steps: int = 3000) -> dict[str, int]:
+        self.native.configure_ftgspp({"max_steps": int(steps)})
         values = self.native.begin_hard_separation()
         return {str(key): int(value) for key, value in values.items()}
 
-    def resume_hard_separation(self) -> dict[str, int]:
+    def resume_hard_separation(self, steps: int = 3000) -> dict[str, int]:
         """Restore separation-phase runtime config without splitting again.
 
         A mid-separation checkpoint already contains the topology produced by
@@ -1416,6 +1417,7 @@ class NativeVulkanBackend:
                 "the native module lacks resume_hard_separation; rebuild a "
                 "target with mid-hard-separation resume support"
             )
+        self.native.configure_ftgspp({"max_steps": int(steps)})
         values = method()
         return {str(key): int(value) for key, value in values.items()}
 

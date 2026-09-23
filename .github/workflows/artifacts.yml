@@ -29,8 +29,11 @@ jobs:
           installed/bin/ftgspp --help
           installed/bin/ftgspp prepare masks --help
           installed/bin/ftgspp prepare points --help
+          installed/bin/ftgspp prepare viewer --help
           installed/bin/ftgspp eval --help
-          installed/bin/python -c 'from ftgspp import _ftgspp_vk; from importlib.resources import files; import importlib.util; assert files("ftgspp").joinpath("shaders/manifest.json").is_file(); assert importlib.util.find_spec("torch") is None'
+          installed/bin/ftgspp viewer --help
+          installed/bin/ftgspp render --help
+          installed/bin/python -c 'from ftgspp import _ftgspp_vk; from importlib.resources import files; import importlib.util; assert files("ftgspp").joinpath("shaders/manifest.json").is_file(); assert files("ftgspp.viewer").joinpath("remote.html").is_file(); assert importlib.util.find_spec("torch") is None'
       - name: Check distribution contents and notices
         run: |
           uv run --no-project --python 3.12 python - <<'PY'
@@ -44,11 +47,15 @@ jobs:
                   "src/ftgspp/training/background.py",
                   "src/ftgspp/optional/birefnet.py",
                   "src/ftgspp/optional/visual_hull.py",
+                  "src/ftgspp/io/viewer_manifest.py",
+                  "src/ftgspp/viewer/remote.html",
                   "native/slang/ftgspp_image_objective.slang",
+                  "native/slang/viewer_pack.slang",
                   "docs/architecture.md",
                   "docs/migration.md",
                   "docs/install.md",
                   "docs/usage.md",
+                  "docs/viewer.md",
                   "docs/performance.md",
                   "scripts/setup.sh",
                   "tests/test_gpu_foreground_numeric.py",
@@ -63,12 +70,17 @@ jobs:
                   "docs/foreground_reconstruction_plan.md",
                   "docs/initialization_pipeline_improvement_plan.md",
                   "docs/validation.md",
+                  "docs/viewer_plan.md",
+                  "docs/viewer_performance.md",
+                  "docs/viewer_rgba8.md",
+                  "docs/viewer_benchmark_20260923.json",
+                  "docs/viewer_rgba8_benchmark_20260923.json",
               )
               for suffix in forbidden:
                   assert not any(n.endswith(suffix) for n in names), suffix
           with zipfile.ZipFile(next(Path("dist").glob("*.whl"))) as archive:
               names = archive.namelist()
-              for suffix in ("VKSPLAT-APACHE-2.0.txt", "GLM.txt", "PYBIND11-BSD-3-CLAUSE.txt", "radix_sort/LICENSE"):
+              for suffix in ("VKSPLAT-APACHE-2.0.txt", "GLM.txt", "PYBIND11-BSD-3-CLAUSE.txt", "GLFW-ZLIB.txt", "IMGUI-MIT.txt", "radix_sort/LICENSE"):
                   assert any(n.endswith(suffix) for n in names), suffix
           PY
       - uses: actions/upload-artifact@v4

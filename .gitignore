@@ -30,3 +30,8 @@ native/shaders/**/checksum.json
 /docs/foreground_reconstruction_plan.md
 /docs/initialization_pipeline_improvement_plan.md
 /docs/validation.md
+/docs/viewer_plan.md
+/docs/viewer_performance.md
+/docs/viewer_rgba8.md
+/docs/viewer_benchmark_*.json
+/docs/viewer_rgba8_benchmark_*.json

@@ -350,7 +350,9 @@ class DistributedRuntimeTests(unittest.TestCase):
         from unittest.mock import Mock
         replicas = [_PairExchangeFakeBackend(0), _PairExchangeFakeBackend(1)]
         for replica in replicas:
-            replica.begin_hard_separation = lambda: {"marginalized": 1, "kept": 1}
+            replica.begin_hard_separation = lambda _steps=3000: {
+                "persistent": 1, "transient": 1,
+            }
             replica.resume_hard_separation = replica.begin_hard_separation
         with SynchronousBackendGroup(replicas, collective_timeout_seconds=0.25) as group:
             create = replicas[0].create_pair_exchange_gpu_merge_owner

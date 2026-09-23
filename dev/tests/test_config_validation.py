@@ -99,6 +99,44 @@ class StaticConfigValidationTests(unittest.TestCase):
         self.assertEqual(config.train.background.mode, "random_solid")
         self.assertEqual(config.pipeline.eval_protocol, "foreground_v1")
         self.assertEqual(config.eval.selector, "foreground_psnr")
+        self.assertTrue(config.model.marginal_gating)
+        self.assertEqual(
+            config.train.relocation.score_mode, "gate_included",
+        )
+        self.assertFalse(config.train.color_correction)
+        self.assertFalse(config.train.hard_separation)
+        self.assertEqual(config.train.hard_separation_steps, 3000)
+        self.assertEqual(list(config.train.hard_relocation_steps), [1500])
+
+    def test_scene_pipeline_enables_gate_cc_and_hs_defaults(self):
+        config = resolve_config(OmegaConf.create({
+            "pipeline": {"mode": "scene"},
+            "data": {"root": "scene"},
+        }), base_dir=ROOT).config
+        self.assertTrue(config.model.marginal_gating)
+        self.assertEqual(
+            config.train.relocation.score_mode, "gate_included",
+        )
+        self.assertTrue(config.train.color_correction)
+        self.assertTrue(config.train.hard_separation)
+        self.assertEqual(config.train.hard_separation_steps, 3000)
+        self.assertEqual(list(config.train.hard_relocation_steps), [1500])
+
+    def test_explicit_settings_override_scene_pipeline_defaults(self):
+        config = resolve_config(OmegaConf.create({
+            "pipeline": {"mode": "scene"},
+            "data": {"root": "scene"},
+            "model": {"marginal_gating": False},
+            "train": {
+                "color_correction": False,
+                "hard_separation": False,
+                "relocation": {"score_mode": "default"},
+            },
+        }), base_dir=ROOT).config
+        self.assertFalse(config.model.marginal_gating)
+        self.assertEqual(config.train.relocation.score_mode, "default")
+        self.assertFalse(config.train.color_correction)
+        self.assertFalse(config.train.hard_separation)
 
     def test_foreground_contract_has_no_version_or_loss_strategy(self):
         config = resolve_config(OmegaConf.create({
@@ -258,6 +296,31 @@ class StaticConfigValidationTests(unittest.TestCase):
             validate_static_config(config)
         config.model.marginal_gating = True
         validate_static_config(config)
+
+    def test_invalid_hard_separation_schedule_is_rejected(self):
+        cases = (
+            (0, [1500], "steps must be greater than zero"),
+            (3000, [1500, 1500], "strictly increasing"),
+            (3000, [1600, 1500], "strictly increasing"),
+            (3000, [0], "inside the hard phase"),
+            (3000, [3000], "inside the hard phase"),
+        )
+        for steps, relocations, message in cases:
+            with self.subTest(steps=steps, relocations=relocations):
+                config = copy.deepcopy(_valid_config())
+                config.train.hard_separation_steps = steps
+                config.train.hard_relocation_steps = relocations
+                with self.assertRaisesRegex(ValueError, message):
+                    validate_static_config(config)
+
+        config = copy.deepcopy(_valid_config())
+        config.train.hard_relocation_steps = []
+        validate_static_config(config)
+
+        config = copy.deepcopy(_valid_config())
+        config.train.hard_relocation_steps = None
+        with self.assertRaisesRegex(ValueError, "must be a list"):
+            validate_static_config(config)
 
     def test_train_seed_must_be_non_negative(self):
         config = copy.deepcopy(_valid_config())

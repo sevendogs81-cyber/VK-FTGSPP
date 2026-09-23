@@ -28,7 +28,12 @@ from ftgspp.training.backend import (
 )
 from ftgspp.io.checkpoint import (
     CheckpointSnapshot,
+    HARD_FINAL_CHECKPOINT,
+    HARD_FINAL_ROLE,
+    MAIN_SELECTED_CHECKPOINT,
+    MAIN_SELECTED_ROLE,
     NATIVE_ABI,
+    SELECTED_MODEL_ROLE,
     build_checkpoint_metadata,
     capture_checkpoint_snapshot,
     collect_runtime_provenance,
@@ -37,6 +42,7 @@ from ftgspp.io.checkpoint import (
     load_model,
     publish_checkpoint,
     resolve_checkpoint_path,
+    save_checkpoint_snapshot,
     save_model,
     validate_training_clocks,
     validate_resume_compatibility,
@@ -772,7 +778,7 @@ def _validate_resume_phase_cursor(
     completed: int,
     main_iterations: int,
     hard_separation: bool,
-    hard_steps: int = 5000,
+    hard_steps: int = 3000,
 ) -> str:
     """Validate the global iteration/phase-local cursor before native upload.
 
@@ -1521,6 +1527,7 @@ class NativeRunner:
         loaded_metadata: dict[str, object] | None = None
         loaded_clocks: dict[str, int | float] | None = None
         clock_resume_warning: str | None = None
+        selected_main_handoff = False
         resume_path = self.config.train.resume_checkpoint
         if self.config.train.resume and resume_path is None:
             resume_path = latest_checkpoint(checkpoint_dir)
@@ -1533,6 +1540,23 @@ class NativeRunner:
             optimizer = dict(loaded.optimizer)
             completed = loaded.iteration
             loaded_metadata = dict(loaded.metadata)
+            selected_main_handoff = (
+                loaded_metadata.get("checkpoint_role") == MAIN_SELECTED_ROLE
+            )
+            if (
+                resume_path.name == MAIN_SELECTED_CHECKPOINT
+                and self.config.train.hard_separation
+                and not selected_main_handoff
+            ):
+                raise ValueError(
+                    "retained main selection is not eligible for hard "
+                    "separation handoff"
+                )
+            if selected_main_handoff and not self.config.train.hard_separation:
+                raise ValueError(
+                    "main-selected checkpoint is only valid for starting "
+                    "train.hard_separation=true"
+                )
             loaded_clocks, clock_resume_warning = (
                 validate_training_clocks(
                     loaded_metadata, iteration=completed,
@@ -1548,6 +1572,7 @@ class NativeRunner:
                 completed=completed,
                 main_iterations=self.config.train.iterations,
                 hard_separation=self.config.train.hard_separation,
+                hard_steps=self.config.train.hard_separation_steps,
             )
             start = completed+1
         else:
@@ -1571,13 +1596,31 @@ class NativeRunner:
                     or completed >= self.config.train.iterations
                 )
             )
-            validate_checkpoint_optimizer_state(
-                optimizer,
-                num_gaussians=len(model),
-                color_num_cameras=(
-                    len(set(dataset.cameras)) if color_state_required else 0
-                ),
-            )
+            if selected_main_handoff:
+                unexpected = set(optimizer) - {"color_params"}
+                if unexpected:
+                    raise ValueError(
+                        "main-selected handoff contains unexpected optimizer "
+                        f"arrays: {sorted(unexpected)}"
+                    )
+                if color_state_required:
+                    params = np.asarray(
+                        optimizer.get("color_params", []), dtype=np.float32,
+                    )
+                    expected = 12 * len(set(dataset.cameras))
+                    if params.size != expected or not np.all(np.isfinite(params)):
+                        raise ValueError(
+                            "main-selected handoff has invalid color_params: "
+                            f"expected {expected} finite floats, got {params.size}"
+                        )
+            else:
+                validate_checkpoint_optimizer_state(
+                    optimizer,
+                    num_gaussians=len(model),
+                    color_num_cameras=(
+                        len(set(dataset.cameras)) if color_state_required else 0
+                    ),
+                )
         if not self.config.model.marginal_gating:
             # Align convert / train-only / resume with initialize_explicit:
             # inactive gates stay at -100 and receive no Adam updates.
@@ -1703,6 +1746,7 @@ class NativeRunner:
                     allow_world_size_change=bool(
                         self.config.distributed.allow_resume_world_size_change
                     ),
+                    allow_hard_separation_enable=selected_main_handoff,
                 ):
                     logger.warning(
                         "checkpoint resume compatibility: %s", warning
@@ -1765,7 +1809,12 @@ class NativeRunner:
                         rgb_workers, rgb_prefetch_lookahead,
                     )
             if optimizer:
-                if group is None:
+                if selected_main_handoff:
+                    color_params = optimizer.get("color_params")
+                    if color_params is not None:
+                        for replica in backends:
+                            replica.set_color_params(color_params)
+                elif group is None:
                     backend.restore_optimizer(optimizer)
                 else:
                     global_stats = optimizer.get("relocation_stats")
@@ -1804,7 +1853,7 @@ class NativeRunner:
             # Upload/restore calls synchronously consume these owning arrays.
             # Keeping them in local variables would pin a complete host model
             # and (on resume) multi-GB Adam state throughout native training.
-            if loaded_metadata is not None:
+            if loaded_metadata is not None and not selected_main_handoff:
                 rasterizers = loaded_metadata.get("rasterizers", [])
                 replicas = group.backends if group is not None else [backend]
                 if len(rasterizers) != len(replicas):
@@ -1892,6 +1941,71 @@ class NativeRunner:
                 )
                 last_published_iteration = int(iteration)
                 return snapshot
+
+            def publish_selected_checkpoint(
+                selected_model: NativeGaussians,
+                selected_color_params: np.ndarray | None,
+                *,
+                filename: str,
+                role: str,
+                boundary_iteration: int,
+                phase: str,
+                phase_step: int,
+                source_step: int,
+            ) -> Path:
+                """Persist the selected model needed at a phase boundary.
+
+                HS constructs a fresh Adam optimizer, so this handoff stores
+                only the selected model and its inference-time color affine.
+                Numbered checkpoints remain the exact mid-optimizer resume
+                artifacts and continue to own ``latest.json``.
+                """
+
+                metadata = build_checkpoint_metadata(
+                    self.config, dataset, distributed,
+                    phase=phase, phase_step=phase_step,
+                    provenance=provenance,
+                    transport=(
+                        group.transport if group is not None
+                        else distributed.backend
+                    ),
+                    effective_sparse=(
+                        group.collective_sparse
+                        if group is not None else distributed.collective_sparse
+                    ),
+                    clocks={
+                        **training_clocks,
+                        "wall_seconds": (
+                            wall_clock_base
+                            + max(0.0, time.perf_counter() - begin)
+                        ),
+                    },
+                )
+                metadata.update({
+                    "checkpoint_role": role,
+                    "selected_source_step": int(source_step),
+                    "selected_pipeline_mode": str(self.config.pipeline.mode),
+                    "selected_selector": str(self.config.eval.selector),
+                })
+                selected_optimizer = {}
+                if selected_color_params is not None:
+                    selected_optimizer["color_params"] = np.ascontiguousarray(
+                        selected_color_params, dtype=np.float32,
+                    )
+                snapshot = capture_checkpoint_snapshot(
+                    backend, boundary_iteration,
+                    model=selected_model,
+                    optimizer_state=selected_optimizer,
+                    metadata=metadata,
+                )
+                target = checkpoint_dir / filename
+                save_checkpoint_snapshot(target, snapshot, overwrite=True)
+                logger.info(
+                    "selected checkpoint saved: %s (role=%s source_step=%d)",
+                    target.relative_to(self.output_path), role, source_step,
+                )
+                return target
+
             snapshot_interval = int(self.config.train.checkpoint_interval)
             save_checkpoints = bool(self.config.train.save_checkpoints)
             export_best = bool(self.config.train.export_best)
@@ -1933,18 +2047,43 @@ class NativeRunner:
             best_color_params: np.ndarray | None = None
             best_metrics: dict[str, object] | None = None
             last_eval_step: int | None = None
+            last_eval_metrics: dict[str, object] | None = None
 
             def consider_export_candidate(
                 step: int,
                 metrics: dict[str, object],
                 *,
                 checkpoint_snapshot: CheckpointSnapshot | None = None,
+                track_best: bool = True,
             ) -> None:
-                nonlocal best_model, best_color_params, best_metrics, last_eval_step
+                nonlocal best_model, best_color_params, best_metrics
+                nonlocal last_eval_step, last_eval_metrics
                 if metrics:
                     last_eval_step = int(step)
                     reporter.observe_eval(metrics)
-                if not export_best or not metrics:
+                    last_eval_metrics = {
+                        key: value for key, value in metrics.items()
+                        if key != "foreground_views"
+                    }
+                    last_eval_metrics.update({
+                        "step": int(step),
+                        "selector": str(self.config.eval.selector),
+                        "selector_constraints": {
+                            "min_silhouette_iou": (
+                                self.config.eval.selector_min_silhouette_iou
+                            ),
+                            "max_background_opacity_leakage": (
+                                self.config.eval.selector_max_background_opacity_leakage
+                            ),
+                            "max_foreground_holes": (
+                                self.config.eval.selector_max_foreground_holes
+                            ),
+                            "min_boundary_fscore": (
+                                self.config.eval.selector_min_boundary_fscore
+                            ),
+                        },
+                    })
+                if not track_best or not export_best or not metrics:
                     return
                 if not holdout_is_better(
                     metrics, best_metrics, selector=self.config.eval.selector,
@@ -1978,28 +2117,7 @@ class NativeRunner:
                     )
                 else:
                     best_color_params = None
-                best_metrics = {
-                    key: value for key, value in metrics.items()
-                    if key != "foreground_views"
-                }
-                best_metrics.update({
-                    "step": int(step),
-                    "selector": str(self.config.eval.selector),
-                    "selector_constraints": {
-                        "min_silhouette_iou": (
-                            self.config.eval.selector_min_silhouette_iou
-                        ),
-                        "max_background_opacity_leakage": (
-                            self.config.eval.selector_max_background_opacity_leakage
-                        ),
-                        "max_foreground_holes": (
-                            self.config.eval.selector_max_foreground_holes
-                        ),
-                        "min_boundary_fscore": (
-                            self.config.eval.selector_min_boundary_fscore
-                        ),
-                    },
-                })
+                best_metrics = dict(last_eval_metrics or {})
                 primary_metric = primary_metric_name(self.config.eval.selector)
                 primary_score = float(best_metrics[primary_metric])
                 joint_score = joint_quality_score(
@@ -2282,10 +2400,97 @@ class NativeRunner:
                 del checkpoint_snapshot
 
             if self.config.train.hard_separation and not main_terminated_all_dead:
-                separate_steps = 5000
+                separate_steps = int(self.config.train.hard_separation_steps)
+                hard_relocation_steps = frozenset(
+                    int(step)
+                    for step in self.config.train.hard_relocation_steps
+                )
+                logger.info(
+                    "hard separation schedule: steps=%d relocation_steps=%s "
+                    "relocation_score=opacity_gradient",
+                    separate_steps, sorted(hard_relocation_steps),
+                )
+                resuming_hard_phase = resume_phase.startswith("hard_separation")
+                if not selected_main_handoff and not resuming_hard_phase:
+                    # Complete ordinary model selection before crossing the
+                    # phase boundary. The last main step is a valid candidate
+                    # even when it is off the periodic checkpoint cadence.
+                    if dataset.eval_views and last_eval_step != last:
+                        consider_export_candidate(
+                            last,
+                            self._evaluate(
+                                backend, dataset, last, group=group,
+                                clocks=dict(training_clocks),
+                            ),
+                        )
+                    if (
+                        export_best
+                        and best_model is not None
+                        and best_metrics is not None
+                    ):
+                        main_selected_model = best_model
+                        main_selected_color = best_color_params
+                        main_selected_step = int(best_metrics["step"])
+                    else:
+                        main_selected_model = backend.model()
+                        main_selected_color = (
+                            backend.color_params()
+                            if self.config.train.color_correction else None
+                        )
+                        main_selected_step = int(last)
+                    publish_selected_checkpoint(
+                        main_selected_model,
+                        main_selected_color,
+                        filename=MAIN_SELECTED_CHECKPOINT,
+                        role=MAIN_SELECTED_ROLE,
+                        boundary_iteration=self.config.train.iterations - 1,
+                        phase="main_complete",
+                        phase_step=self.config.train.iterations - 1,
+                        source_step=main_selected_step,
+                    )
+                    if main_selected_step != int(last):
+                        if group is not None:
+                            group.upload_model(main_selected_model)
+                        else:
+                            backend.upload_model(main_selected_model)
+                    if main_selected_color is not None:
+                        for replica in backends:
+                            replica.set_color_params(main_selected_color)
+                    logger.info(
+                        "hard separation starts from selected main snapshot "
+                        "step %d (main last step %d)",
+                        main_selected_step, last,
+                    )
+                    del main_selected_model, main_selected_color
+                elif selected_main_handoff:
+                    main_selected_step = int(
+                        (loaded_metadata or {}).get(
+                            "selected_source_step",
+                            self.config.train.iterations - 1,
+                        )
+                    )
+                    logger.info(
+                        "hard separation starts from retained main-selected "
+                        "checkpoint source step %d",
+                        main_selected_step,
+                    )
+                else:
+                    logger.info(
+                        "hard separation resumes directly from phase checkpoint "
+                        "step %d; retained main selection is left unchanged",
+                        int(completed),
+                    )
+                # HS is a terminal recovery pass. Its output contract is the
+                # state after all hard-phase updates, while main_selected.npz
+                # remains the retained soft-gate comparison/fallback model.
+                best_model = None
+                best_color_params = None
+                best_metrics = None
+                last_eval_step = None
+                last_eval_metrics = None
                 # Checkpoints use the globally unique iteration namespace:
                 # main phase 0..iterations-1, separation phase
-                # iterations..iterations+4999.
+                # iterations..iterations+hard_separation_steps-1.
                 separation_start = max(0, start - self.config.train.iterations)
                 separation_already_complete = (
                     resume_phase == "hard_separation_complete"
@@ -2297,38 +2502,41 @@ class NativeRunner:
                     # phase runtime flags.  Restore the config-only separation
                     # state; never dispatch the split shader again.
                     separation = (
-                        group.resume_hard_separation()
-                        if group is not None else backend.resume_hard_separation()
+                        group.resume_hard_separation(separate_steps)
+                        if group is not None
+                        else backend.resume_hard_separation(separate_steps)
                     )
                     logger.info(
-                        "hard separation already completed in resumed checkpoint "
-                        "(completed local steps=%d, marginalized=%d kept=%d); "
+                        "hard persistence already completed in resumed checkpoint "
+                        "(completed local steps=%d, persistent=%d transient=%d); "
                         "skipping optimizer steps",
                         separation_start,
-                        separation["marginalized"], separation["kept"],
+                        separation["persistent"], separation["transient"],
                     )
                 elif separation_start == 0:
                     separation = (
-                        group.begin_hard_separation()
-                        if group is not None else backend.begin_hard_separation()
+                        group.begin_hard_separation(separate_steps)
+                        if group is not None
+                        else backend.begin_hard_separation(separate_steps)
                     )
                     logger.info(
-                        "starting native hard separation: marginalized=%d kept=%d",
-                        separation["marginalized"], separation["kept"],
+                        "starting native hard persistence: persistent=%d transient=%d",
+                        separation["persistent"], separation["transient"],
                     )
                 else:
                     # Topology was already split before this checkpoint. The
                     # native resume entry restores phase-specific LR/regularizer
                     # config without applying the destructive split twice.
                     separation = (
-                        group.resume_hard_separation()
-                        if group is not None else backend.resume_hard_separation()
+                        group.resume_hard_separation(separate_steps)
+                        if group is not None
+                        else backend.resume_hard_separation(separate_steps)
                     )
                     logger.info(
-                        "resuming native hard separation at local step %d/%d "
-                        "(marginalized=%d kept=%d)",
+                        "resuming native hard persistence at local step %d/%d "
+                        "(persistent=%d transient=%d)",
                         separation_start, separate_steps,
-                        separation["marginalized"], separation["kept"],
+                        separation["persistent"], separation["transient"],
                     )
                 separation_loop_start = (
                     separate_steps
@@ -2432,20 +2640,27 @@ class NativeRunner:
                             scalars["gate"],
                             scalars["color_cc"],
                         )
-                    if 500 < local_step < 3000 and local_step % 100 == 0:
+                    if local_step in hard_relocation_steps:
                         relocation = self.config.train.relocation
                         result = (
                             group.relocate(
                                 local_step, relocation.mode,
-                                relocation.score_mode == "gate_included",
+                                False,
                                 self.config.train.seed,
                             )
                             if group is not None
                             else backend.relocate_native(
                                 local_step, relocation.mode,
-                                relocation.score_mode == "gate_included",
+                                False,
                                 self.config.train.seed,
                             )
+                        )
+                        logger.info(
+                            "hard separation local step %d: relocated %d "
+                            "Gaussians within persistence groups "
+                            "(alive=%d, donor_score=opacity_gradient)",
+                            local_step, int(result["relocated"]),
+                            int(result["alive"]),
                         )
                         if result["all_dead"]:
                             logger.warning("hard separation stopped: every Gaussian is dead")
@@ -2469,7 +2684,7 @@ class NativeRunner:
                                 backend, dataset, global_step, group=group,
                                 clocks=dict(training_clocks),
                             ),
-                            checkpoint_snapshot=hard_checkpoint_snapshot,
+                            track_best=False,
                         )
                     del hard_checkpoint_snapshot
                     verify_interval = distributed.verify_replica_interval
@@ -2520,6 +2735,10 @@ class NativeRunner:
                     "with an all-dead Gaussian topology"
                 )
 
+            hard_phase_output = bool(
+                self.config.train.hard_separation
+                and not main_terminated_all_dead
+            )
             if dataset.eval_views and last_eval_step != last:
                 consider_export_candidate(
                     last,
@@ -2527,9 +2746,15 @@ class NativeRunner:
                         backend, dataset, last, group=group,
                         clocks=dict(training_clocks),
                     ),
+                    track_best=not hard_phase_output,
                 )
 
-            if export_best and best_model is not None and best_metrics is not None:
+            if (
+                export_best
+                and not hard_phase_output
+                and best_model is not None
+                and best_metrics is not None
+            ):
                 final = best_model
                 final_color_params = best_color_params
                 primary_metric = primary_metric_name(
@@ -2605,29 +2830,42 @@ class NativeRunner:
                     "ssim_variant": "SSIM_2",
                     "ssim_data_range": 2.0,
                 }
-                if best_metrics is not None and int(best_metrics["step"]) == int(last):
-                    selection["psnr"] = float(best_metrics["psnr"])
-                    selection["ssim"] = float(best_metrics["ssim"])
-                    selection["views"] = int(best_metrics.get("views", 0))
+                selected_metrics = (
+                    last_eval_metrics
+                    if last_eval_metrics is not None
+                    and int(last_eval_metrics["step"]) == int(last)
+                    else None
+                )
+                if selected_metrics is not None:
+                    selection["psnr"] = float(selected_metrics["psnr"])
+                    selection["ssim"] = float(selected_metrics["ssim"])
+                    selection["views"] = int(selected_metrics.get("views", 0))
                     primary_metric = primary_metric_name(
-                        str(best_metrics["selector"])
+                        str(selected_metrics["selector"])
                     )
-                    selection["selector"] = str(best_metrics["selector"])
+                    selection["selector"] = str(selected_metrics["selector"])
                     selection["primary_metric"] = primary_metric
                     selection["primary_score"] = float(
-                        best_metrics[primary_metric]
+                        selected_metrics[primary_metric]
                     )
                     selection.update(joint_selection_fields(
-                        float(best_metrics[primary_metric]),
-                        float(best_metrics["ssim"]),
+                        float(selected_metrics[primary_metric]),
+                        float(selected_metrics["ssim"]),
                     ))
                     selection["candidate_evaluation_scope"] = str(
-                        best_metrics.get("evaluation_scope", "candidate_subset")
+                        selected_metrics.get(
+                            "evaluation_scope", "candidate_subset",
+                        )
                     )
                     selection["candidate_views"] = int(
-                        best_metrics.get("views", 0)
+                        selected_metrics.get("views", 0)
                     )
-                if export_best and dataset.eval_views and best_metrics is None:
+                if (
+                    not hard_phase_output
+                    and export_best
+                    and dataset.eval_views
+                    and best_metrics is None
+                ):
                     selection["fallback_reason"] = "no_candidate_passed_selector_gates"
                     selection["selector"] = str(self.config.eval.selector)
                     selection["selector_constraints"] = {
@@ -2652,6 +2890,9 @@ class NativeRunner:
                         group.upload_model(final)
                     else:
                         backend.upload_model(final)
+                if final_color_params is not None:
+                    for replica in backends:
+                        replica.set_color_params(final_color_params)
                 full_metrics = self._evaluate(
                     backend,
                     dataset,
@@ -2702,6 +2943,61 @@ class NativeRunner:
                     )
                 )
 
+            if self.config.train.hard_separation and not main_terminated_all_dead:
+                selected_checkpoint = publish_selected_checkpoint(
+                    final,
+                    final_color_params,
+                    filename=HARD_FINAL_CHECKPOINT,
+                    role=HARD_FINAL_ROLE,
+                    boundary_iteration=int(last),
+                    phase="hard_separation_complete",
+                    phase_step=max(
+                        0, int(last) - self.config.train.iterations,
+                    ),
+                    source_step=int(selection["step"]),
+                )
+                selection["phase"] = "hard_separation"
+                selection["hard_separation_schedule"] = {
+                    "steps": int(separate_steps),
+                    "relocation_steps": sorted(hard_relocation_steps),
+                    "relocation_score_mode": "default",
+                    "relocation_groups": "binary_persistence",
+                }
+                main_selected_path = checkpoint_dir / MAIN_SELECTED_CHECKPOINT
+                if main_selected_path.is_file():
+                    selection["parent_checkpoint_artifact"] = str(
+                        main_selected_path.relative_to(self.output_path)
+                    )
+            else:
+                selected_checkpoint = publish_selected_checkpoint(
+                    final,
+                    final_color_params,
+                    filename=MAIN_SELECTED_CHECKPOINT,
+                    role=(
+                        SELECTED_MODEL_ROLE
+                        if main_terminated_all_dead else MAIN_SELECTED_ROLE
+                    ),
+                    boundary_iteration=(
+                        int(last)
+                        if main_terminated_all_dead
+                        else self.config.train.iterations - 1
+                    ),
+                    phase=(
+                        "main_all_dead"
+                        if main_terminated_all_dead else "main_complete"
+                    ),
+                    phase_step=(
+                        int(last)
+                        if main_terminated_all_dead
+                        else self.config.train.iterations - 1
+                    ),
+                    source_step=int(selection["step"]),
+                )
+                selection["phase"] = "main"
+            selection["checkpoint_artifact"] = str(
+                selected_checkpoint.relative_to(self.output_path)
+            )
+
             from ftgspp.training.temporal_metrics import (
                 temporal_support_diagnostics,
             )
@@ -2743,6 +3039,10 @@ class NativeRunner:
             save_model(model_path, final)
             selection["model_artifact"] = model_path.name
             selection["model_sha256"] = file_sha256(model_path)
+            from ftgspp.io.viewer_manifest import write_training_manifest
+            write_training_manifest(
+                model_path, final, dataset, self.config, selection["model_sha256"],
+            )
             selection_path = self.output_path / "export_selection.json"
             selection_tmp = selection_path.with_suffix(".json.tmp")
             selection_tmp.write_text(

@@ -382,6 +382,30 @@ def validate_static_config(config: AppConfig) -> None:
         raise ValueError(
             "train.hard_separation requires model.marginal_gating=true"
         )
+    hard_steps = config.train.hard_separation_steps
+    if isinstance(hard_steps, bool) or not isinstance(hard_steps, int):
+        raise ValueError("train.hard_separation_steps must be an integer")
+    if hard_steps <= 0:
+        raise ValueError("train.hard_separation_steps must be greater than zero")
+    raw_hard_relocation_steps = config.train.hard_relocation_steps
+    if raw_hard_relocation_steps is None or isinstance(
+        raw_hard_relocation_steps, (str, bytes)
+    ):
+        raise ValueError("train.hard_relocation_steps must be a list")
+    hard_relocation_steps = list(raw_hard_relocation_steps)
+    if any(
+        isinstance(step, bool) or not isinstance(step, int)
+        for step in hard_relocation_steps
+    ):
+        raise ValueError("train.hard_relocation_steps must contain integers")
+    if hard_relocation_steps != sorted(set(hard_relocation_steps)):
+        raise ValueError(
+            "train.hard_relocation_steps must be strictly increasing"
+        )
+    if any(step <= 0 or step >= hard_steps for step in hard_relocation_steps):
+        raise ValueError(
+            "train.hard_relocation_steps must be inside the hard phase"
+        )
     if config.train.seed < 0:
         raise ValueError("train.seed must be non-negative")
     if config.train.seed > 0xFFFFFFFF:

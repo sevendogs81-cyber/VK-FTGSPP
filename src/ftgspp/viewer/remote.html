@@ -1,0 +1,1367 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>FTGSPP Viewer</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font:
+          14px system-ui,
+          sans-serif;
+        background: #11151b;
+        color: #e5eaf0;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        display: flex;
+        height: 100dvh;
+        overflow: hidden;
+      }
+      aside {
+        width: 315px;
+        flex: none;
+        overflow: auto;
+        background: #1b222c;
+        border-right: 1px solid #35404f;
+        padding: 16px;
+      }
+      h1 {
+        font-size: 19px;
+        margin: 0 0 4px;
+      }
+      h2 {
+        font-size: 13px;
+        text-transform: uppercase;
+        letter-spacing: 0.07em;
+        color: #94a8bb;
+        margin: 20px 0 9px;
+      }
+      .sub {
+        font-size: 12px;
+        color: #9aabba;
+        line-height: 1.4;
+      }
+      .row {
+        display: flex;
+        gap: 7px;
+        align-items: center;
+        margin: 7px 0;
+      }
+      .row > * {
+        min-width: 0;
+      }
+      .row label {
+        flex: 1;
+      }
+      .row input[type="number"],
+      .row select {
+        width: 110px;
+      }
+      button,
+      select,
+      input {
+        font: inherit;
+        color: inherit;
+        background: #27323f;
+        border: 1px solid #445466;
+        border-radius: 5px;
+        padding: 6px;
+      }
+      button {
+        cursor: pointer;
+      }
+      button:hover {
+        background: #34506b;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      input[type="range"] {
+        width: 100%;
+        padding: 0;
+        accent-color: #6bb5ed;
+      }
+      input[type="checkbox"] {
+        accent-color: #6bb5ed;
+      }
+      input[type="number"] {
+        appearance: textfield;
+      }
+      main {
+        flex: 1;
+        min-width: 0;
+        position: relative;
+        background: #0d1116;
+      }
+      #view {
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        display: block;
+        user-select: none;
+        touch-action: none;
+      }
+      #empty {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        color: #a7b5c4;
+        pointer-events: none;
+      }
+      #status {
+        position: absolute;
+        left: 12px;
+        bottom: 12px;
+        background: #101820cc;
+        border: 1px solid #344353;
+        border-radius: 5px;
+        padding: 7px 10px;
+        font:
+          12px ui-monospace,
+          monospace;
+        max-width: calc(100% - 24px);
+      }
+      #toast {
+        position: absolute;
+        top: 12px;
+        left: 12px;
+        background: #17283b;
+        border: 1px solid #547fa5;
+        border-radius: 5px;
+        padding: 8px 12px;
+        display: none;
+      }
+      .group {
+        display: flex;
+        gap: 6px;
+      }
+      .group > * {
+        flex: 1;
+      }
+      .value {
+        font:
+          12px ui-monospace,
+          monospace;
+        color: #aed3ee;
+      }
+      #keys {
+        max-height: 150px;
+        overflow: auto;
+      }
+      .export-box {
+        padding: 10px;
+        border: 1px solid #35475a;
+        border-radius: 7px;
+        background: #151c24;
+      }
+      .export-box .row:first-child {
+        margin-top: 0;
+      }
+      #exportProgress {
+        width: 100%;
+        height: 8px;
+        accent-color: #6bb5ed;
+      }
+      #exportResult {
+        margin-top: 9px;
+      }
+      #exportVideo {
+        width: 100%;
+        max-height: 180px;
+        display: block;
+        background: #090c10;
+        border-radius: 5px;
+      }
+      #exportDownload {
+        display: block;
+        margin-top: 7px;
+        color: #8bcbf7;
+        text-align: center;
+      }
+      .key {
+        display: flex;
+        gap: 5px;
+        margin: 4px 0;
+      }
+      .key button:first-child {
+        flex: 1;
+        text-align: left;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      small {
+        color: #92a9bb;
+      }
+      hr {
+        border: 0;
+        border-top: 1px solid #35404f;
+        margin: 15px 0;
+      }
+      @media (max-width: 700px) {
+        body {
+          flex-direction: column-reverse;
+        }
+        aside {
+          width: 100%;
+          height: 43dvh;
+          border-right: 0;
+          border-top: 1px solid #35404f;
+        }
+        main {
+          min-height: 57dvh;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <aside>
+      <h1>FTGSPP Viewer</h1>
+      <div id="label" class="sub">Connecting…</div>
+      <h2>Camera</h2>
+      <div class="row">
+        <label>Capture view</label
+        ><select id="camera"></select>
+      </div>
+      <div class="group">
+        <button id="fit">Fit scene</button
+        ><button id="reset">Reset view</button>
+      </div>
+      <div class="row">
+        <span id="aspect" class="sub">Original aspect ratio · fixed</span>
+      </div>
+      <small
+        >Left drag orbit · Shift+left or middle pan · Right drag look · Wheel
+        dolly · Right+WASD/QE fly · F fit · R reset</small
+      >
+      <h2>Time</h2>
+      <div class="group">
+        <button id="play">Play</button><button id="prev">◀ Sample</button
+        ><button id="next">Sample ▶</button>
+      </div>
+      <div class="row">
+        <input id="time" type="range" step="any" /><span
+          id="timeValue"
+          class="value"
+        ></span>
+      </div>
+      <div class="row">
+        <label>Speed</label
+        ><input id="speed" type="number" min="0.01" max="100" step="0.25" />
+      </div>
+      <div class="row">
+        <label><input id="loop" type="checkbox" /> Loop</label
+        ><label><input id="snap" type="checkbox" /> Snap samples</label>
+      </div>
+      <h2>Image</h2>
+      <div class="row">
+        <label>View</label
+        ><select id="mode">
+          <option value="0">RGB</option>
+          <option value="1">Alpha</option>
+          <option value="2">Transmittance</option>
+        </select>
+      </div>
+      <div class="row">
+        <label>Background</label
+        ><select id="background">
+          <option value="black">Black</option>
+          <option value="white">White</option>
+          <option value="checker">Checker</option>
+          <option value="custom">Custom</option>
+        </select>
+      </div>
+      <div class="row" id="customRow" hidden>
+        <label>Custom color</label
+        ><input id="color" type="color" value="#000000" />
+      </div>
+      <div class="row">
+        <label>Exposure (EV)</label
+        ><input id="exposure" type="number" min="-20" max="20" step="0.25" />
+      </div>
+      <div class="row">
+        <label>SH degree</label
+        ><select id="sh">
+          <option>0</option>
+          <option>1</option>
+          <option>2</option>
+          <option>3</option>
+        </select>
+      </div>
+      <div class="row">
+        <label>Marginal cutoff</label
+        ><input id="threshold" type="number" min="0" max="1" step="0.01" />
+      </div>
+      <div class="row">
+        <label>Quality</label
+        ><select id="quality">
+          <option value="faithful">Faithful</option>
+          <option value="interactive">Interactive</option>
+        </select>
+      </div>
+      <div class="row">
+        <label>Target FPS</label
+        ><input id="fps" type="number" min="1" max="1000" step="1" />
+      </div>
+      <div class="group">
+        <button id="shot">PNG screenshot</button
+        ><button id="sessionSave">Save session</button>
+      </div>
+      <div class="row">
+        <button id="sessionLoad">Load session</button
+        ><label
+          ><input id="transparent" type="checkbox" /> Transparent PNG</label
+        >
+      </div>
+      <h2>Camera path</h2>
+      <div class="row">
+        <label>Key seconds</label
+        ><input id="keySeconds" type="number" min="0" step="0.1" value="0" />
+      </div>
+      <div class="group">
+        <button id="keyAdd">Add key</button
+        ><button id="keyReplace">Replace</button
+        ><button id="keyDelete">Delete</button>
+      </div>
+      <div id="keys"></div>
+      <div class="row">
+        <label>Preview seconds</label
+        ><input
+          id="pathSeconds"
+          type="number"
+          min="0"
+          step="0.1"
+          value="0"
+        /><button id="preview">Preview</button>
+      </div>
+      <div class="group">
+        <button id="pathSave">Save path</button
+        ><button id="pathLoad">Load path</button>
+      </div>
+      <h2>Interaction capture</h2>
+      <div class="export-box">
+        <div class="group">
+          <button id="recordToggle">Start recording</button
+          ><button id="recordClear" disabled>Clear</button>
+        </div>
+        <div id="recordStatus" class="sub">No interaction recorded</div>
+        <small
+          >Records the view exactly as you orbit, pan, look, fly, or zoom. 4D
+          scene time follows the Play/Pause state you use while recording.</small
+        >
+      </div>
+      <h2>Video export</h2>
+      <div class="export-box">
+        <div class="row">
+          <label>Motion</label
+          ><select id="exportMode">
+            <option value="recording">Recorded interaction</option>
+            <option value="path">Keyframed camera path</option>
+            <option value="view">Fixed camera + scene time</option>
+          </select>
+        </div>
+        <div class="row" id="pathSceneModeRow" hidden>
+          <label>4D scene time</label
+          ><select id="pathSceneMode">
+            <option value="freeze">Freeze at a time</option>
+            <option value="range">Advance over a range</option>
+          </select>
+        </div>
+        <div class="row" id="pathFreezeRow" hidden>
+          <label>Frozen scene time</label
+          ><input id="exportSceneTime" type="number" step="any" />
+        </div>
+        <div id="exportTimes">
+          <div class="row">
+            <label>Scene start</label
+            ><input id="exportStart" type="number" step="any" />
+          </div>
+          <div class="row">
+            <label>Scene end</label
+            ><input id="exportEnd" type="number" step="any" />
+          </div>
+        </div>
+        <div class="row">
+          <label>Output width</label
+          ><input id="exportWidth" type="number" min="1" max="3840" step="1" />
+        </div>
+        <div class="row">
+          <label>Video FPS</label
+          ><input id="exportFps" type="number" min="1" max="240" step="1" />
+        </div>
+        <div id="exportSummary" class="sub"></div>
+        <progress id="exportProgress" value="0" max="1" hidden></progress>
+        <div id="exportStatus" class="sub"></div>
+        <div class="group">
+          <button id="videoExport">Export MP4</button
+          ><button id="videoCancel" disabled>Cancel</button>
+        </div>
+        <div id="exportResult" hidden>
+          <video id="exportVideo" controls preload="metadata"></video>
+          <a id="exportDownload" download>Download MP4</a>
+        </div>
+      </div>
+      <hr />
+      <small
+        >Paths and sessions are saved on the server. Screenshots are saved there
+        and downloaded here. Recorded interaction preserves camera motion and the
+        4D timeline you actually viewed. MP4 export streams GPU frames directly
+        into FFmpeg. The server uses one GPU renderer and accepts one browser
+        client.</small
+      >
+    </aside>
+    <main id="stage">
+      <img id="view" alt="Rendered scene" />
+      <div id="empty">Waiting for first frame…</div>
+      <div id="toast"></div>
+      <div id="status">Connecting…</div>
+    </main>
+    <script>
+      (() => {
+        "use strict";
+        const $ = (id) => document.getElementById(id),
+          q = new URLSearchParams(location.search),
+          token = q.get("token");
+        const ws = new WebSocket(
+          `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws?token=${encodeURIComponent(token || "")}`,
+        );
+        ws.binaryType = "blob";
+        let meta,
+          state,
+          home,
+          pivot,
+          selectedKey = -1,
+          inflight = false,
+          dirty = false,
+          renderTimer = 0,
+          lastFrame = 0,
+          drag = null,
+          keysDown = new Set(),
+          playClock = 0,
+          frameInfo = "",
+          exporting = false,
+          recordPending = false,
+          recording = { active: false, sample_count: 0, duration: 0 };
+        let sentState = {},
+          pathDirty = false,
+          tickId = 0;
+        const clamp = (x, a, b) => Math.max(a, Math.min(b, x)),
+          dot = (a, b) => a.reduce((s, v, i) => s + v * b[i], 0),
+          cross = (a, b) => [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+          ],
+          add = (a, b) => a.map((v, i) => v + b[i]),
+          sub = (a, b) => a.map((v, i) => v - b[i]),
+          mul = (a, s) => a.map((v) => v * s),
+          norm = (a) => mul(a, 1 / Math.max(1e-9, Math.hypot(...a)));
+        const rotate = (v, axis, rad) => {
+          axis = norm(axis);
+          return add(
+            add(mul(v, Math.cos(rad)), mul(cross(axis, v), Math.sin(rad))),
+            mul(axis, dot(axis, v) * (1 - Math.cos(rad))),
+          );
+        };
+        const cameraParts = (c) => {
+          const w = c.w2c,
+            r = w.slice(0, 3).map((row) => row.slice(0, 3)),
+            t = w.slice(0, 3).map((row) => row[3]);
+          return {
+            pos: mul(
+              add(add(mul(r[0], t[0]), mul(r[1], t[1])), mul(r[2], t[2])),
+              -1,
+            ),
+            right: r[0],
+            down: r[1],
+            forward: r[2],
+          };
+        };
+        const setCamera = (pos, right, down, forward) => {
+          let rows = [norm(right), norm(down), norm(forward)];
+          state.camera.w2c = [
+            ...rows.map((row) => [...row, -dot(row, pos)]),
+            [0, 0, 0, 1],
+          ];
+        };
+        const lookAt = (pos, target) => {
+          const forward = norm(sub(target, pos)),
+            up = meta.world_up || [0, -1, 0];
+          let right = norm(cross(forward, up));
+          if (Math.hypot(...right) < 0.1) right = [1, 0, 0];
+          let down = norm(cross(forward, right));
+          setCamera(pos, right, down, forward);
+        };
+        const send = (type, more = {}) => {
+          if (ws.readyState === 1) ws.send(JSON.stringify({ type, ...more }));
+        };
+        function acceptState(next) {
+          state = next;
+          sentState = {};
+          for (const [key, value] of Object.entries(state)) {
+            if (key !== "bookmarks" && key !== "path_times")
+              sentState[key] = JSON.stringify(value);
+          }
+          pathDirty = false;
+        }
+        function statePatch() {
+          const patch = {};
+          for (const [key, value] of Object.entries(state)) {
+            if (key === "bookmarks" || key === "path_times") continue;
+            const encoded = JSON.stringify(value);
+            if (sentState[key] !== encoded) {
+              patch[key] = value;
+              sentState[key] = encoded;
+            }
+          }
+          if (pathDirty) {
+            patch.bookmarks = state.bookmarks;
+            patch.path_times = state.path_times;
+            pathDirty = false;
+          }
+          return patch;
+        }
+        function updateMessage() {
+          const box = $("stage").getBoundingClientRect(),
+            normal = viewport(false, box),
+            full = viewport(true, box);
+          return {
+            state: statePatch(),
+            ...normal,
+            fullWidth: full.width,
+            fullHeight: full.height,
+          };
+        }
+        const sendAction = (type, more = {}) => {
+          if (!state || ws.readyState !== 1) return;
+          send(type, { ...updateMessage(), ...more });
+        };
+        function toast(msg) {
+          $("toast").textContent = msg;
+          $("toast").style.display = "block";
+          clearTimeout(toast.timer);
+          toast.timer = setTimeout(
+            () => ($("toast").style.display = "none"),
+            4000,
+          );
+        }
+        function exportExtent() {
+          const requested = clamp(
+              Math.round(Number($("exportWidth").value) || state.camera.width),
+              1,
+              3840,
+            ),
+            scale = Math.min(
+              requested / state.camera.width,
+              2160 / state.camera.height,
+            );
+          return {
+            width: Math.max(1, Math.round(state.camera.width * scale)),
+            height: Math.max(1, Math.round(state.camera.height * scale)),
+          };
+        }
+        function updateExportSummary() {
+          if (!state || !meta) return;
+          const mode = $("exportMode").value,
+            sceneMode = $("pathSceneMode").value,
+            extent = exportExtent(),
+            fps = clamp(Number($("exportFps").value) || meta.fps || 30, 1, 240);
+          $("pathSceneModeRow").hidden = mode !== "path";
+          $("pathFreezeRow").hidden = !(mode === "path" && sceneMode === "freeze");
+          $("exportTimes").hidden = !(
+            mode === "view" || (mode === "path" && sceneMode === "range")
+          );
+          let duration = 0,
+            detail = "";
+          if (mode === "recording") {
+            duration = Number(recording.duration) || 0;
+            detail = `${recording.sample_count || 0} captured samples · recorded 4D time`;
+          } else if (mode === "path") {
+            const times = state.path_times || [];
+            duration = times.length > 1 ? times.at(-1) - times[0] : 0;
+            detail = sceneMode === "freeze"
+              ? `${times.length} camera keys · frozen 4D time`
+              : `${times.length} camera keys · independent 4D range`;
+          } else {
+            duration = Number($("exportEnd").value) - Number($("exportStart").value);
+            detail = "fixed camera";
+          }
+          const frames = Math.max(0, Math.ceil(duration * fps - 1e-9));
+          $("exportSummary").textContent =
+            `${extent.width}×${extent.height} · ${Math.max(0, duration).toFixed(2)}s · ${frames} frames · ${detail}`;
+        }
+        function setExporting(active) {
+          exporting = active;
+          $("videoCancel").disabled = !active;
+          $("exportMode").disabled = active;
+          $("exportStart").disabled = active;
+          $("exportEnd").disabled = active;
+          $("exportWidth").disabled = active;
+          $("exportFps").disabled = active;
+          if (!active) $("videoCancel").textContent = "Cancel";
+          refreshRecordingUI();
+        }
+        function refreshRecordingUI() {
+          $("recordToggle").disabled = recordPending || exporting;
+          $("recordClear").disabled =
+            recordPending || exporting || recording.active || !recording.sample_count;
+          $("recordToggle").textContent = recording.active
+            ? "Stop recording"
+            : "Start recording";
+          $("videoExport").disabled = exporting || recording.active;
+          if (recording.active) {
+            $("recordStatus").textContent =
+              `Recording… ${recording.sample_count || 1}+ samples. Move the view and control Play/Pause.`;
+          } else if (recording.sample_count) {
+            $("recordStatus").textContent =
+              `Ready · ${recording.sample_count} samples · ${Number(recording.duration).toFixed(2)}s`;
+          } else {
+            $("recordStatus").textContent = "No interaction recorded";
+          }
+          updateExportSummary();
+        }
+        function setRecording(next) {
+          recording = {
+            active: Boolean(next?.active),
+            sample_count: Number(next?.sample_count) || 0,
+            duration: Number(next?.duration) || 0,
+          };
+          recordPending = false;
+          refreshRecordingUI();
+        }
+        function sync() {
+          if (!state) return;
+          $("time").min = meta.time_start;
+          $("time").max = Math.max(meta.time_end, meta.time_start + 1e-6);
+          $("time").value = clamp(state.time, meta.time_start, meta.time_end);
+          $("timeValue").textContent = Number(state.time).toFixed(3) + " s";
+          $("play").textContent = state.playing ? "Pause" : "Play";
+          $("speed").value = state.speed;
+          $("loop").checked = state.loop;
+          $("snap").checked = state.snap;
+          $("aspect").textContent =
+            `Original aspect ratio · ${state.camera.width}:${state.camera.height} · fixed`;
+          $("mode").value = state.mode;
+          $("exposure").value = state.exposure;
+          $("sh").value = state.sh_degree;
+          $("threshold").value = state.marginal_threshold;
+          $("quality").value = state.interactive ? "interactive" : "faithful";
+          $("fps").value = state.target_fps;
+          $("transparent").checked = state.transparent;
+          $("camera").value = state.selected_camera ?? -1;
+          let bg = state.checker
+            ? "checker"
+            : state.background.every((v) => v < 0.01)
+              ? "black"
+              : state.background.every((v) => v > 0.99)
+                ? "white"
+                : "custom";
+          $("background").value = bg;
+          $("customRow").hidden = bg !== "custom";
+          if (bg === "custom")
+            $("color").value =
+              "#" +
+              state.background
+                .map((v) =>
+                  Math.round(v * 255)
+                    .toString(16)
+                    .padStart(2, "0"),
+                )
+                .join("");
+          updateExportSummary();
+        }
+        function renderKeys() {
+          let root = $("keys");
+          root.replaceChildren();
+          (state.bookmarks || []).forEach((c, i) => {
+            let row = document.createElement("div");
+            row.className = "key";
+            let b = document.createElement("button");
+            b.textContent = `${i + 1}. camera path ${Number(state.path_times[i]).toFixed(2)}s`;
+            b.onclick = () => {
+              selectedKey = i;
+              $("keySeconds").value = state.path_times[i];
+              state.camera = structuredClone(c);
+              state.time = c.timestamp;
+              state.playing = false;
+              sync();
+              renderKeys();
+              requestFrame();
+            };
+            row.append(b);
+            if (i === selectedKey) b.style.borderColor = "#76bbee";
+            root.append(row);
+          });
+        }
+        function viewport(
+          full = false,
+          box = $("stage").getBoundingClientRect(),
+        ) {
+          const limit = full
+            ? 1
+            : state.interactive && (drag || state.playing)
+              ? 0.75
+              : 1;
+          // Fit the camera into the viewport and pixel caps with one scale.
+          // Camera navigation changes the pose, never the image aspect ratio.
+          const w = Math.min(box.width * devicePixelRatio, full ? 3840 : 1920),
+            h = Math.min(box.height * devicePixelRatio, full ? 2160 : 1080),
+            scale = Math.min(w / state.camera.width, h / state.camera.height) * limit;
+          return {
+            width: Math.max(1, Math.round(state.camera.width * scale)),
+            height: Math.max(1, Math.round(state.camera.height * scale)),
+          };
+        }
+        function requestFrame() {
+          if (!state) return;
+          dirty = true;
+          if (inflight || document.hidden || ws.readyState !== 1) return;
+          const now = performance.now(),
+            delay = Math.max(
+              0,
+              1000 / (state.target_fps || 30) - (now - lastFrame),
+            );
+          if (!renderTimer) renderTimer = setTimeout(flush, delay);
+        }
+        function flush() {
+          renderTimer = 0;
+          if (inflight || !dirty || document.hidden || ws.readyState !== 1)
+            return;
+          dirty = false;
+          inflight = true;
+          lastFrame = performance.now();
+          send("update", updateMessage());
+        }
+        function cameraChanged() {
+          state.selected_camera = -1;
+          // Free-camera navigation is independent of scene playback.
+          sync();
+          requestFrame();
+        }
+        function fit() {
+          pivot = meta.center.slice();
+          let radius = meta.radius * 2.8,
+            up = meta.world_up || [0, -1, 0];
+          let pos = add(pivot, [0, 0, radius]);
+          lookAt(pos, pivot);
+          cameraChanged();
+        }
+        function reset() {
+          state.camera = structuredClone(home);
+          state.time = home.timestamp;
+          state.playing = false;
+          state.selected_camera = -1;
+          pivot = meta.center.slice();
+          sync();
+          requestFrame();
+        }
+        function capture(i) {
+          if (i < 0) {
+            state.selected_camera = -1;
+            sync();
+            requestFrame();
+            return;
+          }
+          let c = meta.cameras[i];
+          if (!c) return;
+          state.camera = structuredClone(c);
+          state.time = c.timestamp;
+          state.selected_camera = i;
+          state.lock_camera = true;
+          state.playing = false;
+          pivot = meta.center.slice();
+          sync();
+          requestFrame();
+        }
+        function sample(dir) {
+          let arr = meta.sample_times || [];
+          if (!arr.length) return;
+          let i =
+            dir < 0
+              ? arr.findLastIndex((t) => t < state.time - 1e-5)
+              : arr.findIndex((t) => t > state.time + 1e-5);
+          if (i < 0) i = dir < 0 ? 0 : arr.length - 1;
+          state.time = arr[i];
+          state.playing = false;
+          sync();
+          requestFrame();
+        }
+        function orbit(dx, dy) {
+          let p = cameraParts(state.camera),
+            v = sub(p.pos, pivot),
+            up = meta.world_up || [0, -1, 0];
+          v = rotate(v, up, -dx * 0.005);
+          v = rotate(v, p.right, -dy * 0.005);
+          lookAt(add(pivot, v), pivot);
+        }
+        function pan(dx, dy) {
+          let p = cameraParts(state.camera),
+            scale = Math.max(0.0001, Math.hypot(...sub(p.pos, pivot))) * 0.0015,
+            move = add(mul(p.right, -dx * scale), mul(p.down, -dy * scale));
+          setCamera(add(p.pos, move), p.right, p.down, p.forward);
+          pivot = add(pivot, move);
+        }
+        function look(dx, dy) {
+          let p = cameraParts(state.camera),
+            up = meta.world_up || [0, -1, 0],
+            f = rotate(
+              rotate(p.forward, up, -dx * 0.005),
+              p.right,
+              -dy * 0.005,
+            ),
+            r = norm(cross(f, up)),
+            d = norm(cross(f, r));
+          setCamera(p.pos, r, d, f);
+          pivot = add(p.pos, mul(f, Math.max(meta.radius, 1)));
+        }
+        function fly(dt) {
+          if (!keysDown.size) return;
+          let p = cameraParts(state.camera),
+            step =
+              Math.max(meta.radius * 0.8, 0.1) *
+              dt *
+              (keysDown.has("shift") ? 4 : 1),
+            v = [0, 0, 0];
+          if (keysDown.has("w")) v = add(v, p.forward);
+          if (keysDown.has("s")) v = sub(v, p.forward);
+          if (keysDown.has("d")) v = add(v, p.right);
+          if (keysDown.has("a")) v = sub(v, p.right);
+          if (keysDown.has("e")) v = sub(v, p.down);
+          if (keysDown.has("q")) v = add(v, p.down);
+          if (Math.hypot(...v) > 0) {
+            v = mul(norm(v), step);
+            setCamera(add(p.pos, v), p.right, p.down, p.forward);
+            pivot = add(pivot, v);
+            cameraChanged();
+          }
+        }
+        function updatePath() {
+          state.bookmarks = state.bookmarks || [];
+          state.path_times = state.path_times || [];
+          pathDirty = true;
+          sync();
+          renderKeys();
+          requestFrame();
+        }
+        ws.onopen = () => {
+          $("status").textContent = "Connected · loading scene…";
+        };
+        ws.onclose = (ev) => {
+          $("status").textContent = `Disconnected (${ev.code})`;
+          toast("Viewer connection closed");
+        };
+        ws.onerror = () => toast("WebSocket error");
+        ws.onmessage = async (ev) => {
+          if (ev.data instanceof Blob) {
+            const kind = new Uint8Array(
+                await ev.data.slice(0, 1).arrayBuffer(),
+              )[0],
+              blob = ev.data.slice(
+                1,
+                ev.data.size,
+                kind === 2 ? "image/png" : "image/jpeg",
+              );
+            if (kind === 1) {
+              const old = $("view").src,
+                url = URL.createObjectURL(blob);
+              try {
+                $("view").src = url;
+                await $("view").decode();
+                $("empty").hidden = true;
+              } catch (error) {
+                toast("Image decode failed");
+              } finally {
+                if (old.startsWith("blob:")) URL.revokeObjectURL(old);
+                inflight = false;
+                if (dirty) requestFrame();
+              }
+            } else if (kind === 2) {
+              let a = document.createElement("a");
+              a.href = URL.createObjectURL(blob);
+              a.download = `ftgspp_${new Date().toISOString().replace(/[:.]/g, "-")}.png`;
+              a.click();
+              setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+            }
+            return;
+          }
+          let msg = JSON.parse(ev.data);
+          if (msg.type === "hello") {
+            meta = msg.metadata;
+            acceptState(msg.state);
+            home = structuredClone(meta.initial_camera);
+            pivot = meta.center.slice();
+            $("label").textContent = meta.label || "Scene";
+            $("exportStart").min = meta.time_start;
+            $("exportStart").max = meta.time_end;
+            $("exportStart").value = meta.time_start;
+            $("exportEnd").min = meta.time_start;
+            $("exportEnd").max = meta.time_end;
+            $("exportEnd").value = meta.time_end;
+            $("exportSceneTime").min = meta.time_start;
+            $("exportSceneTime").max = meta.time_end;
+            $("exportSceneTime").value = state.time;
+            $("exportFps").value = meta.fps || 30;
+            $("exportWidth").value = Math.min(3840, state.camera.width);
+            setRecording(msg.recording);
+            $("camera").replaceChildren();
+            let free = document.createElement("option");
+            free.value = -1;
+            free.textContent = "Free camera";
+            $("camera").append(free);
+            meta.cameras.forEach((c, i) => {
+              let o = document.createElement("option");
+              o.value = i;
+              o.textContent = `${i}: ${c.name}`;
+              $("camera").append(o);
+            });
+            $("camera").disabled = !meta.cameras.length;
+            sync();
+            renderKeys();
+            inflight = true;
+            requestFrame();
+          } else if (msg.type === "state") {
+            acceptState(msg.state);
+            playClock = state.time;
+            sync();
+            renderKeys();
+            requestFrame();
+          } else if (msg.type === "frame") {
+            const phases = msg.pipeline || {};
+            const pixelTiming = phases.rgba8_ms !== undefined
+              ? `${Number(phases.rgba8_ms).toFixed(1)} ms pack + readback`
+              : `${Number(phases.readback_ms || 0).toFixed(1)} ms readback`;
+            frameInfo = `${msg.width}×${msg.height} · ${msg.ms.toFixed(1)} ms total · ${Number(phases.forward_ms ?? msg.stats.render_ms).toFixed(1)} ms forward · ${pixelTiming}${phases.forward_cached ? " · cached F/T" : ""} · ${Number(msg.stats.gaussians).toLocaleString()} Gaussians · ${(Number(msg.stats.vram_bytes) / 1048576).toFixed(1)} MiB buffers · ${(msg.bytes / 1024).toFixed(0)} KiB JPEG`;
+            $("status").textContent = frameInfo;
+          } else if (msg.type === "recording_started") {
+            setRecording(msg);
+            toast("Interaction recording started");
+          } else if (msg.type === "recording_stopped") {
+            setRecording(msg);
+            toast(`Interaction captured: ${Number(msg.duration).toFixed(2)}s`);
+          } else if (msg.type === "recording_cleared") {
+            setRecording(msg);
+            toast("Interaction recording cleared");
+          } else if (msg.type === "export_started") {
+            setExporting(true);
+            $("exportProgress").hidden = false;
+            $("exportProgress").max = msg.frame_count;
+            $("exportProgress").value = 0;
+            $("exportStatus").textContent =
+              `Rendering 0/${msg.frame_count} · ${msg.width}×${msg.height} @ ${Number(msg.fps).toFixed(2)} FPS`;
+          } else if (msg.type === "export_progress") {
+            $("exportProgress").value = msg.completed;
+            const rate = msg.elapsed > 0 ? msg.completed / msg.elapsed : 0,
+              remaining = rate > 0 ? (msg.total - msg.completed) / rate : 0;
+            $("exportStatus").textContent =
+              `Rendering ${msg.completed}/${msg.total} · ${rate.toFixed(1)} frames/s · ~${remaining.toFixed(1)}s left`;
+          } else if (msg.type === "export_cancel_requested") {
+            $("videoCancel").disabled = true;
+            $("videoCancel").textContent = "Cancelling…";
+          } else if (msg.type === "export_cancelled") {
+            setExporting(false);
+            $("exportStatus").textContent = "Export cancelled";
+            toast("Video export cancelled");
+          } else if (msg.type === "saved" && msg.action === "video") {
+            setExporting(false);
+            $("exportProgress").value = $("exportProgress").max;
+            $("exportStatus").textContent = `Complete · ${msg.file}`;
+            const resultURL = `${msg.url}?token=${encodeURIComponent(token || "")}`;
+            $("exportVideo").src = resultURL;
+            $("exportVideo").load?.();
+            $("exportDownload").href = resultURL;
+            $("exportDownload").download = msg.file;
+            $("exportDownload").textContent = `Download ${msg.file}`;
+            $("exportResult").hidden = false;
+            toast(`Video ready: ${msg.path}`);
+          } else if (msg.type === "saved" || msg.type === "capture") {
+            toast(`${msg.action || "Screenshot"}: ${msg.path}`);
+          } else if (msg.type === "error") {
+            sentState = {};
+            pathDirty = true;
+            if (msg.action === "render" || msg.action === "update")
+              inflight = false;
+            if (msg.action === "export_video") {
+              setExporting(false);
+              $("exportStatus").textContent = `Export error: ${msg.message}`;
+            }
+            if (["start_recording", "stop_recording", "clear_recording"].includes(msg.action)) {
+              recordPending = false;
+              refreshRecordingUI();
+            }
+            toast(msg.message);
+            $("status").textContent = `Error: ${msg.message}`;
+            if (dirty) requestFrame();
+          }
+        };
+        $("stage").addEventListener("pointerdown", (e) => {
+          if (e.button > 2 || !state) return;
+          e.preventDefault();
+          $("stage").setPointerCapture(e.pointerId);
+          drag = {
+            x: e.clientX,
+            y: e.clientY,
+            mode:
+              e.button === 1 || e.shiftKey
+                ? "pan"
+                : e.button === 2
+                  ? "look"
+                  : "orbit",
+          };
+          previous = performance.now();
+          scheduleTick();
+          requestFrame();
+        });
+        $("stage").addEventListener("pointermove", (e) => {
+          if (!drag) return;
+          let dx = e.clientX - drag.x,
+            dy = e.clientY - drag.y;
+          drag.x = e.clientX;
+          drag.y = e.clientY;
+          if (drag.mode === "pan") pan(dx, dy);
+          else if (drag.mode === "look") look(dx, dy);
+          else orbit(dx, dy);
+          cameraChanged();
+        });
+        function release() {
+          if (drag) {
+            drag = null;
+            requestFrame();
+          }
+        }
+        $("stage").addEventListener("pointerup", release);
+        $("stage").addEventListener("pointercancel", release);
+        $("stage").addEventListener("contextmenu", (e) => e.preventDefault());
+        $("stage").addEventListener(
+          "wheel",
+          (e) => {
+            if (!state) return;
+            e.preventDefault();
+            let p = cameraParts(state.camera),
+              d = Math.max(0.01, Math.hypot(...sub(p.pos, pivot))),
+              factor = Math.exp(e.deltaY * 0.001);
+            let pos = add(pivot, mul(sub(p.pos, pivot), factor));
+            setCamera(pos, p.right, p.down, p.forward);
+            cameraChanged();
+          },
+          { passive: false },
+        );
+        window.addEventListener("keydown", (e) => {
+          if (
+            !state ||
+            ["INPUT", "SELECT", "BUTTON"].includes(
+              document.activeElement.tagName,
+            )
+          )
+            return;
+          let key = e.key.toLowerCase();
+          keysDown.add(key);
+          if (!tickId) previous = performance.now();
+          scheduleTick();
+          if (key === " ") {
+            e.preventDefault();
+            $("play").click();
+          } else if (key === "f") fit();
+          else if (key === "r") reset();
+          else if (key === "arrowleft") sample(-1);
+          else if (key === "arrowright") sample(1);
+          else if (key === "s" && e.ctrlKey) {
+            e.preventDefault();
+            $("shot").click();
+          }
+        });
+        window.addEventListener("keyup", (e) =>
+          keysDown.delete(e.key.toLowerCase()),
+        );
+        $("camera").onchange = () => capture(Number($("camera").value));
+        $("fit").onclick = fit;
+        $("reset").onclick = reset;
+        $("play").onclick = () => {
+          if (!state) return;
+          state.playing = !state.playing;
+          playClock = state.time;
+          previous = performance.now();
+          sync();
+          requestFrame();
+          scheduleTick();
+        };
+        $("prev").onclick = () => sample(-1);
+        $("next").onclick = () => sample(1);
+        $("time").oninput = () => {
+          state.time = Number($("time").value);
+          playClock = state.time;
+          state.playing = false;
+          sync();
+          requestFrame();
+        };
+        $("speed").onchange = () => {
+          state.speed = clamp(Number($("speed").value) || 1, 0.01, 100);
+          sync();
+          requestFrame();
+        };
+        $("loop").onchange = () => {
+          state.loop = $("loop").checked;
+          requestFrame();
+        };
+        $("snap").onchange = () => {
+          state.snap = $("snap").checked;
+          requestFrame();
+        };
+        $("mode").onchange = () => {
+          state.mode = Number($("mode").value);
+          if (state.mode !== 0) state.transparent = false;
+          sync();
+          requestFrame();
+        };
+        $("background").onchange = () => {
+          let v = $("background").value;
+          state.checker = v === "checker";
+          state.background =
+            v === "white"
+              ? [1, 1, 1]
+              : v === "custom"
+                ? hexColor($("color").value)
+                : [0, 0, 0];
+          sync();
+          requestFrame();
+        };
+        function hexColor(v) {
+          return [1, 3, 5].map((i) => parseInt(v.slice(i, i + 2), 16) / 255);
+        }
+        $("color").oninput = () => {
+          state.background = hexColor($("color").value);
+          requestFrame();
+        };
+        $("exposure").onchange = () => {
+          state.exposure = clamp(Number($("exposure").value) || 0, -20, 20);
+          requestFrame();
+        };
+        $("sh").onchange = () => {
+          state.sh_degree = Number($("sh").value);
+          requestFrame();
+        };
+        $("threshold").onchange = () => {
+          state.marginal_threshold = clamp(
+            Number($("threshold").value) || 0,
+            0,
+            1,
+          );
+          requestFrame();
+        };
+        $("quality").onchange = () => {
+          state.interactive = $("quality").value === "interactive";
+          requestFrame();
+        };
+        $("fps").onchange = () => {
+          state.target_fps = clamp(Number($("fps").value) || 30, 1, 1000);
+          requestFrame();
+        };
+        $("transparent").onchange = () => {
+          state.transparent = $("transparent").checked;
+          if (state.transparent) state.mode = 0;
+          sync();
+          requestFrame();
+        };
+        $("shot").onclick = () => sendAction("capture");
+        $("sessionSave").onclick = () => sendAction("save_session");
+        $("sessionLoad").onclick = () => send("load_session");
+        $("keyAdd").onclick = () => {
+          let t = Number($("keySeconds").value);
+          if (!Number.isFinite(t) || t < 0)
+            return toast("Key seconds must be non-negative");
+          let i = state.path_times.findIndex((x) => x >= t);
+          if (i >= 0 && Math.abs(state.path_times[i] - t) < 1e-6)
+            return toast("Path time already has a key");
+          if (i < 0) i = state.path_times.length;
+          state.path_times.splice(i, 0, t);
+          state.bookmarks.splice(
+            i,
+            0,
+            structuredClone({ ...state.camera, timestamp: state.time }),
+          );
+          selectedKey = i;
+          updatePath();
+        };
+        $("keyReplace").onclick = () => {
+          if (selectedKey < 0) return toast("Select a key first");
+          let t = Number($("keySeconds").value);
+          if (!Number.isFinite(t) || t < 0) return toast("Invalid path time");
+          let old = state.path_times[selectedKey],
+            prev = state.path_times[selectedKey - 1] ?? -Infinity,
+            next = state.path_times[selectedKey + 1] ?? Infinity;
+          if (t <= prev || t >= next)
+            return toast("Path time must remain ordered");
+          state.path_times[selectedKey] = t;
+          state.bookmarks[selectedKey] = structuredClone({
+            ...state.camera,
+            timestamp: state.time,
+          });
+          updatePath();
+        };
+        $("keyDelete").onclick = () => {
+          if (selectedKey < 0) return toast("Select a key first");
+          state.path_times.splice(selectedKey, 1);
+          state.bookmarks.splice(selectedKey, 1);
+          selectedKey = -1;
+          updatePath();
+        };
+        $("preview").onclick = () => {
+          const sceneMode = $("pathSceneMode").value;
+          sendAction("sample_path", {
+            seconds: Number($("pathSeconds").value),
+            scene_mode: sceneMode,
+            scene_time: Number($("exportSceneTime").value),
+            time_start: Number($("exportStart").value),
+            time_end: Number($("exportEnd").value),
+          });
+        };
+        $("pathSave").onclick = () => sendAction("save_path");
+        $("pathLoad").onclick = () => send("load_path");
+        $("recordToggle").onclick = () => {
+          if (recordPending || exporting) return;
+          recordPending = true;
+          refreshRecordingUI();
+          sendAction(recording.active ? "stop_recording" : "start_recording");
+        };
+        $("recordClear").onclick = () => {
+          if (recordPending || recording.active || exporting) return;
+          recordPending = true;
+          refreshRecordingUI();
+          send("clear_recording");
+        };
+        $("exportMode").onchange = updateExportSummary;
+        $("pathSceneMode").onchange = updateExportSummary;
+        $("exportSceneTime").oninput = updateExportSummary;
+        $("exportStart").oninput = updateExportSummary;
+        $("exportEnd").oninput = updateExportSummary;
+        $("exportWidth").oninput = updateExportSummary;
+        $("exportFps").oninput = updateExportSummary;
+        $("videoExport").onclick = () => {
+          if (!state || exporting) return;
+          const mode = $("exportMode").value,
+            sceneMode = $("pathSceneMode").value,
+            fps = Number($("exportFps").value),
+            extent = exportExtent(),
+            start = Number($("exportStart").value),
+            end = Number($("exportEnd").value),
+            sceneTime = Number($("exportSceneTime").value);
+          if (!Number.isFinite(fps) || fps < 1 || fps > 240)
+            return toast("Video FPS must be between 1 and 240");
+          if (mode === "path" && (state.path_times || []).length < 2)
+            return toast("Add at least two camera-path keys first");
+          if (mode === "recording" && recording.active)
+            return toast("Stop interaction recording before export");
+          if (mode === "recording" && recording.sample_count < 2)
+            return toast("Record viewer interaction before export");
+          if ((mode === "view" || (mode === "path" && sceneMode === "range")) &&
+              (!Number.isFinite(start) || !Number.isFinite(end) || end <= start))
+            return toast("Scene end time must be greater than start time");
+          if (mode === "path" && sceneMode === "freeze" && !Number.isFinite(sceneTime))
+            return toast("Frozen scene time must be numeric");
+          setExporting(true);
+          $("exportProgress").hidden = false;
+          $("exportProgress").max = 1;
+          $("exportProgress").value = 0;
+          $("exportStatus").textContent = "Preparing export…";
+          sendAction("export_video", {
+            export: {
+              mode,
+              fps,
+              width: extent.width,
+              height: extent.height,
+              scene_mode: sceneMode,
+              scene_time: sceneTime,
+              time_start: start,
+              time_end: end,
+            },
+          });
+        };
+        $("videoCancel").onclick = () => {
+          if (!exporting) return;
+          $("videoCancel").disabled = true;
+          $("videoCancel").textContent = "Cancelling…";
+          send("cancel_export");
+        };
+        function nearestSample(t) {
+          const values = meta.sample_times;
+          let lo = 0,
+            hi = values.length;
+          while (lo < hi) {
+            const mid = (lo + hi) >> 1;
+            if (values[mid] < t) lo = mid + 1;
+            else hi = mid;
+          }
+          if (lo === 0) return values[0];
+          if (lo === values.length) return values[lo - 1];
+          return t - values[lo - 1] <= values[lo] - t
+            ? values[lo - 1]
+            : values[lo];
+        }
+        let previous = performance.now();
+        function scheduleTick() {
+          if (
+            !tickId &&
+            ws.readyState === 1 &&
+            !document.hidden &&
+            (state?.playing || (drag?.mode === "look" && keysDown.size))
+          ) {
+            tickId = requestAnimationFrame(tick);
+          }
+        }
+        function tick(now) {
+          tickId = 0;
+          let dt = Math.min(0.1, (now - previous) / 1000);
+          previous = now;
+          if (document.hidden || !state) return;
+          if (state.playing) {
+            playClock += dt * state.speed;
+            let lo = meta.time_start,
+              hi = meta.time_end;
+            if (playClock > hi) {
+              if (state.loop && hi > lo)
+                playClock = lo + ((playClock - lo) % (hi - lo));
+              else {
+                playClock = hi;
+                state.playing = false;
+              }
+            }
+            const t =
+              state.snap && meta.sample_times?.length
+                ? nearestSample(playClock)
+                : playClock;
+            if (t !== state.time || !state.playing) {
+              state.time = t;
+              $("time").value = t;
+              $("timeValue").textContent = t.toFixed(3) + " s";
+              $("play").textContent = state.playing ? "Pause" : "Play";
+              requestFrame();
+            }
+          }
+          if (drag?.mode === "look") fly(dt);
+          scheduleTick();
+        }
+        document.addEventListener("visibilitychange", () => {
+          if (document.hidden) {
+            keysDown.clear();
+            drag = null;
+          } else {
+            previous = performance.now();
+            requestFrame();
+            scheduleTick();
+          }
+        });
+        window.addEventListener("blur", () => {
+          keysDown.clear();
+          release();
+        });
+        new ResizeObserver(() => requestFrame()).observe($("stage"));
+      })();
+    </script>
+  </body>
+</html>

@@ -23,7 +23,7 @@ class CompileConfig:
     shader_dst_path: Path = Path("./build/native/shaders")
     generated_dst_path: Path = Path("./build/native/shaders/generated")
     # slangc_compile_args: str = "-stage compute -O3 -fp-mode fast -line-directive-mode none"
-    slangc_compile_args: str = "-stage compute -O -fp-mode fast -line-directive-mode none"
+    slangc_compile_args: str = "-O -fp-mode fast -line-directive-mode none"
     glslc_compile_args: str = "-O --target-spv=spv1.5 --target-env=vulkan1.2"
     slangc_path: Optional[Path] = None
     glslc_path: Optional[Path] = None
@@ -35,6 +35,9 @@ class ShaderJob:
     """Represents a single shader compilation job"""
     name: str
     defines: Dict[str, int]
+    stage: str = "compute"
+    entry: str | None = None
+    fp_mode: str | None = None
 
 
 class ShaderCompiler:
@@ -142,7 +145,16 @@ class ShaderCompiler:
         
         # Add target and other args
         cmd.extend(["-target", target])
-        cmd.extend(self.config.slangc_compile_args.split())
+        compile_args = self.config.slangc_compile_args.split()
+        if job.fp_mode is not None:
+            if "-fp-mode" in compile_args:
+                i = compile_args.index("-fp-mode")
+                del compile_args[i:i + 2]
+            compile_args.extend(["-fp-mode", job.fp_mode])
+        cmd.extend(compile_args)
+        cmd.extend(["-stage", job.stage])
+        if job.entry:
+            cmd.extend(["-entry", job.entry])
         cmd.extend(["-o", str(output_file)])
         
         output = subprocess.run(cmd, capture_output=True, text=True, check=True)
@@ -371,6 +383,13 @@ class ShaderCompiler:
         ], ["config.slang", "utils.slang", "spherical_harmonics.slang",
              "ftgspp_dynamic.slang"]))
 
+        jobs.append(("viewer_pack.slang", [
+            ShaderJob("viewer_pack", {}, fp_mode="precise"),
+        ], []))
+        jobs.append(("viewer_present.slang", [
+            ShaderJob("viewer_present_vs", {}, "vertex", "viewer_vs"),
+            ShaderJob("viewer_present_fs", {}, "fragment", "viewer_fs"),
+        ], []))
         return jobs
 
     def compile_all(self, force: bool = False) -> bool:
