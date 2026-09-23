@@ -237,6 +237,16 @@ def validate_static_config(config: AppConfig) -> None:
             raise ValueError(
                 "eval.background_colors entries must contain three finite values in [0, 1]"
             )
+    if not config.eval.background_colors:
+        raise ValueError("eval.background_colors must contain at least one color")
+    if pipeline_mode == "foreground" and any(
+        abs(float(channel)) > 1e-6
+        for channel in config.eval.background_colors[0]
+    ):
+        raise ValueError(
+            "foreground eval requires eval.background_colors[0] to be black; "
+            "foreground PSNR and foreground SSIM share that target"
+        )
     if config.init.backend not in INIT_BACKENDS:
         raise ValueError(
             f"unsupported init.backend: {config.init.backend} "

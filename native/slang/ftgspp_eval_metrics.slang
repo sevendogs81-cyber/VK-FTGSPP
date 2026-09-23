@@ -34,6 +34,8 @@ groupshared float pixel_count_values[256];
 groupshared float window_count_values[256];
 groupshared float roi_ssim_values[256];
 groupshared float roi_window_count_values[256];
+groupshared float foreground_ssim_values[256];
+groupshared float foreground_window_count_values[256];
 
 [numthreads(256, 1, 1)]
 void main(
@@ -53,6 +55,8 @@ void main(
     float window_count = 0.0f;
     float roi_ssim = 0.0f;
     float roi_window_count = 0.0f;
+    float foreground_ssim = 0.0f;
+    float foreground_window_count = 0.0f;
     if (pixel < count) {
         const uint packed = reference_rgba[pixel];
         const FTGSPPObjectivePixel objective = ftgspp_objective_pixel(
@@ -97,6 +101,13 @@ void main(
                     roi_window_count = 1.0f;
                 }
             }
+            // Bit 2 marks an 11x11 window fully inside the reference mask.
+            // The SSIM map must be the black-background objective so this
+            // matches foreground PSNR's clamp(F) vs I*M target.
+            if ((validity_flags[pixel] & 4u) != 0u) {
+                foreground_ssim = ssim_sum;
+                foreground_window_count = 1.0f;
+            }
         }
     }
 
@@ -109,6 +120,8 @@ void main(
     window_count_values[lane] = window_count;
     roi_ssim_values[lane] = roi_ssim;
     roi_window_count_values[lane] = roi_window_count;
+    foreground_ssim_values[lane] = foreground_ssim;
+    foreground_window_count_values[lane] = foreground_window_count;
     GroupMemoryBarrierWithGroupSync();
     [ForceUnroll]
     for (uint stride = 128u; stride > 0u; stride >>= 1u) {
@@ -122,6 +135,10 @@ void main(
             roi_ssim_values[lane] += roi_ssim_values[lane + stride];
             roi_window_count_values[lane] +=
                 roi_window_count_values[lane + stride];
+            foreground_ssim_values[lane] +=
+                foreground_ssim_values[lane + stride];
+            foreground_window_count_values[lane] +=
+                foreground_window_count_values[lane + stride];
         }
         GroupMemoryBarrierWithGroupSync();
     }
@@ -134,5 +151,7 @@ void main(
         eval_accum.InterlockedAddF32(20, window_count_values[0]);
         eval_accum.InterlockedAddF32(24, roi_ssim_values[0]);
         eval_accum.InterlockedAddF32(28, roi_window_count_values[0]);
+        eval_accum.InterlockedAddF32(32, foreground_ssim_values[0]);
+        eval_accum.InterlockedAddF32(36, foreground_window_count_values[0]);
     }
 }

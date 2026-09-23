@@ -120,11 +120,15 @@ the selected ordinary model and matching color affine for an optional HS
 handoff; HS writes `hard_final.npz` for its terminal result. These omit
 main-phase Adam arrays because HS deliberately starts with fresh moments. One
 `gaussians.npz` is the standalone final model. Main-only runs use the best
-hold-out joint PSNR+SSIM score unless `train.export_best=false`; HS runs use the
-terminal hard-phase state.
+hold-out joint task-PSNR+SSIM score unless `train.export_best=false`; foreground
+runs pair `foreground_psnr` with mask-interior `foreground_ssim`, while scene
+runs pair full-frame PSNR with full-frame SSIM. HS runs use the terminal
+hard-phase state.
 Training also writes `run.export_filename` (default `gaussians_4dgs.ply`);
-`ftgspp export` writes another PLY path. In-loop hold-out eval reduces PSNR and
-SSIM_2 on the GPU and does not compute foreground morphology/ROI diagnostics.
+`ftgspp export` writes another PLY path. In-loop hold-out eval reduces the task
+PSNR and matching SSIM_2 on the GPU; foreground mode uses mask-interior
+`foreground_ssim` instead of full-frame SSIM and does not compute foreground
+morphology/ROI diagnostics.
 Full foreground eval reuses one F/T render for every fixed background and
 reduces their PSNR/SSIM plus ROI SSIM on the GPU. CPU work is reserved for the
 final silhouette diagnostics. Synchronous replicas shard final validation

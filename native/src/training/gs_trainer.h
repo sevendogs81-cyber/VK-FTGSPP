@@ -81,6 +81,7 @@ public:
         Buffer<uint32_t> validity;  // (h, w), pixel/window validity bits
         uint32_t valid_pixel_count = 0;
         uint32_t valid_window_count = 0;
+        uint32_t foreground_window_count = 0;
         bool has_custom_validity = false;
         float timestamp = 0.0f;
         int32_t camera_id = -1;

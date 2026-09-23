@@ -585,7 +585,7 @@ void VulkanGSTrainer::executeEvalMetrics(
             if (w > 10 && h > 10) {
                 for (size_t y = 5; y + 5 < h; ++y)
                     for (size_t x = 5; x + 5 < w; ++x)
-                        buffers.eval_validity[y * w + x] |= 2u;
+                        buffers.eval_validity[y * w + x] |= 2u | 4u;
             }
             copyToDevice(buffers.eval_validity);
             buffers.eval_validity_width = w;
@@ -611,7 +611,7 @@ void VulkanGSTrainer::executeEvalMetrics(
         {buffers.pixel_state.deviceBuffer, reference_device, validity_device,
          resizeDeviceBuffer(ssim_map, 12*num_pixels), wc});
     memoryBarrier(COMPUTE_SHADER_WRITE, COMPUTE_SHADER_READ);
-    clearDeviceBuffer(buffers.eval_metrics, 8);
+    clearDeviceBuffer(buffers.eval_metrics, 10);
     memoryBarrier(TRANSFER_WRITE, COMPUTE_SHADER_READ_WRITE);
     executeCompute({{num_pixels,256}}, &reduce_uniforms, sizeof(reduce_uniforms),
         pipeline_ftgspp_eval_metrics,

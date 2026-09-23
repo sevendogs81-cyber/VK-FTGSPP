@@ -169,6 +169,58 @@ class ForegroundGpuNumericTests(unittest.TestCase):
         finally:
             native.cleanup()
 
+    def test_foreground_ssim_matches_mask_interior_black_target(self):
+        native, _arrays = _setup_native(ssim_lambda=0.2)
+        height = width = 32
+        intrinsic = np.asarray([
+            [25.0, 0.0, width / 2],
+            [0.0, 24.0, height / 2],
+            [0.0, 0.0, 1.0],
+        ], np.float32)
+        reference = _reference_rgba(height, width)
+        validity = np.ones((height, width), np.uint8)
+        try:
+            native.add_dynamic_view_meta(
+                height, width, np.eye(4, dtype=np.float32), intrinsic,
+                0.5, 0, 0, False,
+            )
+            native.bind_dynamic_view_image(0, False, reference)
+            native.bind_dynamic_view_validity(0, False, validity)
+            native.begin_eval_val_view(0)
+            gpu = dict(native.complete_eval_metrics((0.0, 0.0, 0.0)))
+            native.submit_eval_rgb_readback()
+            state = np.asarray(
+                native.complete_eval_components(), dtype=np.float32,
+            )
+            rgb = reference[..., :3].astype(np.float32) / 255.0
+            alpha = reference[..., 3].astype(np.float32) / 255.0
+            prediction, target = composite_v1(
+                state[..., :3], state[..., 3], rgb, alpha,
+                np.zeros(3, np.float32),
+            )
+            workspace = _EvalSsimWorkspace()
+            full = workspace.ssim(prediction, target, validity)
+            foreground_validity = (reference[..., 3] >= 128).astype(np.float32)
+            foreground = workspace.ssim(
+                prediction, target, foreground_validity,
+            )
+            full_actual = float(gpu["ssim_sum"]) / (
+                3.0 * float(gpu["valid_windows"])
+            )
+            foreground_actual = float(gpu["foreground_ssim_sum"]) / (
+                3.0 * float(gpu["foreground_valid_windows"])
+            )
+            self.assertGreater(
+                float(gpu["valid_windows"]),
+                float(gpu["foreground_valid_windows"]),
+            )
+            self.assertGreater(float(gpu["foreground_valid_windows"]), 0.0)
+            self.assertAlmostEqual(full_actual, full, places=5)
+            self.assertAlmostEqual(foreground_actual, foreground, places=5)
+            self.assertNotAlmostEqual(foreground_actual, full_actual, places=3)
+        finally:
+            native.cleanup()
+
     def test_scene_rgb_ignores_reference_alpha(self):
         reference = _reference_rgba(32, 32)
         opaque = reference.copy()

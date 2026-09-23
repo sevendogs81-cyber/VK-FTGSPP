@@ -3,8 +3,8 @@
 The usual path is one script from a clone:
 
 ```bash
-git clone https://github.com/sevendogs81-cyber/FastGS.git
-cd FastGS
+git clone https://github.com/sevendogs81-cyber/TurboGS.git
+cd TurboGS
 bash scripts/setup.sh
 source .venv/bin/activate
 ```
@@ -116,8 +116,8 @@ Use this only if you cannot run `scripts/setup.sh`. The pins must stay the
 same.
 
 ```bash
-git clone https://github.com/sevendogs81-cyber/FastGS.git
-cd FastGS
+git clone https://github.com/sevendogs81-cyber/TurboGS.git
+cd TurboGS
 
 sudo apt-get update
 sudo apt-get install -y build-essential git curl ca-certificates tar coreutils libvulkan-dev libglm-dev

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-command install for FastGS. Pins match .github/workflows/artifacts.yml.
+# One-command install for TurboGS. Pins match .github/workflows/artifacts.yml.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -185,8 +185,9 @@ else
 fi
 
 activate="$ROOT/.venv/bin/activate"
-marker="# FastGS: Slang compiler for native rebuilds"
-if ! grep -qF "$marker" "$activate"; then
+marker="# TurboGS: Slang compiler for native rebuilds"
+legacy_marker="# FastGS: Slang compiler for native rebuilds"
+if ! grep -qF "$marker" "$activate" && ! grep -qF "$legacy_marker" "$activate"; then
   cat >> "$activate" <<EOF
 
 $marker
@@ -288,7 +289,7 @@ fi
 
 cat <<EOF
 
-FastGS training runtime is installed.
+TurboGS training runtime is installed.
 
   source $ROOT/.venv/bin/activate
 EOF

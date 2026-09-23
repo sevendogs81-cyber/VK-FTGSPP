@@ -1,7 +1,7 @@
 [project]
 name = "ftgspp-vulkan-community"
 version = "0.1.0"
-description = "Community FTGSPP pipeline with native Vulkan training and optional DA3 initialization"
+description = "TurboGS: explicit-velocity 4D Gaussian training with native Vulkan and optional DA3 initialization"
 readme = "README.md"
 license = {file = "LICENSE"}
 requires-python = "==3.12.*"

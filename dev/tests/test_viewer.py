@@ -181,10 +181,23 @@ def test_manifest_uses_actual_views(tmp_path):
 
 
 def test_cli_help_lazy():
+    import os
+    from pathlib import Path
     import subprocess
 
     code = 'import sys; from ftgspp.cli import main;\ntry: main(["viewer","--help"])\nexcept SystemExit: pass\nassert "torch" not in sys.modules; assert "ftgspp.training.runner" not in sys.modules; assert "ftgspp._ftgspp_viewer" not in sys.modules'
-    subprocess.run([sys.executable, "-c", code], check=True, capture_output=True)
+    env = os.environ.copy()
+    source_root = str(Path(__file__).parents[2] / "src")
+    env["PYTHONPATH"] = os.pathsep.join(
+        part for part in (source_root, env.get("PYTHONPATH")) if part
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        env=env,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_prepare_legacy_run_and_portable_metadata(tmp_path):

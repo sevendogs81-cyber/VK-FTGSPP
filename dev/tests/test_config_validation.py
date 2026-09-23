@@ -99,6 +99,10 @@ class StaticConfigValidationTests(unittest.TestCase):
         self.assertEqual(config.train.background.mode, "random_solid")
         self.assertEqual(config.pipeline.eval_protocol, "foreground_v1")
         self.assertEqual(config.eval.selector, "foreground_psnr")
+        self.assertEqual(
+            [list(color) for color in config.eval.background_colors[:1]],
+            [[0.0, 0.0, 0.0]],
+        )
         self.assertTrue(config.model.marginal_gating)
         self.assertEqual(
             config.train.relocation.score_mode, "gate_included",
@@ -107,6 +111,14 @@ class StaticConfigValidationTests(unittest.TestCase):
         self.assertFalse(config.train.hard_separation)
         self.assertEqual(config.train.hard_separation_steps, 3000)
         self.assertEqual(list(config.train.hard_relocation_steps), [1500])
+
+    def test_foreground_ranking_background_must_stay_black(self):
+        with self.assertRaisesRegex(ValueError, "background_colors\\[0\\]"):
+            resolve_config(OmegaConf.create({
+                "pipeline": {"mode": "foreground"},
+                "data": {"root": "scene"},
+                "eval": {"background_colors": [[1.0, 1.0, 1.0], [0.0, 0.0, 0.0]]},
+            }), base_dir=ROOT)
 
     def test_scene_pipeline_enables_gate_cc_and_hs_defaults(self):
         config = resolve_config(OmegaConf.create({

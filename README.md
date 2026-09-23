@@ -1,4 +1,4 @@
-# FastGS
+# TurboGS
 
 A Linux/NVIDIA, Python 3.12 implementation of explicit-velocity 4D Gaussian
 training. Clone this repository, run one setup script, then use the `ftgspp`
@@ -30,8 +30,8 @@ float32 buffer atomic add support.
 ## Installation
 
 ```bash
-git clone https://github.com/sevendogs81-cyber/FastGS.git
-cd FastGS
+git clone https://github.com/sevendogs81-cyber/TurboGS.git
+cd TurboGS
 bash scripts/setup.sh
 source .venv/bin/activate
 ```
@@ -120,7 +120,7 @@ camera paths and export. See [viewer setup, controls and limits](docs/viewer.md)
 ## Repository layout
 
 ```text
-FastGS/
+TurboGS/
 ├── scripts/setup.sh   # one-command install
 ├── examples/          # YAML templates (copy or generate via prepare)
 ├── docs/              # install, usage, architecture

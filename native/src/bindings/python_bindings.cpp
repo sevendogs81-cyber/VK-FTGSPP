@@ -614,11 +614,17 @@ public:
         const size_t width = (size_t)map.shape[1];
         const size_t pixels = height * width;
         const uint8_t* source = static_cast<const uint8_t*>(map.ptr);
+        if (target.buffer.size() != pixels * 4)
+            throw std::runtime_error(
+                "bind validity requires a previously bound RGBA image");
         std::vector<uint32_t> prefix((height + 1) * (width + 1), 0u);
+        std::vector<uint32_t> foreground_prefix(
+            (height + 1) * (width + 1), 0u);
         target.validity.assign(pixels, 0u);
         uint32_t valid_pixels = 0;
         for (size_t y = 0; y < height; ++y) {
             uint32_t row_sum = 0;
+            uint32_t foreground_row_sum = 0;
             for (size_t x = 0; x < width; ++x) {
                 const bool valid = source[y*width+x] != 0;
                 if (valid) {
@@ -626,13 +632,21 @@ public:
                     ++valid_pixels;
                     ++row_sum;
                 }
+                const bool foreground = valid
+                    && target.buffer[4 * (y * width + x) + 3] >= 128u;
+                if (foreground)
+                    ++foreground_row_sum;
                 prefix[(y+1)*(width+1)+(x+1)] =
                     prefix[y*(width+1)+(x+1)] + row_sum;
+                foreground_prefix[(y+1)*(width+1)+(x+1)] =
+                    foreground_prefix[y*(width+1)+(x+1)]
+                    + foreground_row_sum;
             }
         }
         if (valid_pixels == 0)
             throw std::runtime_error("train/eval view validity has no valid pixels");
         uint32_t valid_windows = 0;
+        uint32_t foreground_windows = 0;
         if (width > 10 && height > 10) {
             for (size_t y = 5; y + 5 < height; ++y) {
                 for (size_t x = 5; x + 5 < width; ++x) {
@@ -647,11 +661,21 @@ public:
                         target.validity[y*width+x] |= 2u;
                         ++valid_windows;
                     }
+                    const uint32_t foreground_sum =
+                        foreground_prefix[y1*(width+1)+x1]
+                        - foreground_prefix[y0*(width+1)+x1]
+                        - foreground_prefix[y1*(width+1)+x0]
+                        + foreground_prefix[y0*(width+1)+x0];
+                    if (foreground_sum == 121u) {
+                        target.validity[y*width+x] |= 4u;
+                        ++foreground_windows;
+                    }
                 }
             }
         }
         target.valid_pixel_count = valid_pixels;
         target.valid_window_count = valid_windows;
+        target.foreground_window_count = foreground_windows;
         target.has_custom_validity = true;
     }
 
@@ -1767,7 +1791,7 @@ public:
     }
 
     std::string native_abi() const {
-        return "ftgspp-vulkan-community-explicit-v6-abi-v4-validity";
+        return "ftgspp-vulkan-community-explicit-v6-abi-v5-foreground-ssim";
     }
 
     void release_dynamic_view_image(size_t view_idx, bool is_train) {
@@ -1783,6 +1807,7 @@ public:
         target.validity.shrink_to_fit();
         target.valid_pixel_count = 0;
         target.valid_window_count = 0;
+        target.foreground_window_count = 0;
         target.has_custom_validity = false;
     }
 
@@ -2073,7 +2098,7 @@ public:
                     continue;
                 }
                 trainer.copyFromDevice(buffers.eval_metrics);
-                if (buffers.eval_metrics.size() < 8)
+                if (buffers.eval_metrics.size() < 10)
                     throw std::runtime_error("eval metrics buffer is incomplete");
                 se_sum = buffers.eval_metrics[0];
                 ssim_sum = buffers.eval_metrics[1];
@@ -2093,6 +2118,8 @@ public:
         result["valid_windows"] = valid_windows;
         result["roi_ssim_sum"] = buffers.eval_metrics[6];
         result["roi_valid_windows"] = buffers.eval_metrics[7];
+        result["foreground_ssim_sum"] = buffers.eval_metrics[8];
+        result["foreground_valid_windows"] = buffers.eval_metrics[9];
         return result;
     }
 

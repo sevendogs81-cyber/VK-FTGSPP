@@ -1165,6 +1165,8 @@ class NativeVulkanBackend:
             "foreground_samples",
             "valid_pixels",
             "valid_windows",
+            "foreground_ssim_sum",
+            "foreground_valid_windows",
         )
         missing = [key for key in required if key not in gpu]
         if missing:

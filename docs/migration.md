@@ -39,8 +39,8 @@ There is no implicit migration of old execution semantics.
   `eval.lpips_min_roi_size` are removed from training YAML. Optional LPIPS is
   requested only on a locked test split with `ftgspp eval --lpips`; device,
   batch size, and minimum region size are command-line options.
-- `eval.full_validation_on_export` is removed. Hold-out ranking (scene PSNR or
-  foreground object PSNR, plus SSIM_2) always runs on the GPU. Foreground
+- `eval.full_validation_on_export` is removed. Hold-out ranking (scene full-frame
+  PSNR+SSIM_2 or foreground object PSNR+mask-interior foreground SSIM_2) always runs on the GPU. Foreground
   diagnostic metrics are computed after the best snapshot is selected, as a
   required library pipeline step, not a per-dataset switch. Old YAML that still
   names the retired key is ignored.

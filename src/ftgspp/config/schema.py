@@ -249,9 +249,10 @@ class EvalConfig:
     background_colors: list[list[float]] = field(
         default_factory=lambda: [[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]]
     )
-    # Joint ranking uses hold-out PSNR + SSIM. Foreground always audits the
-    # exported model with the full diagnostic suite; in-loop eval is GPU
-    # ranking scalars only.
+    # Joint ranking pairs task PSNR with its SSIM: scene uses full-frame
+    # PSNR+SSIM, foreground uses foreground_psnr+mask-interior foreground_ssim.
+    # Foreground always audits the exported model with the full diagnostic
+    # suite; in-loop eval is GPU ranking scalars only.
     selector: str = "psnr"
     opacity_threshold: float = 0.5
     selector_min_silhouette_iou: float | None = None

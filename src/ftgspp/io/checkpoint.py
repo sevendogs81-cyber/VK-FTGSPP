@@ -47,7 +47,7 @@ HARD_FINAL_CHECKPOINT = "hard_final.npz"
 MAIN_SELECTED_ROLE = "ftgspp-main-selected-handoff-v1"
 HARD_FINAL_ROLE = "ftgspp-hard-final-v1"
 SELECTED_MODEL_ROLE = "ftgspp-selected-model-v1"
-NATIVE_ABI = "ftgspp-vulkan-community-explicit-v6-abi-v4-validity"
+NATIVE_ABI = "ftgspp-vulkan-community-explicit-v6-abi-v5-foreground-ssim"
 SINGLE_VIEW_SAMPLING = (
     "numpy-pcg64(phase_seed+phase_local_optimizer_step)-v2"
 )

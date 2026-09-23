@@ -13,6 +13,7 @@ from ftgspp.training.runner import (
     holdout_is_better,
     joint_quality_score,
     primary_metric_name,
+    selection_ssim_name,
     snapshot_cadence,
 )
 
@@ -48,12 +49,14 @@ def test_foreground_joint_score_uses_object_psnr_not_composite_psnr():
         "foreground_psnr": 23.0,
         "psnr": 28.0,
         "ssim": 0.90,
+        "foreground_ssim": 0.84,
     }
     # Composite PSNR is higher, but the joint score uses object PSNR.
     weaker_object = {
         "foreground_psnr": 22.5,
         "psnr": 29.0,
         "ssim": 0.90,
+        "foreground_ssim": 0.84,
     }
     assert not holdout_is_better(
         weaker_object, current, selector="foreground_psnr",
@@ -62,6 +65,7 @@ def test_foreground_joint_score_uses_object_psnr_not_composite_psnr():
         "foreground_psnr": 23.2,
         "psnr": 27.0,
         "ssim": 0.91,
+        "foreground_ssim": 0.85,
     }
     assert holdout_is_better(
         stronger_object, current, selector="foreground_psnr",
@@ -71,6 +75,8 @@ def test_foreground_joint_score_uses_object_psnr_not_composite_psnr():
 def test_primary_metric_name_matches_selector_contract():
     assert primary_metric_name("psnr") == "psnr"
     assert primary_metric_name("foreground_psnr") == "foreground_psnr"
+    assert selection_ssim_name("psnr") == "ssim"
+    assert selection_ssim_name("foreground_psnr") == "foreground_ssim"
 
 
 def test_foreground_selector_honors_non_degradation_gates():
@@ -78,6 +84,7 @@ def test_foreground_selector_honors_non_degradation_gates():
         "foreground_psnr": 30.0,
         "psnr": 25.0,
         "ssim": 0.9,
+        "foreground_ssim": 0.9,
         "silhouette_iou": 0.81,
         "background_opacity_leakage": 0.04,
     }
@@ -100,12 +107,37 @@ def test_ranking_metrics_do_not_apply_diagnostic_gates():
         "foreground_psnr": 30.0,
         "psnr": 25.0,
         "ssim": 0.9,
+        "foreground_ssim": 0.9,
         "foreground_bundle": "ranking",
     }
     assert holdout_is_better(
         ranking, None, selector="foreground_psnr",
         min_silhouette_iou=0.8, max_background_opacity_leakage=0.05,
         max_foreground_holes=0.1, min_boundary_fscore=0.8,
+    )
+
+
+def test_foreground_selector_uses_foreground_ssim():
+    current = {
+        "foreground_psnr": 23.0,
+        "ssim": 0.99,
+        "foreground_ssim": 0.84,
+    }
+    better_foreground = {
+        "foreground_psnr": 23.0,
+        "ssim": 0.10,
+        "foreground_ssim": 0.85,
+    }
+    worse_foreground = {
+        "foreground_psnr": 23.0,
+        "ssim": 0.999,
+        "foreground_ssim": 0.83,
+    }
+    assert holdout_is_better(
+        better_foreground, current, selector="foreground_psnr",
+    )
+    assert not holdout_is_better(
+        worse_foreground, current, selector="foreground_psnr",
     )
 
 

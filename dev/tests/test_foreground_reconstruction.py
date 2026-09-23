@@ -36,7 +36,11 @@ from ftgspp.training.objective import (
     composite_v1,
     composite_v1_pixel_vjp,
 )
-from ftgspp.training.runner import NativeRunner, _background_context_audit
+from ftgspp.training.runner import (
+    NativeRunner,
+    _background_context_audit,
+    holdout_is_better,
+)
 
 
 def _gpu_holdout(
@@ -46,6 +50,7 @@ def _gpu_holdout(
     prediction: np.ndarray,
     reference: np.ndarray,
     ssim: float = 0.0,
+    foreground_ssim: float | None = None,
     components: dict[str, np.ndarray] | None = None,
     read_components: bool,
 ) -> tuple[dict[str, float], dict[str, np.ndarray] | None]:
@@ -54,13 +59,16 @@ def _gpu_holdout(
     pixels = height * width
     windows = (height - 10) * (width - 10) if height > 10 and width > 10 else 0
     se = float(np.sum((pred - ref) ** 2, dtype=np.float64))
+    object_ssim = float(ssim if foreground_ssim is None else foreground_ssim)
     return {
         "squared_error_sum": se,
         "ssim_sum": float(ssim) * float(windows) * 3.0,
+        "foreground_ssim_sum": object_ssim * float(windows) * 3.0,
         "foreground_squared_error_sum": se,
         "foreground_samples": float(pixels),
         "valid_pixels": float(pixels),
         "valid_windows": float(max(windows, 0)),
+        "foreground_valid_windows": float(max(windows, 0)),
     }, (components if read_components else None)
 
 
@@ -315,6 +323,9 @@ def test_scene_eval_scores_full_rgb_and_ignores_reference_alpha(tmp_path):
     metrics = runner._evaluate(Backend(), dataset, 3)
     assert metrics["protocol"] == "scene_rgb_v1"
     assert metrics["psnr"] == pytest.approx(0.0)
+    assert metrics["ssim_variant"] == "SSIM_2"
+    assert "foreground_ssim" not in metrics
+    assert "full_ssim" not in metrics
 
 
 def test_scene_final_test_optional_lpips_scores_full_frame(tmp_path):
@@ -467,8 +478,8 @@ def test_foreground_in_loop_eval_is_ranking_only(tmp_path):
         ):
             assert bind_validity and not read_components
             return _gpu_holdout(
-                height, width, prediction=rgb, reference=rgb, ssim=0.8,
-                read_components=False,
+                height, width, prediction=rgb, reference=rgb,
+                ssim=0.2, foreground_ssim=0.8, read_components=False,
             )
         def device_metadata(self):
             return {"uuid": "fake-vulkan-device"}
@@ -491,6 +502,92 @@ def test_foreground_in_loop_eval_is_ranking_only(tmp_path):
     assert "silhouette_iou" not in metrics
     assert metrics["foreground_psnr"] is not None
     assert metrics["ssim"] == pytest.approx(0.8)
+    assert metrics["foreground_ssim"] == pytest.approx(0.8)
+    assert metrics["full_ssim"] == pytest.approx(0.2)
+    assert metrics["ssim_variant"] == "foreground_SSIM_2"
+    assert metrics["camera_metrics"]["2"]["ssim"] == pytest.approx(0.8)
+
+
+def test_foreground_full_validation_keeps_full_ssim_on_fixed_backgrounds(tmp_path):
+    height = width = 16
+    rgba = np.full((height, width, 4), 128, np.uint8)
+    rgba[..., 3] = 255
+    intrinsic = np.asarray(
+        [[20, 0, width / 2], [0, 20, height / 2], [0, 0, 1]],
+        np.float32,
+    )
+    view = View(
+        path=tmp_path / "unused.png", frame=0, camera_id=2, timestamp=0.0,
+        w2c=np.eye(4, dtype=np.float32), source_intrinsic=intrinsic,
+        intrinsic=intrinsic, distortion=np.zeros(5, np.float32),
+        size=(height, width), mask_source="alpha",
+    )
+    dataset = Scene(
+        frames=[0], cameras=[2], train_cameras=[], eval_cameras=[2],
+        camera_split_source="test", train_views=[], eval_views=[view], fps=30.0,
+    )
+    rgb = rgba[..., :3].astype(np.float32) / 255.0
+
+    class Backend:
+        native = SimpleNamespace()
+        def view_load_workers(self):
+            return 0
+        def view_cache_capacity(self):
+            return 1
+        def cached_view_image(self, *, is_train, index):
+            return rgba
+        def evaluate_holdout_view(
+            self, index, *, background, bind_validity, read_components,
+        ):
+            assert bind_validity and read_components
+            np.testing.assert_allclose(background, 0.0)
+            components = {
+                "foreground": rgb,
+                "transmittance": np.zeros((height, width), np.float32),
+                "reference_image": rgba,
+                "validity": np.ones((height, width), np.float32),
+            }
+            return _gpu_holdout(
+                height, width, prediction=rgb, reference=rgb,
+                ssim=0.2, foreground_ssim=0.8,
+                components=components, read_components=True,
+            )
+        def device_metadata(self):
+            return {"uuid": "fake-vulkan-device"}
+
+    runner = object.__new__(NativeRunner)
+    runner.config = SimpleNamespace(
+        pipeline=SimpleNamespace(
+            mode="foreground", eval_protocol="foreground_v1",
+        ),
+        run=SimpleNamespace(output_path=tmp_path),
+        train=SimpleNamespace(color_correction=False),
+        eval=SimpleNamespace(
+            frame_interval=1, background_colors=[[0.0, 0.0, 0.0]],
+            opacity_threshold=0.5, selector="foreground_psnr",
+        ),
+    )
+    metrics = runner._evaluate(
+        Backend(), dataset, 9, full_validation=True,
+    )
+    assert metrics["foreground_bundle"] == "diagnostic"
+    assert metrics["ssim"] == pytest.approx(0.8)
+    assert metrics["foreground_ssim"] == pytest.approx(0.8)
+    assert metrics["full_ssim"] == pytest.approx(0.2)
+    assert metrics["fixed_backgrounds"][0]["ssim"] == pytest.approx(0.2)
+    assert holdout_is_better(
+        {
+            "foreground_psnr": metrics["foreground_psnr"],
+            "foreground_ssim": metrics["foreground_ssim"],
+            "ssim": metrics["full_ssim"],
+        },
+        {
+            "foreground_psnr": metrics["foreground_psnr"],
+            "foreground_ssim": metrics["full_ssim"],
+            "ssim": 0.99,
+        },
+        selector="foreground_psnr",
+    )
 
 
 def test_native_backend_reuses_bound_eval_reference_and_validity():
@@ -523,10 +620,12 @@ def test_native_backend_reuses_bound_eval_reference_and_validity():
             return {
                 "squared_error_sum": 0.0,
                 "ssim_sum": 1.0,
+                "foreground_ssim_sum": 1.0,
                 "foreground_squared_error_sum": 0.0,
                 "foreground_samples": 168.0,
                 "valid_pixels": 168.0,
                 "valid_windows": 8.0,
+                "foreground_valid_windows": 8.0,
             }
         def copy_bound_eval_inputs(self, index):
             assert index == 0

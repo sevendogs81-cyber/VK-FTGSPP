@@ -188,8 +188,8 @@ struct VulkanGSPipelineBuffers {
     Buffer<float> ssim_map;  // (H, W, 3, 4)
     Buffer<float> v_pixel_state;  // (H, W, 4)
     Buffer<uint8_t> ref_image;  // (H, W, 4)
-    // Bit 0: valid L1 pixel; bit 1: center has a fully valid 11x11 SSIM
-    // support window.  Kept separate from reference alpha/foreground mask.
+    // Bit 0: valid L1 pixel. Bit 1: center has a fully valid 11x11 SSIM
+    // window. Bit 2: that window lies entirely inside the reference mask.
     Buffer<uint32_t> ref_validity;  // (H, W)
     size_t ref_validity_width = 0;
     size_t ref_validity_height = 0;
@@ -198,8 +198,9 @@ struct VulkanGSPipelineBuffers {
     // Kept on-device until Python requests a log row.
     Buffer<float> loss_accum;  // (6,)
     // Hold-out ranking: se_sum, ssim_sum, fg_se_sum, fg_pixels,
-    // valid_pixels, valid_windows.
-    Buffer<float> eval_metrics;  // (8,)
+    // valid_pixels, valid_windows, roi_ssim_sum, roi_windows,
+    // foreground_ssim_sum, foreground_windows.
+    Buffer<float> eval_metrics;  // (10,)
     Buffer<uint32_t> eval_validity;  // (H, W) ranking validity, not training's
     size_t eval_validity_width = 0;
     size_t eval_validity_height = 0;

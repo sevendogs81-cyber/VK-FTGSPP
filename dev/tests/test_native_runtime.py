@@ -468,6 +468,8 @@ class NativeRuntimeTests(unittest.TestCase):
             self.assertIn("squared_error_sum", gpu)
             self.assertIn("ssim_sum", gpu)
             self.assertIn("foreground_squared_error_sum", gpu)
+            self.assertIn("foreground_ssim_sum", gpu)
+            self.assertIn("foreground_valid_windows", gpu)
             self.assertGreater(float(gpu["valid_pixels"]), 0.0)
             backgrounds = list(native.complete_eval_metrics_multi([
                 (0.0, 0.0, 0.0), (1.0, 1.0, 1.0),

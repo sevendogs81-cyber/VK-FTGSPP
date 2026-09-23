@@ -92,8 +92,10 @@ HS relocation always scores donors from opacity and accumulated image gradient;
 the main phase may still use `train.relocation.score_mode: gate_included`.
 
 A finished run already contains `gaussians.npz` and `gaussians_4dgs.ply`.
-For a main-only run this is the best hold-out joint PSNR+SSIM snapshot unless
-`train.export_best` is false; for an HS run it is the terminal HS model.
+For a main-only scene run this is the best hold-out joint full-frame PSNR+SSIM
+snapshot. Foreground runs use joint `foreground_psnr`+`foreground_ssim` over
+the reference mask interior. This selection is disabled when `train.export_best`
+is false; an HS run exports the terminal HS model.
 Standalone `ftgspp eval` streams the model SHA-256 check
 and loads only this selected model; it does not restore an optimizer checkpoint.
 `ftgspp export` only writes another PLY path:
@@ -127,7 +129,8 @@ only for a frozen recipe.
 
 For a masked subject capture, `pipeline.mode: foreground` derives
 `composite_v1`, requires masks, defaults to calibrated visual-hull carving,
-trains with random solid backgrounds, and ranks checkpoints by foreground PSNR.
+trains with random solid backgrounds, and ranks checkpoints by the joint
+foreground PSNR and foreground SSIM score over valid mask-interior windows.
 `ftgspp train --config ... --pipeline foreground` is the equivalent CLI
 override. Resume always reuses the saved mode.
 
@@ -228,8 +231,8 @@ projects and aggregates points in vectorized arrays, and its robust fusion is
 chunked to bound temporary memory.
 
 The foreground evaluator reports black/white-background PSNR/SSIM, foreground
-PSNR, silhouette IoU, boundary F-score, background opacity leakage, foreground
-holes and mask consistency. An optional validity map is a separate ignore
+PSNR and foreground SSIM, silhouette IoU, boundary F-score, background opacity
+leakage, foreground holes and mask consistency. An optional validity map is a separate ignore
 signal.
 
 ## DA3 point generation

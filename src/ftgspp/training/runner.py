@@ -220,6 +220,17 @@ def _gpu_psnr(squared_error_sum: float, valid_pixels: float) -> float:
     return float(-10.0 * math.log10(max(mse, 1e-12)))
 
 
+def _optional_metric(metrics: dict[str, object], key: str) -> float | None:
+    value = metrics.get(key)
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
 def _gpu_ssim(ssim_sum: float, valid_windows: float) -> float | None:
     if float(valid_windows) <= 0.0:
         return None
@@ -620,6 +631,12 @@ def primary_metric_name(selector: str) -> str:
     return "foreground_psnr" if str(selector) == "foreground_psnr" else "psnr"
 
 
+def selection_ssim_name(selector: str) -> str:
+    """Return the SSIM variant paired with the task PSNR selector."""
+
+    return "foreground_ssim" if str(selector) == "foreground_psnr" else "ssim"
+
+
 def ssim_distortion_db(ssim: float) -> float:
     """Map SSIM residual ``1 - ssim`` into the same ``-10 log10`` units as PSNR."""
 
@@ -657,9 +674,10 @@ def holdout_is_better(
     """Prefer the higher joint PSNR+SSIM score after optional quality gates."""
 
     score_key = primary_metric_name(selector)
+    ssim_key = selection_ssim_name(selector)
     if (
         candidate is None or candidate.get(score_key) is None
-        or candidate.get("ssim") is None
+        or candidate.get(ssim_key) is None
     ):
         return False
     if min_silhouette_iou is not None and "silhouette_iou" in candidate and (
@@ -688,19 +706,22 @@ def holdout_is_better(
     if (
         current_best is None
         or current_best.get(score_key) is None
-        or current_best.get("ssim") is None
+        or current_best.get(ssim_key) is None
     ):
         return True
     return joint_quality_score(
-        float(candidate[score_key]), float(candidate["ssim"]),
+        float(candidate[score_key]), float(candidate[ssim_key]),
     ) > joint_quality_score(
-        float(current_best[score_key]), float(current_best["ssim"]),
+        float(current_best[score_key]), float(current_best[ssim_key]),
     )
 
 
-def joint_selection_fields(psnr: float, ssim: float) -> dict[str, object]:
+def joint_selection_fields(
+    psnr: float, ssim: float, *, ssim_metric: str = "ssim",
+) -> dict[str, object]:
     return {
         "selection_rule": JOINT_SELECTION_RULE,
+        "selection_ssim_metric": str(ssim_metric),
         "joint_score": joint_quality_score(float(psnr), float(ssim)),
     }
 
@@ -763,10 +784,18 @@ def _quality_for_performance_summary(
         "export_step": int(selection["step"]),
         "step": int(selection["step"]),
         "psnr": float(selection["psnr"]),
-        "ssim": float(selection["ssim"]),
         "ssim_variant": selection.get("ssim_variant", "SSIM_2"),
+        "selection_ssim_metric": selection.get(
+            "selection_ssim_metric", "ssim",
+        ),
         "ssim_data_range": float(selection.get("ssim_data_range", 2.0)),
     })
+    selected_ssim = _optional_metric(selection, "ssim")
+    if selected_ssim is not None:
+        quality["ssim"] = selected_ssim
+    for key in ("foreground_psnr", "foreground_ssim", "full_ssim"):
+        if key in selection and selection[key] is not None:
+            quality[key] = float(selection[key])
     if "views" in selection:
         quality["views"] = int(selection["views"])
     return quality
@@ -930,6 +959,18 @@ class NativeRunner:
         )
         if not selected:
             return {}
+        if self.config.pipeline.mode == "foreground":
+            ranking_color = np.asarray(
+                self.config.eval.background_colors[0], np.float32,
+            ).reshape(-1)
+            if (
+                ranking_color.shape != (3,)
+                or float(np.max(np.abs(ranking_color))) > 1e-6
+            ):
+                raise ValueError(
+                    "foreground eval requires eval.background_colors[0] to be "
+                    "black; foreground PSNR and foreground SSIM share that target"
+                )
         eval_begin = time.perf_counter()
 
         worker_fn = getattr(backend, "view_load_workers", None)
@@ -949,7 +990,9 @@ class NativeRunner:
         ) -> dict[str, object]:
             sums: dict[str, object] = {
                 "psnr_sum": 0.0, "ssim_sum": 0.0,
+                "full_ssim_sum": 0.0,
                 "count": 0, "ssim_count": 0,
+                "full_ssim_count": 0,
                 "cameras": {}, "foreground_records": [],
                 "backend_stage_seconds": {}, "score_seconds": 0.0,
             }
@@ -995,12 +1038,22 @@ class NativeRunner:
                 ssim = _gpu_ssim(
                     float(gpu["ssim_sum"]), float(gpu["valid_windows"]),
                 )
+                foreground_ssim = _gpu_ssim(
+                    float(gpu["foreground_ssim_sum"]),
+                    float(gpu["foreground_valid_windows"]),
+                )
                 object_psnr = _gpu_foreground_psnr(
                     float(gpu["foreground_squared_error_sum"]),
                     float(gpu["foreground_samples"]),
                 )
+                selection_ssim = (
+                    foreground_ssim if foreground_protocol else ssim
+                )
                 if not np.isfinite(psnr) or (
                     ssim is not None and not np.isfinite(float(ssim))
+                ) or (
+                    foreground_ssim is not None
+                    and not np.isfinite(float(foreground_ssim))
                 ):
                     raise FloatingPointError(
                         "distributed evaluation produced non-finite metrics on "
@@ -1019,9 +1072,18 @@ class NativeRunner:
                 sums["fg_samples"] = float(sums.get("fg_samples", 0.0)) + float(
                     gpu["foreground_samples"]
                 )
-                if ssim is not None:
-                    sums["ssim_sum"] = float(sums["ssim_sum"]) + float(ssim)
+                if selection_ssim is not None:
+                    sums["ssim_sum"] = float(sums["ssim_sum"]) + float(
+                        selection_ssim
+                    )
                     sums["ssim_count"] = int(sums["ssim_count"]) + 1
+                if ssim is not None:
+                    sums["full_ssim_sum"] = float(
+                        sums["full_ssim_sum"]
+                    ) + float(ssim)
+                    sums["full_ssim_count"] = int(
+                        sums["full_ssim_count"]
+                    ) + 1
                 sums["count"] = int(sums["count"]) + 1
                 camera_key = str(dataset.eval_views[index].camera_id)
                 cameras = sums["cameras"]
@@ -1033,8 +1095,10 @@ class NativeRunner:
                     "count": 0, "ssim_count": 0,
                 })
                 camera["psnr_sum"] = float(camera["psnr_sum"]) + psnr
-                if ssim is not None:
-                    camera["ssim_sum"] = float(camera["ssim_sum"]) + float(ssim)
+                if selection_ssim is not None:
+                    camera["ssim_sum"] = float(
+                        camera["ssim_sum"]
+                    ) + float(selection_ssim)
                     camera["ssim_count"] = int(camera["ssim_count"]) + 1
                 camera["count"] = int(camera["count"]) + 1
                 if not want_diagnostics:
@@ -1096,6 +1160,7 @@ class NativeRunner:
                     report["foreground_roi_ssim"] = None
                     report["foreground_roi_background"] = [0.0, 0.0, 0.0]
                 report["foreground_psnr"] = object_psnr
+                report["foreground_ssim"] = foreground_ssim
                 report.update({
                     "view": int(index),
                     "camera": int(dataset.eval_views[index].camera_id),
@@ -1183,11 +1248,20 @@ class NativeRunner:
         psnr_sum = sum(float(values["psnr_sum"]) for values in partials)
         ssim_sum = sum(float(values["ssim_sum"]) for values in partials)
         ssim_count = sum(int(values["ssim_count"]) for values in partials)
+        full_ssim_sum = sum(
+            float(values.get("full_ssim_sum", 0.0)) for values in partials
+        )
+        full_ssim_count = sum(
+            int(values.get("full_ssim_count", 0)) for values in partials
+        )
+        foreground_protocol = self.config.pipeline.mode == "foreground"
         metrics: dict[str, object] = {
             "step": int(step),
             "psnr": psnr_sum / count,
             "ssim": ssim_sum / ssim_count if ssim_count else None,
-            "ssim_variant": "SSIM_2",
+            "ssim_variant": (
+                "foreground_SSIM_2" if foreground_protocol else "SSIM_2"
+            ),
             "ssim_data_range": 2.0,
             "views": count,
             "rank_eval_counts": [int(values["count"]) for values in partials],
@@ -1208,6 +1282,12 @@ class NativeRunner:
                 })
             },
         }
+        if foreground_protocol:
+            metrics["foreground_ssim"] = metrics["ssim"]
+            metrics["full_ssim"] = (
+                full_ssim_sum / full_ssim_count
+                if full_ssim_count else None
+            )
         metrics["eval_stage_work_seconds"]["cpu_score_and_diagnostics"] = sum(
             float(values.get("score_seconds", 0.0)) for values in partials
         )
@@ -1234,7 +1314,7 @@ class NativeRunner:
             if foreground_records:
                 metrics["foreground_views"] = foreground_records
                 scalar_keys = (
-                    "foreground_psnr", "foreground_roi_ssim",
+                    "foreground_psnr", "foreground_ssim", "foreground_roi_ssim",
                     "silhouette_iou", "soft_silhouette_iou",
                     "soft_silhouette_dice",
                     "boundary_fscore", "background_opacity_leakage",
@@ -1320,7 +1400,7 @@ class NativeRunner:
                 # sufficient statistic; their explicitly named frame mean is the
                 # aggregate contract.
                 for key in (
-                    "foreground_roi_ssim", "boundary_fscore",
+                    "foreground_ssim", "foreground_roi_ssim", "boundary_fscore",
                 ):
                     metrics[key] = metrics[f"{key}_frame_mean"]
                 fixed_reports: list[dict[str, object]] = []
@@ -1356,7 +1436,9 @@ class NativeRunner:
                 if fixed_reports:
                     metrics["psnr_frame_mean"] = psnr_sum / count
                     fixed_reports[0]["psnr"] = metrics["psnr"]
-                    fixed_reports[0]["ssim"] = metrics["ssim"]
+                    fixed_reports[0]["ssim"] = metrics.get(
+                        "full_ssim", metrics["ssim"],
+                    )
         if clocks is not None:
             metrics.update(clocks)
         if wall_equalized:
@@ -1463,13 +1545,13 @@ class NativeRunner:
         else:
             logger.info(
                 "iteration %d: eval %s %s (composite PSNR %.3f, "
-                "SSIM_2 %s) over %d views in %.2fs",
+                "foreground SSIM_2 %s) over %d views in %.2fs",
                 step, primary_metric, (
                     f"{float(primary_score):.3f}"
                     if primary_score is not None else "null"
                 ), metrics["psnr"], (
-                    f"{float(metrics['ssim']):.5f}"
-                    if metrics["ssim"] is not None else "null"
+                    f"{float(metrics['foreground_ssim']):.5f}"
+                    if metrics.get("foreground_ssim") is not None else "null"
                 ), len(selected), metrics["eval_seconds"],
             )
         return metrics
@@ -2119,23 +2201,27 @@ class NativeRunner:
                     best_color_params = None
                 best_metrics = dict(last_eval_metrics or {})
                 primary_metric = primary_metric_name(self.config.eval.selector)
+                selection_ssim_metric = selection_ssim_name(
+                    self.config.eval.selector
+                )
                 primary_score = float(best_metrics[primary_metric])
                 joint_score = joint_quality_score(
-                    primary_score, float(best_metrics["ssim"]),
+                    primary_score, float(best_metrics[selection_ssim_metric]),
                 )
                 if primary_metric == "psnr":
                     logger.info(
                         "iteration %d: new best hold-out joint %.3f "
                         "(psnr %.3f, SSIM %.5f; export candidate)",
-                        step, joint_score, primary_score, best_metrics["ssim"],
+                        step, joint_score, primary_score,
+                        best_metrics[selection_ssim_metric],
                     )
                 else:
                     logger.info(
                         "iteration %d: new best hold-out joint %.3f "
-                        "(%s %.3f, composite PSNR %.3f, SSIM %.5f; "
+                        "(%s %.3f, composite PSNR %.3f, foreground SSIM %.5f; "
                         "export candidate)",
                         step, joint_score, primary_metric, primary_score,
-                        best_metrics["psnr"], best_metrics["ssim"],
+                        best_metrics["psnr"], best_metrics[selection_ssim_metric],
                     )
 
             def publish_if_enabled(
@@ -2760,21 +2846,28 @@ class NativeRunner:
                 primary_metric = primary_metric_name(
                     str(best_metrics["selector"])
                 )
+                selection_ssim_metric = selection_ssim_name(
+                    str(best_metrics["selector"])
+                )
                 selection: dict[str, object] = {
                     "source": "best_eval",
                     "step": int(best_metrics["step"]),
                     "last_step": int(last),
                     "psnr": float(best_metrics["psnr"]),
                     "ssim": float(best_metrics["ssim"]),
-                    "ssim_variant": "SSIM_2",
+                    "ssim_variant": best_metrics.get(
+                        "ssim_variant", "SSIM_2",
+                    ),
                     "ssim_data_range": 2.0,
+                    "selection_ssim_metric": selection_ssim_metric,
                     "views": int(best_metrics.get("views", 0)),
                     "selector": str(best_metrics["selector"]),
                     "primary_metric": primary_metric,
                     "primary_score": float(best_metrics[primary_metric]),
                     **joint_selection_fields(
                         float(best_metrics[primary_metric]),
-                        float(best_metrics["ssim"]),
+                        float(best_metrics[selection_ssim_metric]),
+                        ssim_metric=selection_ssim_metric,
                     ),
                     "candidate_evaluation_scope": str(
                         best_metrics.get("evaluation_scope", "candidate_subset")
@@ -2795,6 +2888,9 @@ class NativeRunner:
                     selection["foreground_psnr"] = float(
                         best_metrics["foreground_psnr"]
                     )
+                for key in ("foreground_ssim", "full_ssim"):
+                    if best_metrics.get(key) is not None:
+                        selection[key] = float(best_metrics[key])
                 if int(best_metrics["step"]) != int(last):
                     if primary_metric == "psnr":
                         logger.info(
@@ -2809,11 +2905,12 @@ class NativeRunner:
                         logger.info(
                             "exporting best hold-out snapshot from step %d "
                             "(joint %.3f, %s %.3f, composite PSNR %.3f, "
-                            "SSIM %.5f) instead of last step %d",
+                            "foreground SSIM %.5f) instead of last step %d",
                             selection["step"], selection["joint_score"],
                             primary_metric,
                             selection["primary_score"], selection["psnr"],
-                            selection["ssim"], last,
+                            selection.get("foreground_ssim", selection["ssim"]),
+                            last,
                         )
             else:
                 final = final_model_snapshot
@@ -2838,20 +2935,43 @@ class NativeRunner:
                 )
                 if selected_metrics is not None:
                     selection["psnr"] = float(selected_metrics["psnr"])
-                    selection["ssim"] = float(selected_metrics["ssim"])
+                    selected_ssim = _optional_metric(selected_metrics, "ssim")
+                    if selected_ssim is not None:
+                        selection["ssim"] = selected_ssim
                     selection["views"] = int(selected_metrics.get("views", 0))
                     primary_metric = primary_metric_name(
                         str(selected_metrics["selector"])
                     )
+                    selection_ssim_metric = selection_ssim_name(
+                        str(selected_metrics["selector"])
+                    )
+                    selection["ssim_variant"] = selected_metrics.get(
+                        "ssim_variant", "SSIM_2",
+                    )
+                    selection["selection_ssim_metric"] = selection_ssim_metric
                     selection["selector"] = str(selected_metrics["selector"])
                     selection["primary_metric"] = primary_metric
-                    selection["primary_score"] = float(
-                        selected_metrics[primary_metric]
+                    primary_score = _optional_metric(
+                        selected_metrics, primary_metric,
                     )
-                    selection.update(joint_selection_fields(
-                        float(selected_metrics[primary_metric]),
-                        float(selected_metrics["ssim"]),
-                    ))
+                    selection_ssim = _optional_metric(
+                        selected_metrics, selection_ssim_metric,
+                    )
+                    if primary_score is not None:
+                        selection["primary_score"] = primary_score
+                    if (
+                        primary_score is not None
+                        and selection_ssim is not None
+                    ):
+                        selection.update(joint_selection_fields(
+                            primary_score,
+                            selection_ssim,
+                            ssim_metric=selection_ssim_metric,
+                        ))
+                    for key in ("foreground_psnr", "foreground_ssim", "full_ssim"):
+                        value = _optional_metric(selected_metrics, key)
+                        if value is not None:
+                            selection[key] = value
                     selection["candidate_evaluation_scope"] = str(
                         selected_metrics.get(
                             "evaluation_scope", "candidate_subset",
