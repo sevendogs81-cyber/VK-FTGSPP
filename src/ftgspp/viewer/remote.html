@@ -496,7 +496,18 @@
           };
         };
         const setCamera = (pos, right, down, forward) => {
-          let rows = [norm(right), norm(down), norm(forward)];
+          // Rebuild a rigid right-handed basis after every free-camera edit.
+          // Independent normalization allows floating-point drift to leak into
+          // recorded paths, where strict pose validation and SLERP need a true
+          // rotation matrix.
+          let f = norm(forward),
+            r = norm(sub(right, mul(f, dot(right, f)))),
+            d = norm(cross(f, r));
+          if (dot(d, down) < 0) {
+            r = mul(r, -1);
+            d = mul(d, -1);
+          }
+          let rows = [r, d, f];
           state.camera.w2c = [
             ...rows.map((row) => [...row, -dot(row, pos)]),
             [0, 0, 0, 1],
@@ -743,9 +754,13 @@
           send("update", updateMessage());
         }
         function cameraChanged() {
-          state.selected_camera = -1;
-          // Free-camera navigation is independent of scene playback.
-          sync();
+          // Pointer events can arrive far above the target render FPS. Avoid
+          // rewriting every sidebar control for pose-only changes; the render
+          // scheduler already coalesces camera updates to one in-flight frame.
+          if (state.selected_camera !== -1) {
+            state.selected_camera = -1;
+            $("camera").value = -1;
+          }
           requestFrame();
         }
         function fit() {

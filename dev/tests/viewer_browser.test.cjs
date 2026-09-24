@@ -119,6 +119,22 @@ test("browser preserves aspect, navigation playback, deltas and decode backpress
     ],
     timestamp: 2,
   };
+  function assertRigid(w2c, label) {
+    const rows = w2c.slice(0, 3).map((row) => row.slice(0, 3)),
+      dot = (a, b) => a.reduce((sum, value, i) => sum + value * b[i], 0),
+      cross = (a, b) => [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+      ];
+    for (const row of rows)
+      assert.ok(Math.abs(dot(row, row) - 1) < 1e-10, `${label}: unit row`);
+    assert.ok(Math.abs(dot(rows[0], rows[1])) < 1e-10, `${label}: orthogonal 0/1`);
+    assert.ok(Math.abs(dot(rows[0], rows[2])) < 1e-10, `${label}: orthogonal 0/2`);
+    assert.ok(Math.abs(dot(rows[1], rows[2])) < 1e-10, `${label}: orthogonal 1/2`);
+    assert.ok(Math.abs(dot(cross(rows[0], rows[1]), rows[2]) - 1) < 1e-10,
+      `${label}: right handed`);
+  }
   const state = {
     camera,
     time: 2,
@@ -258,6 +274,7 @@ test("browser preserves aspect, navigation playback, deltas and decode backpress
   nodes.get("shot").click();
   rolled = ws.sent.at(-1).state.camera.w2c;
   assert.ok(rolled[1][1] < -0.999, "orbit preserves camera roll");
+  assertRigid(rolled, "rolled orbit pose");
   nodes.get("fit").click();
   nodes.get("shot").click();
   rolled = ws.sent.at(-1).state.camera.w2c;
@@ -276,6 +293,7 @@ test("browser preserves aspect, navigation playback, deltas and decode backpress
   rolled = ws.sent.at(-1).state.camera.w2c;
   assert.ok(Math.abs(rolled[0][1]) > 0.4, "roll drag changes camera orientation");
   assert.ok(rolled[2][2] > 0.999, "roll drag preserves the viewing direction");
+  assertRigid(rolled, "continuous roll pose");
   nodes.get("reset").click();
 
   // A square capture like DNA-Rendering must stay square, even if an older

@@ -32,6 +32,8 @@ STATE_FIELDS = frozenset({
 
 MAX_VIDEO_FRAMES = 100_000
 MAX_RECORDED_KEYS = 10_000
+VIDEO_ENCODER_PRESET = "veryfast"
+VIDEO_ENCODER_THREADS = 4
 
 
 class VideoExportCancelled(RuntimeError):
@@ -665,7 +667,9 @@ class RemoteViewer:
             "-video_size", f"{width}x{height}", "-framerate", str(fps),
             "-i", "pipe:0", "-an",
             "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
-            "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+            "-c:v", "libx264", "-preset", VIDEO_ENCODER_PRESET,
+            "-tune", "zerolatency", "-crf", "18",
+            "-threads", str(VIDEO_ENCODER_THREADS),
             "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(temporary),
         ]
         process = subprocess.Popen(
@@ -676,6 +680,16 @@ class RemoteViewer:
         settings = display_options(state)
         settings["transparent"] = False
         self._forward_key = self._encoded_key = self._encoded = None
+
+        def encoder_result():
+            stderr = process.stderr.read() if process.stderr is not None else b""
+            return process.wait(), stderr.decode(errors="replace").strip()
+
+        def encoder_failure(default):
+            code, message = encoder_result()
+            detail = message or default
+            return RuntimeError(f"ffmpeg failed ({code}): {detail}")
+
         try:
             assert process.stdin is not None
             for i in range(count):
@@ -698,7 +712,12 @@ class RemoteViewer:
                 if self._rgba is None or self._rgba.shape != shape:
                     self._rgba = np.empty(shape, dtype=np.uint8)
                 self.renderer.readback_rgba8_into(self._rgba, **settings)
-                process.stdin.write(memoryview(self._rgba).cast("B"))
+                try:
+                    process.stdin.write(memoryview(self._rgba).cast("B"))
+                except BrokenPipeError as exc:
+                    raise encoder_failure(
+                        "encoder stopped while receiving raw video frames"
+                    ) from exc
                 frames.append(dict(index=i, path_time=i / fps, camera=c))
                 now = time.monotonic()
                 if progress is not None and (
@@ -706,11 +725,14 @@ class RemoteViewer:
                 ):
                     progress(i + 1, count, now - started)
                     last_progress = now
-            process.stdin.close()
-            stderr = process.stderr.read() if process.stderr is not None else b""
-            code = process.wait()
+            try:
+                process.stdin.close()
+            except BrokenPipeError as exc:
+                raise encoder_failure(
+                    "encoder stopped while finalizing the video"
+                ) from exc
+            code, message = encoder_result()
             if code:
-                message = stderr.decode(errors="replace").strip()
                 raise RuntimeError(f"ffmpeg failed ({code}): {message or 'unknown error'}")
             os.replace(temporary, target)
             report = dict(
@@ -724,7 +746,11 @@ class RemoteViewer:
                     mode=plan["scene_mode"], start=plan["scene_start"],
                     end=plan["scene_end"],
                 ),
-                display=settings, encoding=dict(codec="h264", crf=18, pixel_format="yuv420p"),
+                display=settings, encoding=dict(
+                    codec="h264", crf=18, pixel_format="yuv420p",
+                    preset=VIDEO_ENCODER_PRESET, tune="zerolatency",
+                    threads=VIDEO_ENCODER_THREADS,
+                ),
                 frames=frames,
             )
             atomic_json(target.with_suffix(".json"), report)

@@ -244,8 +244,11 @@ then atomically publishes an H.264/CRF18/yuv420p file and JSON manifest under
 `RUN/exports/`. It does not write an intermediate PNG sequence. The page shows
 progress, measured frame throughput and estimated remaining time, supports
 cancellation, and provides inline playback plus a token-protected download after
-completion. MP4 is opaque and uses the selected background. An installed
-`ffmpeg` is required on the server.
+completion. MP4 is opaque and uses the selected background. Encoding uses the
+resource-bounded x264 `veryfast`/`zerolatency` pipeline with four threads so
+high-resolution exports do not accumulate a large lookahead queue. An installed
+`ffmpeg` with `libx264` is required on the server; encoder failures are reported
+with FFmpeg's diagnostic instead of a generic pipe error.
 
 The remote worker serializes export with interactive rendering because both use
 one renderer. View updates received during export are coalesced and the newest

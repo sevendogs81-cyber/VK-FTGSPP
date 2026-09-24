@@ -1,6 +1,7 @@
 """Cache correctness, session interoperability and bounded render scheduling."""
 
 import asyncio
+import io
 import json
 from pathlib import Path
 import shutil
@@ -243,8 +244,21 @@ def test_remote_video_export_streams_frames_directly_to_mp4(viewer):
     assert (manifest["width"], manifest["height"]) == (48, 32)
     assert manifest["frame_count"] == 2
     assert manifest["encoding"]["codec"] == "h264"
+    assert manifest["encoding"]["preset"] == "veryfast"
+    assert manifest["encoding"]["tune"] == "zerolatency"
+    assert manifest["encoding"]["threads"] == 4
     assert reports[-1][:2] == (2, 2)
     assert viewer.renderer.times == pytest.approx([.5, .5])
+    video = cv2.VideoCapture(str(target))
+    decoded = []
+    while True:
+        ok, frame = video.read()
+        if not ok:
+            break
+        decoded.append(frame)
+    video.release()
+    assert len(decoded) == 2
+    assert decoded[0].shape == (32, 48, 3)
     assert not list(viewer.output.glob("*.tmp.mp4"))
 
 
@@ -256,6 +270,58 @@ def test_cancelled_video_export_removes_partial_file(viewer):
     ))
     with pytest.raises(VideoExportCancelled):
         viewer.export_video(state, plan, is_cancelled=lambda: True)
+    assert not list(viewer.output.glob("*.mp4"))
+
+
+def test_broken_ffmpeg_pipe_reports_the_encoder_error(viewer, monkeypatch):
+    state = wire(viewer.state)
+    plan = viewer.prepare_video_export(state, dict(
+        mode="view", fps=10, width=48, height=32, time_start=.4, time_end=.5,
+    ))
+
+    class Input:
+        closed = False
+
+        def write(self, data):
+            raise BrokenPipeError(32, "Broken pipe")
+
+        def close(self):
+            self.closed = True
+
+    class Process:
+        def __init__(self):
+            self.stdin = Input()
+            self.stderr = io.BytesIO(
+                b"Error initializing output stream: encoder unavailable\n"
+            )
+            self.returncode = None
+
+        def wait(self, timeout=None):
+            self.returncode = 1
+            return self.returncode
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.returncode = -15
+
+        def kill(self):
+            self.returncode = -9
+
+    command = []
+
+    def start(args, **kwargs):
+        command.extend(args)
+        return Process()
+
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(subprocess, "Popen", start)
+    with pytest.raises(RuntimeError, match="encoder unavailable"):
+        viewer.export_video(state, plan)
+    assert command[command.index("-preset") + 1] == "veryfast"
+    assert command[command.index("-tune") + 1] == "zerolatency"
+    assert command[command.index("-threads") + 1] == "4"
     assert not list(viewer.output.glob("*.mp4"))
 
 

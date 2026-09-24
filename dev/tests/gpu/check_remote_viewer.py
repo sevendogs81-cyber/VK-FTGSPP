@@ -130,6 +130,27 @@ async def check(port, token, scene):
         assert (scene / "viewer_path.json").is_file()
         assert (scene / "viewer_session.json").is_file()
         assert list((scene / "exports").glob("path_*/000000.png"))
+
+        start = float(hello["metadata"]["time_start"])
+        end = min(float(hello["metadata"]["time_end"]), start + .2)
+        assert end > start
+        await ws.send(json.dumps(dict(
+            type="export_video", state=modified,
+            export=dict(
+                mode="view", fps=10, width=96, height=64,
+                scene_mode="range", scene_time=start,
+                time_start=start, time_end=end,
+            ),
+        )))
+        started = await receive(ws, "export_started")
+        assert started["frame_count"] == 2
+        video = await receive(ws, "saved")
+        assert video["action"] == "video"
+        encoded = Path(video["path"])
+        assert encoded.is_file() and encoded.read_bytes()[4:8] == b"ftyp"
+        downloaded = urlopen(base + video["url"] + f"?token={token}", timeout=5).read()
+        assert downloaded == encoded.read_bytes()
+
         await ws.send(json.dumps(dict(type="load_path")))
         restored = await receive(ws, "state")
         assert len(restored["state"]["bookmarks"]) == 2
