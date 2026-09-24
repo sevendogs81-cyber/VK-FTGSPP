@@ -27,8 +27,9 @@ ssh -L 8765:127.0.0.1:8765 USER@SERVER
 The server binds to loopback and accepts one browser at a time. No server X11,
 Wayland, NVIDIA display session, GLFW, or desktop build is required. The server
 still needs a supported NVIDIA **Vulkan compute** device and driver. `--device`
-is the Vulkan ID from `ftgspp doctor`. The browser computer needs only a current
-browser and SSH; it does not need an NVIDIA GPU. The remote extra adds
+is the Vulkan ID from `ftgspp doctor`; the server GPU must meet the
+[hardware compatibility gate](hardware.md). The browser computer needs only a
+current browser and SSH; it does not need an NVIDIA GPU. The remote extra adds
 `websockets` but no frontend build system or Python GUI package. The default
 headless installation continues to omit the remote extra; `--with-viewer` is
 only for the local native window. Both flags can be used together.
@@ -248,7 +249,8 @@ completion. MP4 is opaque and uses the selected background. Encoding uses the
 resource-bounded x264 `veryfast`/`zerolatency` pipeline with four threads so
 high-resolution exports do not accumulate a large lookahead queue. An installed
 `ffmpeg` with `libx264` is required on the server; encoder failures are reported
-with FFmpeg's diagnostic instead of a generic pipe error.
+with FFmpeg's diagnostic instead of a generic pipe error. `scripts/setup.sh`
+installs and checks these tools for the supported setup path.
 
 The remote worker serializes export with interactive rendering because both use
 one renderer. View updates received during export are coalesced and the newest

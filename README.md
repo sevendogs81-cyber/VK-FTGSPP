@@ -17,15 +17,21 @@ and [third-party notices](THIRD_PARTY.md) before use or redistribution.
 
 ## Requirements
 
-- Linux x86_64 and an NVIDIA GPU driver with Vulkan compute support
+- Linux x86_64 with glibc 2.28+ and a supported NVIDIA Vulkan GPU; this does
+  not include every NVIDIA model
 - **Python 3.12.x** (3.11 and 3.13 will fail the native build)
-- `build-essential`, `git`, `curl`, `libvulkan-dev`, and `libglm-dev`
+- `build-essential` with a C++17 compiler, `git`, `curl`, CA certificates,
+  `libvulkan-dev`, and FFmpeg
+  with `ffprobe` and `libx264` (installed or checked by `scripts/setup.sh`)
 - Slang **2026.10** with `slangc` on `PATH` (the setup script pins this)
 - [uv](https://docs.astral.sh/uv/) **0.11.29**
 
-`ftgspp doctor` is the authoritative GPU compatibility check. Native training
-requires 32-lane subgroups, shader Int16/Int64, timeline semaphores, and Vulkan
-float32 buffer atomic add support.
+The compatibility decision is capability-based. A supported device must be an
+NVIDIA physical GPU that `ftgspp doctor` reports as **`VIABLE`**;
+`POSSIBLY VIABLE` is not sufficient for the supported training path. Native
+training requires the compiled subgroup, workgroup, shared-memory, push-constant,
+Int16/Int64, and float32 buffer atomic-add limits. See the complete
+[hardware compatibility, runnable-model estimate, and validation matrix](docs/hardware.md).
 
 ## Installation
 
@@ -110,6 +116,7 @@ camera paths and export. See [viewer setup, controls and limits](docs/viewer.md)
 
 ## Next
 
+- [Hardware compatibility, estimated runnable models, and validated GPUs](docs/hardware.md)
 - [Foreground, DA3, SelfCap, research YAML](docs/usage.md)
 - [Local, SSH browser and headless viewers](docs/viewer.md)
 - [SelfCap train-only speed](docs/performance.md)

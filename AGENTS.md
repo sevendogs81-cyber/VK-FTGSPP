@@ -49,6 +49,8 @@ Read the smallest relevant set before changing behavior:
   boundary, and pinned-tool requirements.
 - `docs/architecture.md`: runtime ownership, initialization, training phases,
   persistence, evaluation, and build boundaries.
+- `docs/hardware.md`: supported GPU capability gates, estimated runnable model
+  families, validated devices, viewer requirements, and `doctor` interpretation.
 - `docs/install.md`: dependency groups and supported installation modes.
 - `docs/usage.md`: public CLI, data, training, foreground, evaluation, and
   optional-component behavior.

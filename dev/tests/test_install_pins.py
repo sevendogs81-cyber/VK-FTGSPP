@@ -61,6 +61,41 @@ def test_setup_separates_training_and_initialization_dependencies():
     assert "--with-da3)" in setup
     assert "--with-viewer)" in setup
     assert "--with-remote)" in setup
+    assert "--with-tensorboard)" in setup
     assert "--core-only" not in setup
     assert '"depth-anything-3": "depth_anything_3.api"' in setup
     assert "resolved outside .venv" in setup
+
+
+def test_setup_glibc_floor_covers_locked_binary_wheels():
+    lock = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))
+
+    def wheel_floor(package_name: str) -> int:
+        package = next(
+            item for item in lock["package"] if item["name"] == package_name
+        )
+        floors = []
+        for wheel in package["wheels"]:
+            filename = wheel["url"].rsplit("/", 1)[-1]
+            if "x86_64" not in filename or not any(
+                tag in filename for tag in ("cp312-", "abi3-", "py3-none-")
+            ):
+                continue
+            tags = [
+                int(value) for value in re.findall(
+                    r"manylinux_2_(\d+)_x86_64", filename
+                )
+            ]
+            if "manylinux2014_x86_64" in filename:
+                tags.append(17)
+            if tags:
+                floors.append(min(tags))
+        assert floors, f"no Linux x86_64 wheel for {package_name}"
+        return min(floors)
+
+    setup = (ROOT / "scripts" / "setup.sh").read_text(encoding="utf-8")
+    core_floor, tensorboard_floor = map(
+        int, re.findall(r"required_glibc_minor=(\d+)", setup)
+    )
+    assert wheel_floor("pycolmap") <= core_floor
+    assert wheel_floor("tensorboard-data-server") <= tensorboard_floor

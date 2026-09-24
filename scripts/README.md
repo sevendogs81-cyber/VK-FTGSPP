@@ -4,6 +4,9 @@
 **0.11.29** to the same versions as `.github/workflows/artifacts.yml`, creates
 `.venv` with Python 3.12, installs the lightweight Vulkan training runtime,
 builds the native wheel from the locked environment, and runs `ftgspp doctor`.
+It also installs/checks `ffmpeg`, `ffprobe`, and `libx264` for SelfCap video
+preparation and MP4 export. The NVIDIA driver and Vulkan ICD must already be
+installed on the host; see [hardware.md](../docs/hardware.md).
 
 ```bash
 bash scripts/setup.sh
@@ -24,9 +27,11 @@ its development headers. See [viewer.md](../docs/viewer.md) for usage. The
 headless `ftgspp render` command works without this option.
 `--with-remote` installs the lightweight `websockets` extra for
 `ftgspp viewer --remote` on an SSH GPU server; it needs no server display or
-desktop build. The two viewer flags can be combined.
+desktop build. `--with-tensorboard` installs optional research visualization
+tools. All setup flags can be combined in one first-install command.
 
-`--skip-apt` skips `apt-get` when every build dependency is already present.
+`--skip-apt` skips `apt-get` when system build and FFmpeg tools are already
+present. CMake can fetch GLM if it is not installed system-wide.
 `--skip-doctor` skips the GPU check (useful on a CPU build machine).
 `--device N` is the Vulkan id passed to doctor, not an `nvidia-smi` ordinal.
 

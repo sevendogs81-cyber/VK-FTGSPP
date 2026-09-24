@@ -9,10 +9,25 @@ bash scripts/setup.sh
 source .venv/bin/activate
 ```
 
+Before running it, the host needs Linux x86_64 with glibc 2.28 or newer
+(2.31 or newer with `--with-tensorboard`),
+`apt-get` and root/sudo access (or all packages already present with
+`--skip-apt`), and network access to fetch uv, Python, Slang, and locked Python
+packages. Native training and rendering also need an installed NVIDIA Linux
+driver with a Vulkan ICD and a GPU in the [runnable range](hardware.md); the
+script does not install or replace the driver. A local desktop viewer needs an
+X11/XWayland display backed by the selected GPU. Raw-RGB initialization and
+LPIPS fetch their model weights on first use unless cached.
+
 Building the wheel compiles C++ and every shader. That step does **not** need
 a GPU. `ftgspp doctor`, `train`, and `eval` do. CUDA ordinals and Vulkan
 device indices can differ; `--devices` is the Vulkan id from `doctor`, not
 `nvidia-smi`.
+
+Not every NVIDIA GPU is supported. Read the
+[hardware compatibility matrix](hardware.md) before installation; the full
+training path requires a physical NVIDIA device classified as `VIABLE`, rather
+than `POSSIBLY VIABLE`, by `ftgspp doctor`.
 
 The default installation is the lightweight Vulkan training runtime. It stays
 Torch-free and is intended for users who already have the masks and keyframe
@@ -31,6 +46,7 @@ a data/training choice; it is not an installation profile.
 `--with-lpips` adds the optional locked final-test metric. It is composable with
 every initialization profile, for example `bash scripts/setup.sh --with-init
 --with-lpips`, and never enables LPIPS during training.
+`--with-tensorboard` adds the optional research visualization tools.
 
 Viewer options are independent of training and initialization. `--with-viewer`
 builds the GLFW / Dear ImGui X11 window and installs its required X11 headers.
@@ -48,18 +64,33 @@ combined with each other and with initialization or LPIPS flags.
 | Add LPIPS to any profile | Add `--with-lpips` to the same setup command |
 | Add the local desktop viewer | Add `--with-viewer` to the same setup command |
 | Add the SSH browser viewer | Add `--with-remote` to the same setup command |
+| Add TensorBoard tools | Add `--with-tensorboard` to the same setup command |
 
 Each setup run synchronizes the selected profile. Use `--with-init` or pass
 both component flags in the same command when both must remain installed.
+To install every public optional component in one pass, use:
+
+```bash
+bash scripts/setup.sh --with-init --with-viewer --with-remote \
+  --with-lpips --with-tensorboard
+```
+
+The command builds the desktop module and installs the full optional Python
+stack; model weights are fetched when their feature first runs.
 
 Release wheels are not published to PyPI. YAML examples live in the **clone**;
 the wheel only provides the `ftgspp` command.
 
 ## What the script does
 
-1. Installs `build-essential`, `git`, `curl`, `libvulkan-dev`, and `libglm-dev`
-   with `apt-get` when they are missing (unless `--skip-apt`). A
+1. Checks Linux x86_64 and the selected glibc minimum, then installs
+   `build-essential`, `git`,
+   `curl`, `ca-certificates`, `tar`,
+   `coreutils`, `libvulkan-dev`, and FFmpeg with `apt-get` when
+   they are missing (unless `--skip-apt`). It verifies C++17, `ffprobe`, and the
+   `libx264` encoder for SelfCap video preparation and MP4 export. A
    `--with-viewer` build also installs the required X11 development headers.
+   CMake downloads GLM 0.9.9.8 when its system headers are absent.
 2. Downloads Slang **2026.10** to `$HOME/.local/slang-2026.10` when `slangc`
    2026.10 is not already on `PATH`, and checks the same tarball checksum as
    CI (`beddadd9b481…`).
@@ -83,17 +114,18 @@ copy is older.
 
 | Layer | Required components | Installed by `setup.sh` |
 |---|---|---|
-| System/build | Linux x86_64, `g++`/`make`, Git, curl/CA certificates, tar/coreutils, Vulkan headers and loader, GLM | Yes, through `apt-get` when needed; otherwise root/sudo or `--skip-apt` is required |
+| System/build | Linux x86_64, glibc 2.28+ (2.31+ with TensorBoard), C++17-capable `g++`/`make`, Git, curl/CA certificates, tar/coreutils, Vulkan headers and loader, GLM | System tools and Vulkan headers are installed through `apt-get` when needed; CMake fetches GLM if absent |
+| Video input/export | `ffmpeg`, `ffprobe`, and the `libx264` encoder | Yes, through `apt-get` when needed, then checked on `PATH` |
 | Shader build | Slang/`slangc` 2026.10 | Yes, pinned with SHA-256 verification |
 | Python/build | CPython 3.12.x, uv 0.11.29, scikit-build-core, pybind11 3.0.1, CMake 3.24+ | Yes |
 | Core runtime | NumPy 2.x, SciPy, OpenCV headless 4.12, pycolmap 3.12, OmegaConf, tqdm | Yes |
-| Native training | NVIDIA driver and a Vulkan device accepted by `ftgspp doctor` | Driver/GPU must already exist |
+| Native training | NVIDIA Linux driver with Vulkan ICD and a device reported as `VIABLE` by `ftgspp doctor`; see [hardware.md](hardware.md) | Driver/GPU must already exist |
 | BiRefNet-HR masks | PyTorch/TorchVision, Transformers, Safetensors, timm, Kornia, einops, and pinned `ZhengPeng7/BiRefNet_HR` | With `--with-birefnet` or `--with-init`; model weights require network or a populated Hugging Face cache |
 | DA3 points/carving | PyTorch/TorchVision, pinned `depth-anything-3==0.1.1`, Addict, evo, ImageIO/MoviePy, Pillow, plyfile, and trimesh | With `--with-da3` or `--with-init`; model weights require network or a populated cache |
 | Locked final-test LPIPS | PyTorch, TorchMetrics and TorchVision | With `--with-lpips`; only needed for `ftgspp eval --lpips` |
 | SSH browser viewer | websockets 15.x | With `--with-remote`; server remains loopback-only and display-free |
 | Local desktop viewer | GLFW 3.4, Dear ImGui v1.91.9b and X11 development headers | With `--with-viewer`; archives are fetched by CMake using pinned SHA-256 values |
-| TensorBoard | TensorBoard | No; install `.[tensorboard]` |
+| TensorBoard | TensorBoard | With `--with-tensorboard` |
 
 The pinned BiRefNet-HR repository publishes a broad
 [training/application requirements file](https://huggingface.co/ZhengPeng7/BiRefNet_HR/blob/a7a562f6fd16021180f2f4348f4de003a2d3d1e1/requirements.txt)
@@ -120,7 +152,7 @@ git clone https://github.com/sevendogs81-cyber/TurboGS.git
 cd TurboGS
 
 sudo apt-get update
-sudo apt-get install -y build-essential git curl ca-certificates tar coreutils libvulkan-dev libglm-dev
+sudo apt-get install -y build-essential git curl ca-certificates tar coreutils libvulkan-dev libglm-dev ffmpeg
 
 curl -fsSL https://github.com/shader-slang/slang/releases/download/v2026.10/slang-2026.10-linux-x86_64-glibc-2.27.tar.gz \
   -o /tmp/slang.tgz
@@ -139,6 +171,10 @@ source .venv/bin/activate
 uv sync --locked --no-dev --no-editable
 ftgspp doctor --devices 0
 ```
+
+Check `ffprobe -version` and `ffmpeg -hide_banner -encoders` for `libx264`
+before SelfCap preparation or MP4 export. Debian/Ubuntu's `ffmpeg` package
+normally supplies all three.
 
 For the SSH browser viewer, add `--extra remote` to the `uv sync` command.
 For the local desktop viewer, install
@@ -159,13 +195,15 @@ project-level uv resolver metadata.
 
 ## Troubleshooting
 
-The JSON `name` from `doctor` should be an NVIDIA GPU, not `llvmpipe`. Use
-that object's `device_id` as `--devices`. CUDA ordinals from `nvidia-smi` and
+The selected device from `doctor` must be an NVIDIA GPU classified as `VIABLE`,
+not `POSSIBLY VIABLE`, `NOT VIABLE`, or `llvmpipe`. Use that device's JSON
+`device_id` as `--devices`. CUDA ordinals from `nvidia-smi` and
 Vulkan ids often differ: on a two-GPU Linux host, Vulkan index `1` can be
 `llvmpipe` while `nvidia-smi` GPU `1` is the second NVIDIA card. Doctor opens
 a real device; it fails on a CPU-only build machine even when the wheel
 compiled. `scripts/setup.sh` treats a doctor failure as a warning so a CPU
-host can still finish the install.
+host can still finish the install. Passing the feature gate does not guarantee
+enough VRAM for a particular run; see [hardware.md](hardware.md).
 
 If `slangc: not found`, Python/CMake cannot find 3.12, or Vulkan headers are
 missing, stop and fix that step. Do not pass `--devices` with two ids: the

@@ -52,6 +52,7 @@ jobs:
                   "native/slang/ftgspp_image_objective.slang",
                   "native/slang/viewer_pack.slang",
                   "docs/architecture.md",
+                  "docs/hardware.md",
                   "docs/migration.md",
                   "docs/install.md",
                   "docs/usage.md",

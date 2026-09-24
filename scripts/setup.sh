@@ -30,9 +30,9 @@ usage() {
   cat <<'EOF'
 Usage: bash scripts/setup.sh [options]
 
-Install system build dependencies, pin Slang 2026.10 and uv 0.11.29, create
-.venv with Python 3.12, install the lightweight Vulkan training runtime, build
-the native extension, and run ftgspp doctor. Prepared initialization artifacts
+Install system build and FFmpeg dependencies, pin Slang 2026.10 and uv 0.11.29,
+create .venv with Python 3.12, install the lightweight Vulkan training runtime,
+build the native extension, and run ftgspp doctor. Prepared initialization artifacts
 (including foreground masks and the point-cloud set required by the config)
 are required unless an initialization option is selected.
 
@@ -43,7 +43,8 @@ Options:
   --with-birefnet   Install BiRefNet-HR mask generation
   --with-da3        Install DA3 point generation
   --with-lpips      Install optional locked final-test LPIPS dependencies
-  --skip-apt        Do not call apt-get (headers must already be present)
+  --with-tensorboard  Install optional TensorBoard tools
+  --skip-apt        Do not call apt-get (system tools and Vulkan/X11 headers must be present)
   --skip-doctor     Skip the GPU check after install
   --device N        Vulkan device id passed to ftgspp doctor (default: 0)
   -h, --help        Show this help
@@ -64,6 +65,7 @@ while [[ $# -gt 0 ]]; do
     --with-birefnet) add_extra birefnet; shift ;;
     --with-da3) add_extra da3; shift ;;
     --with-lpips) add_extra lpips; shift ;;
+    --with-tensorboard) add_extra tensorboard; shift ;;
     --device)
       [[ $# -ge 2 ]] || { echo "error: --device needs an integer" >&2; exit 2; }
       DOCTOR_DEVICE="$2"
@@ -82,13 +84,29 @@ if [[ "$(uname -s)" != "Linux" || "$(uname -m)" != "x86_64" ]]; then
   echo "error: this release targets Linux x86_64" >&2
   exit 1
 fi
+required_glibc_minor=28
+for extra in "${INSTALL_EXTRAS[@]}"; do
+  if [[ "$extra" == "tensorboard" ]]; then
+    required_glibc_minor=31
+  fi
+done
+libc_version="$(getconf GNU_LIBC_VERSION 2>/dev/null || true)"
+if [[ ! "$libc_version" =~ ^glibc[[:space:]]+([0-9]+)\.([0-9]+)$ ]] || \
+   ((10#${BASH_REMATCH[1]:-0} < 2 || \
+     (10#${BASH_REMATCH[1]:-0} == 2 && 10#${BASH_REMATCH[2]:-0} < required_glibc_minor))); then
+  echo "error: this install profile requires glibc 2.${required_glibc_minor} or newer (found ${libc_version:-unknown})" >&2
+  exit 1
+fi
 
 need_apt=()
 if ! command -v g++ >/dev/null 2>&1 || ! command -v make >/dev/null 2>&1; then
   need_apt+=(build-essential)
 fi
 if ! command -v curl >/dev/null 2>&1; then
-  need_apt+=(curl ca-certificates)
+  need_apt+=(curl)
+fi
+if [[ ! -s /etc/ssl/certs/ca-certificates.crt ]]; then
+  need_apt+=(ca-certificates)
 fi
 if ! command -v git >/dev/null 2>&1; then
   need_apt+=(git)
@@ -102,8 +120,8 @@ fi
 if [[ ! -e /usr/include/vulkan/vulkan.h ]]; then
   need_apt+=(libvulkan-dev)
 fi
-if [[ ! -e /usr/include/glm/glm.hpp ]]; then
-  need_apt+=(libglm-dev)
+if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then
+  need_apt+=(ffmpeg)
 fi
 if [[ "$WITH_VIEWER" -eq 1 ]]; then
   for header_pkg in "X11/Xlib.h:libx11-dev" "X11/extensions/Xrandr.h:libxrandr-dev" "X11/extensions/Xinerama.h:libxinerama-dev" "X11/Xcursor/Xcursor.h:libxcursor-dev" "X11/extensions/XInput2.h:libxi-dev"; do
@@ -127,6 +145,19 @@ if ((${#need_apt[@]})) && [[ "$SKIP_APT" -eq 0 ]]; then
   "${apt[@]}" install -y "${need_apt[@]}"
 elif ((${#need_apt[@]})); then
   echo "error: --skip-apt was set but missing ${need_apt[*]}" >&2
+  exit 1
+fi
+
+if ! printf '#include <optional>\nint main() { return std::optional<int>{0}.value(); }\n' | \
+   g++ -std=c++17 -x c++ -fsyntax-only - >/dev/null 2>&1; then
+  echo "error: a C++17-capable g++ and standard library are required" >&2
+  exit 1
+fi
+
+if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1 || \
+   ! ffmpeg -hide_banner -encoders 2>/dev/null | grep -E 'libx264[[:space:]]' >/dev/null; then
+  echo "error: FFmpeg with ffprobe and the libx264 encoder is required for SelfCap preparation and MP4 export" >&2
+  echo "error: install the distribution's ffmpeg package or select a complete FFmpeg build on PATH" >&2
   exit 1
 fi
 
@@ -260,6 +291,8 @@ if "lpips" in extras:
     })
 if "remote" in extras:
     required["websockets"] = "websockets"
+if "tensorboard" in extras:
+    required["tensorboard"] = "tensorboard"
 
 venv = Path(sys.prefix).resolve()
 versions = []

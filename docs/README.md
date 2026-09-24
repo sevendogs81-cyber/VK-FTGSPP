@@ -5,6 +5,7 @@ landing page is not enough.
 
 | Doc | Audience |
 |---|---|
+| [hardware.md](hardware.md) | Capability gates, estimated runnable GPU families, validated hardware, and `doctor` interpretation |
 | [install.md](install.md) | Manual install, pins, and troubleshooting |
 | [usage.md](usage.md) | Prepare / train / eval, foreground, DA3, research YAML |
 | [viewer.md](viewer.md) | Local and SSH browser viewers, cameras, playback, screenshots and headless export |

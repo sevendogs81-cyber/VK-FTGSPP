@@ -330,6 +330,9 @@ only.
 
 SelfCap video layouts:
 
+The default setup installs `ffmpeg` and `ffprobe` for video extraction. If you
+used `--skip-apt` or a manual installation, both commands must be on `PATH`.
+
 ```bash
 ftgspp prepare selfcap --scene-root <scene> --init-backend da3 --write-config scene.yaml
 ```
