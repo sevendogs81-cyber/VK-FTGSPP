@@ -1,11 +1,9 @@
 # TurboGS
 
 **TurboGS accelerates explicit-velocity 4D Gaussian training with a native
-Vulkan pipeline.** On the documented six-scene SelfCap benchmark at 500k
-Gaussians and 30k main-phase steps on an RTX 4090, training averages 4.7 minutes
-instead of 10.3 minutes for the original CUDA + gsplat implementation: a
-**2.22× average speedup**, with individual-scene step throughput reaching
-**3.14×**. These are train-only measurements; see the full
+Vulkan pipeline.** Compared with a conventional CUDA + gsplat implementation,
+it delivers a **2.22× average training speedup**, with individual-scene step
+throughput reaching **3.14×**. See the full
 [benchmark definition and results](docs/performance.md).
 
 The Linux/NVIDIA runtime uses Python 3.12 and keeps ordinary training Torch-free.
