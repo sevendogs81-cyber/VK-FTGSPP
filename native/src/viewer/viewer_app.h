@@ -69,6 +69,7 @@ private:
   glm::vec3 pivot{0};
   Viewport viewport;
   void fit();
+  void roll_camera(float radians);
   void input(float dt);
   void draw_ui(ViewerEvents &);
   void sample_path(float t);

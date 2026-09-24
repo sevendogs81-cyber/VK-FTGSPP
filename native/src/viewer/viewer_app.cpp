@@ -7,15 +7,18 @@
 #include <glm/gtx/quaternion.hpp>
 #include <stdexcept>
 namespace ftgspp {
-static glm::mat4 cv_look(glm::vec3 eye, glm::vec3 target, glm::vec3 up) {
-  glm::vec3 front = glm::normalize(target - eye);
-  if (std::abs(glm::dot(front, up)) > 0.99f)
-    up = std::abs(front.y) < 0.9f ? glm::vec3(0, -1, 0) : glm::vec3(1, 0, 0);
-  glm::vec3 right = glm::normalize(glm::cross(front, up)),
-            down = glm::cross(front, right);
+static glm::mat4 cv_pose(glm::vec3 eye, glm::vec3 right, glm::vec3 down,
+                         glm::vec3 front) {
+  front = glm::normalize(front);
+  right = glm::normalize(right - glm::dot(right, front) * front);
+  glm::vec3 rebuilt_down = glm::normalize(glm::cross(front, right));
+  if (glm::dot(rebuilt_down, down) < 0) {
+    right = -right;
+    rebuilt_down = -rebuilt_down;
+  }
   glm::mat4 c2w(1);
   c2w[0] = glm::vec4(right, 0);
-  c2w[1] = glm::vec4(down, 0);
+  c2w[1] = glm::vec4(rebuilt_down, 0);
   c2w[2] = glm::vec4(front, 0);
   c2w[3] = glm::vec4(eye, 1);
   return glm::inverse(c2w);
@@ -132,13 +135,24 @@ void ViewerApp::set_camera(const ViewCamera &c) {
 }
 void ViewerApp::fit() {
   glm::mat4 c2w = glm::inverse(camera.w2c);
-  glm::vec3 front = glm::normalize(glm::vec3(c2w[2]));
+  glm::vec3 right(c2w[0]), down(c2w[1]), front(c2w[2]);
+  front = glm::normalize(front);
   float half_fov = std::atan(0.5f * camera.height / camera.fy);
   float distance = std::max(scene.radius, 0.01f) /
                    std::max(std::sin(half_fov), 0.05f) * 1.2f;
   pivot = scene.center;
-  camera.w2c = cv_look(pivot - front * distance, pivot, scene.world_up);
+  camera.w2c = cv_pose(pivot - front * distance, right, down, front);
   dirty = true;
+}
+void ViewerApp::roll_camera(float radians) {
+  glm::mat4 c2w = glm::inverse(camera.w2c);
+  glm::vec3 eye(c2w[3]), right(c2w[0]), down(c2w[1]), front(c2w[2]);
+  glm::quat rotation = glm::angleAxis(radians, glm::normalize(front));
+  camera.w2c = cv_pose(eye, rotation * right, rotation * down, front);
+  path_playing = false;
+  selected_camera = -1;
+  dirty = true;
+  last_motion = glfwGetTime();
 }
 ViewCamera ViewerApp::output_camera(int w, int h) const {
   ViewCamera c = camera;
@@ -176,36 +190,52 @@ void ViewerApp::input(float dt) {
   bool changed = false;
   glm::mat4 c2w = glm::inverse(camera.w2c);
   glm::vec3 eye(c2w[3]), right(c2w[0]), down(c2w[1]), front(c2w[2]);
+  right = glm::normalize(right);
+  down = glm::normalize(down);
+  front = glm::normalize(front);
   float distance = std::max(glm::length(eye - pivot), scene.radius * 0.05f);
   if (inside && !io.WantCaptureMouse) {
     float dx = io.MouseDelta.x, dy = io.MouseDelta.y;
     if ((io.MouseDown[0] || io.MouseDown[1] || io.MouseDown[2]) && (dx || dy)) {
-      if (io.MouseDown[2] || (io.MouseDown[0] && io.KeyShift)) {
+      if (io.MouseDown[0] && io.KeyCtrl) {
+        glm::quat rotation = glm::angleAxis(dx * 0.004f, front);
+        right = rotation * right;
+        down = rotation * down;
+      } else if (io.MouseDown[2] || (io.MouseDown[0] && io.KeyShift)) {
         glm::vec3 shift =
             (-dx * right - dy * down) * (distance / std::max(camera.fy, 1.0f));
         eye += shift;
         pivot += shift;
       } else if (io.MouseDown[1] || fly) {
-        glm::quat yaw = glm::angleAxis(-dx * 0.004f, scene.world_up),
-                  pitch = glm::angleAxis(-dy * 0.004f, right);
-        front = glm::normalize(yaw * pitch * front);
-        camera.w2c = cv_look(eye, eye + front, scene.world_up);
+        glm::quat yaw = glm::angleAxis(-dx * 0.004f, scene.world_up);
+        right = yaw * right;
+        down = yaw * down;
+        front = yaw * front;
+        glm::quat pitch = glm::angleAxis(-dy * 0.004f, right);
+        right = pitch * right;
+        down = pitch * down;
+        front = pitch * front;
         pivot = eye + front * distance;
       } else {
         glm::vec3 offset = eye - pivot;
-        offset = glm::angleAxis(-dx * 0.004f, scene.world_up) * offset;
-        glm::vec3 next = glm::angleAxis(-dy * 0.004f, right) * offset;
-        if (std::abs(glm::dot(glm::normalize(next), scene.world_up)) < 0.995f)
-          offset = next;
+        glm::quat yaw = glm::angleAxis(-dx * 0.004f, scene.world_up);
+        offset = yaw * offset;
+        right = yaw * right;
+        down = yaw * down;
+        front = yaw * front;
+        glm::quat pitch = glm::angleAxis(-dy * 0.004f, right);
+        offset = pitch * offset;
+        right = pitch * right;
+        down = pitch * down;
+        front = pitch * front;
         eye = pivot + offset;
-        front = glm::normalize(pivot - eye);
       }
-      camera.w2c = cv_look(eye, eye + front, scene.world_up);
+      camera.w2c = cv_pose(eye, right, down, front);
       changed = true;
     }
     if (io.MouseWheel != 0) {
       eye = pivot + (eye - pivot) * std::exp(-io.MouseWheel * 0.12f);
-      camera.w2c = cv_look(eye, pivot, scene.world_up);
+      camera.w2c = cv_pose(eye, right, down, front);
       changed = true;
     }
     if ((io.MouseDown[1] || fly) && !io.WantCaptureKeyboard) {
@@ -226,7 +256,7 @@ void ViewerApp::input(float dt) {
         delta *= dt * std::max(scene.radius, 0.1f) * (io.KeyShift ? 4 : 1);
         eye += delta;
         pivot += delta;
-        camera.w2c = cv_look(eye, eye + front, scene.world_up);
+        camera.w2c = cv_pose(eye, right, down, front);
         changed = true;
       }
     }
@@ -317,6 +347,14 @@ void ViewerApp::draw_ui(ViewerEvents &ev) {
         pivot = scene.center;
         dirty = true;
       }
+      if (ImGui::Button("Roll -90"))
+        roll_camera(glm::radians(-90.0f));
+      ImGui::SameLine();
+      if (ImGui::Button("Flip 180"))
+        roll_camera(glm::radians(180.0f));
+      ImGui::SameLine();
+      if (ImGui::Button("Roll +90"))
+        roll_camera(glm::radians(90.0f));
       ImGui::Checkbox("Fly (WASD / Q E)", &fly);
       ImGui::Checkbox("Axes", &axes);
       ImGui::SameLine();
@@ -464,8 +502,9 @@ void ViewerApp::draw_ui(ViewerEvents &ev) {
     if (ImGui::CollapsingHeader("Controls"))
       ImGui::TextWrapped(
           "Left drag: orbit. Shift+left / middle: pan. Right drag: look. "
-          "Wheel: dolly. Right+WASD/QE: fly. Space: play. Arrows: sample. R: "
-          "reset. F: fit. Ctrl+S: screenshot. F11: fullscreen.");
+          "Ctrl+left: roll. Wheel: dolly. Right+WASD/QE: fly. Space: play. "
+          "Arrows: sample. R: reset. F: fit. Ctrl+S: screenshot. F11: "
+          "fullscreen.");
   }
   ImGui::End();
   ImGui::SetNextWindowPos({0, std::max(0.f, io.DisplaySize.y - 76)});

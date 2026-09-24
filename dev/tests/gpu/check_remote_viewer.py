@@ -59,6 +59,7 @@ async def check(port, token, scene):
 
     async with connect(endpoint, origin=base) as ws:
         hello = await receive(ws, "hello")
+        assert hello["output_path"] == str((scene / "exports").resolve())
         frame = await receive(ws, "frame")
         jpeg = await receive(ws, "binary")
         assert jpeg[:3] == b"\x01\xff\xd8", frame
@@ -128,7 +129,7 @@ async def check(port, token, scene):
                 await receive(ws, "binary")
         assert (scene / "viewer_path.json").is_file()
         assert (scene / "viewer_session.json").is_file()
-        assert list((scene / "viewer_output").glob("path_*/000000.png"))
+        assert list((scene / "exports").glob("path_*/000000.png"))
         await ws.send(json.dumps(dict(type="load_path")))
         restored = await receive(ws, "state")
         assert len(restored["state"]["bookmarks"]) == 2

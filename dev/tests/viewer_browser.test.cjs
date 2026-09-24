@@ -144,6 +144,7 @@ test("browser preserves aspect, navigation playback, deltas and decode backpress
     data: JSON.stringify({
       type: "hello",
       state,
+      output_path: "/runs/example/exports",
       metadata: {
         initial_camera: camera,
         cameras: [],
@@ -157,6 +158,10 @@ test("browser preserves aspect, navigation playback, deltas and decode backpress
     }),
   });
   assert.equal(nodes.get("camera").disabled, true);
+  assert.equal(
+    nodes.get("outputPath").textContent,
+    "Server exports: /runs/example/exports",
+  );
   assert.equal(nodes.get("time").min, 2);
   assert.equal(nodes.get("speed").value, 1);
   assert.equal(
@@ -235,6 +240,43 @@ test("browser preserves aspect, navigation playback, deltas and decode backpress
   nodes.get("camera").value = -1;
   nodes.get("camera").onchange();
   captureDimensions(800, 450, "free camera");
+
+  // Roll is a real camera-pose edit. A 180-degree correction must survive
+  // subsequent orbiting so upside-down captures remain usable in free view.
+  nodes.get("reset").click();
+  nodes.get("rollFlip").click();
+  nodes.get("shot").click();
+  let rolled = ws.sent.at(-1).state.camera.w2c;
+  assert.ok(rolled[0][0] < -0.999, "180 roll reverses camera right");
+  assert.ok(rolled[1][1] < -0.999, "180 roll reverses camera down");
+  assert.ok(rolled[2][2] > 0.999, "roll preserves the viewing direction");
+  stage.listeners.pointerdown({
+    button: 0, clientX: 20, clientY: 20, pointerId: 1, preventDefault() {},
+  });
+  stage.listeners.pointermove({ clientX: 70, clientY: 20 });
+  stage.listeners.pointerup();
+  nodes.get("shot").click();
+  rolled = ws.sent.at(-1).state.camera.w2c;
+  assert.ok(rolled[1][1] < -0.999, "orbit preserves camera roll");
+  nodes.get("fit").click();
+  nodes.get("shot").click();
+  rolled = ws.sent.at(-1).state.camera.w2c;
+  assert.ok(rolled[1][1] < -0.999, "fit preserves camera roll");
+  nodes.get("reset").click();
+
+  // Ctrl+left drag provides continuous optical-axis rotation in addition to
+  // the exact-angle buttons.
+  stage.listeners.pointerdown({
+    button: 0, ctrlKey: true, clientX: 20, clientY: 20, pointerId: 1,
+    preventDefault() {},
+  });
+  stage.listeners.pointermove({ clientX: 120, clientY: 20 });
+  stage.listeners.pointerup();
+  nodes.get("shot").click();
+  rolled = ws.sent.at(-1).state.camera.w2c;
+  assert.ok(Math.abs(rolled[0][1]) > 0.4, "roll drag changes camera orientation");
+  assert.ok(rolled[2][2] > 0.999, "roll drag preserves the viewing direction");
+  nodes.get("reset").click();
 
   // A square capture like DNA-Rendering must stay square, even if an older
   // session carried lock_camera=false, and after loading a bookmark.

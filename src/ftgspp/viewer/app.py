@@ -12,6 +12,13 @@ from .path import PATH_SCHEMA, from_state, load_path, save_path
 from .session import load_session, save_session, validate_state
 
 
+DEFAULT_EXPORT_DIRECTORY = "exports"
+
+
+def default_export_root(asset):
+    return asset.model_path.parent / DEFAULT_EXPORT_DIRECTORY
+
+
 def parser_for(command):
     p = argparse.ArgumentParser(prog=f"ftgspp {command}")
     sources = p.add_mutually_exclusive_group(required=True)
@@ -56,7 +63,7 @@ def parser_for(command):
             help="do not automatically load/save session",
         )
         p.add_argument(
-            "--output", type=Path, help="capture directory; default: run/viewer_output"
+            "--output", type=Path, help="capture/export directory; default: run/exports"
         )
         p.add_argument(
             "--frames", type=int, default=0, help="close after N frames (automation)"
@@ -149,13 +156,14 @@ def run_desktop(args, asset):
         args.height or 800,
         not args.no_vsync,
     )
-    output = args.output or asset.model_path.parent / "viewer_output"
+    output = args.output or default_export_root(asset)
     session = args.session or asset.model_path.parent / "viewer_session.json"
     path_file = args.camera_path or asset.model_path.parent / "viewer_path.json"
     last_report = time.monotonic()
     try:
         app.load_scene(asset.model.arrays(), asset.metadata)
         asset.model = None  # Do not retain a second host copy during normal browsing.
+        app.status = f"Exports: {output.resolve()}"
         if session.is_file() and not args.no_session:
             try:
                 app.restore_state(load_session(session, asset))
@@ -194,9 +202,10 @@ def run_desktop(args, asset):
                     if not args.session:
                         session = asset.model_path.parent / "viewer_session.json"
                     if not args.output:
-                        output = asset.model_path.parent / "viewer_output"
+                        output = default_export_root(asset)
                     if not args.camera_path:
                         path_file = asset.model_path.parent / "viewer_path.json"
+                    app.status = f"Exports: {output.resolve()}"
                 if ev["screenshot"]:
                     file = unique_path(output, "capture", ".png")
                     screenshot(app, asset, file)

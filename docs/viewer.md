@@ -33,12 +33,15 @@ browser and SSH; it does not need an NVIDIA GPU. The remote extra adds
 headless installation continues to omit the remote extra; `--with-viewer` is
 only for the local native window. Both flags can be used together.
 
-The remote UI has orbit, pan, look/fly, dolly, fit/reset, calibrated capture
+The remote UI has orbit, pan, look/fly, optical-axis roll, dolly, fit/reset, calibrated capture
 cameras, playback/speed/loop/sample snap, RGB/Alpha/T, background/exposure,
 SH/threshold, faithful/interactive quality, PNG screenshot, camera path
 keyframes/preview/save/load/export, direct MP4 export, and session save/load.
-Session and path files are stored on the **server** beside the model by default;
-PNG screenshots and MP4 videos are saved there and downloaded to the browser.
+Session and path files are stored on the **server** beside the model by default.
+PNG screenshots, path image sequences, and MP4 videos are saved under
+`RUN/exports/`. Remote screenshots download automatically, and completed MP4
+files have a download link. The remote page shows the absolute server export
+directory below the screenshot controls.
 Use `--session`, `--camera-path`, and
 `--output` for alternate server paths. A supplied `--camera-path` is loaded on
 start and must already exist. Automatic session load/save works as in the native
@@ -47,6 +50,10 @@ aspect ratio, with centered letterboxing as the browser or local window changes.
 Orbit, pan, dolly, fit/reset, playback and old sessions cannot unlock the aspect.
 Orbit, pan, look/fly, dolly and fit preserve scene playback: a playing scene
 keeps advancing while navigating, and a paused scene stays paused.
+Use the camera panel's `Roll -90°`, `Flip 180°`, and `Roll +90°` buttons to
+correct sideways or upside-down datasets exactly. `Ctrl + left drag` adjusts
+roll continuously. Orbit, look, pan, dolly, and fit preserve the chosen roll;
+reset or selecting a calibrated camera restores that camera's stored pose.
 Selecting another calibrated camera uses that camera's original aspect.
 `--width`/`--height` set the initial remote bounding box; browser resizes choose
 later boxes up to 1920×1080 for viewing. Screenshots and path exports fit the
@@ -142,6 +149,7 @@ repository's PLY export omits the gate needed to reproduce the native model.
 | Orbit | Left drag in the viewport |
 | Pan | Middle drag or Shift + left drag |
 | Look / fly | Right drag; right + WASD / Q/E; Shift accelerates |
+| Camera roll | Ctrl + left drag; Camera → Roll −90 / Flip 180 / Roll +90 |
 | Persistent fly mode | Camera → Fly |
 | Dolly | Mouse wheel |
 | Fit / reset | F / R, or Camera buttons |
@@ -184,7 +192,7 @@ it excludes swapchain/driver/ImGui memory and is not total process VRAM.
 
 ## Screenshots, sessions and paths
 
-Screenshots go to `RUN/viewer_output/capture_TIMESTAMP.png`, plus a JSON sidecar
+Screenshots go to `RUN/exports/capture_TIMESTAMP.png`, plus a JSON sidecar
 containing the effective camera/time, model hash and render/display settings.
 Names are unique and existing PNGs are never overwritten. The saved image
 contains the scene; it excludes the sidebar and overlays. Transparent output is
@@ -233,7 +241,7 @@ before export.
 Remote MP4 export snapshots the current camera/path and display settings when it
 starts. It sends the GPU-packed RGBA8 frames directly to an FFmpeg raw-video pipe,
 then atomically publishes an H.264/CRF18/yuv420p file and JSON manifest under
-`viewer_output`. It does not write an intermediate PNG sequence. The page shows
+`RUN/exports/`. It does not write an intermediate PNG sequence. The page shows
 progress, measured frame throughput and estimated remaining time, supports
 cancellation, and provides inline playback plus a token-protected download after
 completion. MP4 is opaque and uses the selected background. An installed

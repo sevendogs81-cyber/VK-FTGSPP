@@ -46,6 +46,11 @@
         color: #9aabba;
         line-height: 1.4;
       }
+      #outputPath {
+        margin-top: 7px;
+        overflow-wrap: anywhere;
+        user-select: text;
+      }
       .row {
         display: flex;
         gap: 7px;
@@ -234,12 +239,17 @@
         <button id="fit">Fit scene</button
         ><button id="reset">Reset view</button>
       </div>
+      <div class="group">
+        <button id="rollLeft">Roll −90°</button
+        ><button id="rollFlip">Flip 180°</button
+        ><button id="rollRight">Roll +90°</button>
+      </div>
       <div class="row">
         <span id="aspect" class="sub">Original aspect ratio · fixed</span>
       </div>
       <small
         >Left drag orbit · Shift+left or middle pan · Right drag look · Wheel
-        dolly · Right+WASD/QE fly · F fit · R reset</small
+        dolly · Ctrl+left drag roll · Right+WASD/QE fly · F fit · R reset</small
       >
       <h2>Time</h2>
       <div class="group">
@@ -320,6 +330,7 @@
           ><input id="transparent" type="checkbox" /> Transparent PNG</label
         >
       </div>
+      <div id="outputPath" class="sub">Server exports: loading…</div>
       <h2>Camera path</h2>
       <div class="row">
         <label>Key seconds</label
@@ -490,14 +501,6 @@
             ...rows.map((row) => [...row, -dot(row, pos)]),
             [0, 0, 0, 1],
           ];
-        };
-        const lookAt = (pos, target) => {
-          const forward = norm(sub(target, pos)),
-            up = meta.world_up || [0, -1, 0];
-          let right = norm(cross(forward, up));
-          if (Math.hypot(...right) < 0.1) right = [1, 0, 0];
-          let down = norm(cross(forward, right));
-          setCamera(pos, right, down, forward);
         };
         const send = (type, more = {}) => {
           if (ws.readyState === 1) ws.send(JSON.stringify({ type, ...more }));
@@ -747,10 +750,10 @@
         }
         function fit() {
           pivot = meta.center.slice();
-          let radius = meta.radius * 2.8,
-            up = meta.world_up || [0, -1, 0];
-          let pos = add(pivot, [0, 0, radius]);
-          lookAt(pos, pivot);
+          let p = cameraParts(state.camera),
+            radius = meta.radius * 2.8,
+            pos = sub(pivot, mul(p.forward, radius));
+          setCamera(pos, p.right, p.down, p.forward);
           cameraChanged();
         }
         function reset() {
@@ -796,10 +799,17 @@
         function orbit(dx, dy) {
           let p = cameraParts(state.camera),
             v = sub(p.pos, pivot),
-            up = meta.world_up || [0, -1, 0];
-          v = rotate(v, up, -dx * 0.005);
-          v = rotate(v, p.right, -dy * 0.005);
-          lookAt(add(pivot, v), pivot);
+            yawAxis = meta.world_up || [0, -1, 0],
+            yaw = -dx * 0.005,
+            pitch = -dy * 0.005;
+          v = rotate(v, yawAxis, yaw);
+          let r = rotate(p.right, yawAxis, yaw),
+            d = rotate(p.down, yawAxis, yaw),
+            f = rotate(p.forward, yawAxis, yaw);
+          v = rotate(v, r, pitch);
+          d = rotate(d, r, pitch);
+          f = rotate(f, r, pitch);
+          setCamera(add(pivot, v), r, d, f);
         }
         function pan(dx, dy) {
           let p = cameraParts(state.camera),
@@ -810,16 +820,25 @@
         }
         function look(dx, dy) {
           let p = cameraParts(state.camera),
-            up = meta.world_up || [0, -1, 0],
-            f = rotate(
-              rotate(p.forward, up, -dx * 0.005),
-              p.right,
-              -dy * 0.005,
-            ),
-            r = norm(cross(f, up)),
-            d = norm(cross(f, r));
+            yawAxis = meta.world_up || [0, -1, 0],
+            yaw = -dx * 0.005,
+            pitch = -dy * 0.005,
+            r = rotate(p.right, yawAxis, yaw),
+            d = rotate(p.down, yawAxis, yaw),
+            f = rotate(p.forward, yawAxis, yaw);
+          d = rotate(d, r, pitch);
+          f = rotate(f, r, pitch);
           setCamera(p.pos, r, d, f);
           pivot = add(p.pos, mul(f, Math.max(meta.radius, 1)));
+        }
+        function roll(radians) {
+          let p = cameraParts(state.camera);
+          setCamera(
+            p.pos,
+            rotate(p.right, p.forward, radians),
+            rotate(p.down, p.forward, radians),
+            p.forward,
+          );
         }
         function fly(dt) {
           if (!keysDown.size) return;
@@ -898,6 +917,9 @@
             home = structuredClone(meta.initial_camera);
             pivot = meta.center.slice();
             $("label").textContent = meta.label || "Scene";
+            $("outputPath").textContent = msg.output_path
+              ? `Server exports: ${msg.output_path}`
+              : "";
             $("exportStart").min = meta.time_start;
             $("exportStart").max = meta.time_end;
             $("exportStart").value = meta.time_start;
@@ -1008,7 +1030,9 @@
             x: e.clientX,
             y: e.clientY,
             mode:
-              e.button === 1 || e.shiftKey
+              e.button === 0 && e.ctrlKey
+                ? "roll"
+                : e.button === 1 || e.shiftKey
                 ? "pan"
                 : e.button === 2
                   ? "look"
@@ -1026,6 +1050,7 @@
           drag.y = e.clientY;
           if (drag.mode === "pan") pan(dx, dy);
           else if (drag.mode === "look") look(dx, dy);
+          else if (drag.mode === "roll") roll(dx * 0.005);
           else orbit(dx, dy);
           cameraChanged();
         });
@@ -1082,6 +1107,18 @@
         $("camera").onchange = () => capture(Number($("camera").value));
         $("fit").onclick = fit;
         $("reset").onclick = reset;
+        $("rollLeft").onclick = () => {
+          roll(-Math.PI / 2);
+          cameraChanged();
+        };
+        $("rollFlip").onclick = () => {
+          roll(Math.PI);
+          cameraChanged();
+        };
+        $("rollRight").onclick = () => {
+          roll(Math.PI / 2);
+          cameraChanged();
+        };
         $("play").onclick = () => {
           if (!state) return;
           state.playing = !state.playing;

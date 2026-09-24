@@ -85,10 +85,12 @@ def initial_state(asset, args):
 
 class RemoteViewer:
     def __init__(self, args, asset):
+        from .app import default_export_root
+
         self.args = args
         self.asset = asset
         self.state = initial_state(asset, args)
-        self.output = args.output or asset.model_path.parent / "viewer_output"
+        self.output = args.output or default_export_root(asset)
         self.session = args.session or asset.model_path.parent / "viewer_session.json"
         self.path_file = args.camera_path or asset.model_path.parent / "viewer_path.json"
         self.token = secrets.token_urlsafe(32)
@@ -397,6 +399,7 @@ class RemoteViewer:
             await self.send(ws, dict(
                 type="hello", metadata=self.asset.metadata, state=self.state,
                 model_sha256=self.asset.sha256, recording=self.recording_summary(),
+                output_path=str(self.output.resolve()),
             ))
             async for raw in ws:
                 action = None

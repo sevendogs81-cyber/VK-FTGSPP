@@ -67,6 +67,16 @@ def viewer(tmp_path):
     return v
 
 
+def test_default_exports_are_beside_the_model_and_have_an_obvious_name(viewer):
+    assert viewer.output == viewer.asset.model_path.parent / "exports"
+
+
+def test_explicit_export_directory_still_wins(viewer, tmp_path):
+    viewer.args.output = tmp_path / "custom-captures"
+    overridden = RemoteViewer(viewer.args, viewer.asset)
+    assert overridden.output == viewer.args.output
+
+
 def test_remote_cache_tracks_render_and_display_dependencies(viewer):
     state = wire(viewer.state)
     original, _ = viewer.render_image(state, 48, 32, True)
