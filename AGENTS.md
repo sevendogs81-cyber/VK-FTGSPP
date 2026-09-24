@@ -80,7 +80,8 @@ from distributions.
 - `uv.lock` is the reproducible dependency lock. Do not hand-edit it.
 - `scripts/setup.sh` is the supported user installer. It pins uv 0.11.29 and
   Slang 2026.10 and supports the viewer, remote, initialization, and LPIPS
-  options documented in `scripts/README.md`.
+  options documented in `docs/install.md`; `scripts/README.md` is a concise
+  pointer beside the executable script.
 - `examples/` contains public scene and foreground YAML templates plus the
   locked final-test manifest example. Examples must continue to resolve in
   configuration tests.

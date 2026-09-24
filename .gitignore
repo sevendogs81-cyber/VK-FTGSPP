@@ -11,19 +11,15 @@
 /reports/
 /dist/
 .pytest_cache/
+.ruff_cache/
 __pycache__/
-**/__pycache__/
 *.py[cod]
 *.spv
 *.so
 *.pyd
 
-/src/ftgspp/*.so
-/src/ftgspp/*.pyd
 /src/ftgspp/shaders/
 
-native/shader/checksum.json
-native/shader/generated/*.bak*
 native/shaders/**/checksum.json
 
 # Local design/QA notes. Not part of the public snapshot.

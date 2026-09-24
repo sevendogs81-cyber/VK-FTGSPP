@@ -1,9 +1,17 @@
 # TurboGS
 
-A Linux/NVIDIA, Python 3.12 implementation of explicit-velocity 4D Gaussian
-training. Clone this repository, run one setup script, then use the `ftgspp`
-CLI. YAML examples live in the **clone**; the wheel only provides the command.
-It is not a library you `import`.
+**TurboGS accelerates explicit-velocity 4D Gaussian training with a native
+Vulkan pipeline.** On the documented six-scene SelfCap benchmark at 500k
+Gaussians and 30k main-phase steps on an RTX 4090, training averages 4.7 minutes
+instead of 10.3 minutes for the original CUDA + gsplat implementation: a
+**2.22× average speedup**, with individual-scene step throughput reaching
+**3.14×**. These are train-only measurements; see the full
+[benchmark definition and results](docs/performance.md).
+
+The Linux/NVIDIA runtime uses Python 3.12 and keeps ordinary training Torch-free.
+Clone the repository, run one setup script, then use the `ftgspp` CLI. YAML
+examples live in the clone; the wheel provides the command rather than a public
+import library.
 
 **First release trains on one GPU.** One view produces one optimizer update.
 Two-device synchronous training is **in development**: the pair code,
@@ -128,12 +136,15 @@ camera paths and export. See [viewer setup, controls and limits](docs/viewer.md)
 
 ```text
 TurboGS/
-├── scripts/setup.sh   # one-command install
-├── examples/          # YAML templates (copy or generate via prepare)
-├── docs/              # install, usage, architecture
-├── src/ftgspp/        # Python CLI, installed as `ftgspp`
-├── native/            # Vulkan + Slang sources compiled into the wheel
-└── dev/               # tests and research tools; not a user path
+├── src/ftgspp/        # installed Python CLI and orchestration
+├── native/            # Vulkan C++ runtime and Slang shaders
+├── examples/          # public YAML and manifest templates
+├── scripts/           # supported one-command installer
+├── docs/              # hardware, install, usage, viewer and architecture
+├── dev/               # tests and unsupported research tools
+├── .github/workflows/ # CPU, artifact and controlled GPU checks
+├── pyproject.toml      # package, dependency and build definition
+└── uv.lock             # reproducible Python dependency lock
 ```
 
 ## Development

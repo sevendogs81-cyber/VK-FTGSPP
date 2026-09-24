@@ -43,6 +43,8 @@ jobs:
               names = archive.getnames()
               assert not any(n.endswith((".pyc", ".so", ".spv")) or "__pycache__" in n
                              for n in names)
+              assert not any("/dev/tools/" in n or "/.github/workflows/" in n
+                             for n in names)
               for suffix in (
                   "src/ftgspp/training/background.py",
                   "src/ftgspp/optional/birefnet.py",
