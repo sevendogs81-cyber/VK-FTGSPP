@@ -277,14 +277,26 @@ def _load_model(options: Any, *, fallback_gpu: int):
 
 
 def _camera_chunks(
-    camera_ids: Sequence[int], max_views: int, *, anchor_count: int = 1,
+    camera_ids: Sequence[int],
+    max_views: int,
+    *,
+    anchor_count: int = 1,
+    minimum_chunk_size: int = 1,
 ) -> list[list[int]]:
-    """Split cameras while retaining shared anchors for coordinate alignment."""
+    """Split cameras while retaining anchors and avoiding undersized tails.
+
+    Pose-conditioned DA3 inference uses Umeyama alignment internally and needs
+    at least three camera centers.  When requested, move cameras out of earlier
+    chunks to make the tail large enough without increasing the forward batch.
+    Only configurations with too few unique cameras to rebalance use repeated
+    anchors; callers must then discard their duplicate predictions.
+    """
 
     cameras = [int(value) for value in camera_ids]
     if not cameras:
         raise ValueError("DA3 initialization requires at least one camera")
     max_views = max(1, int(max_views))
+    minimum_chunk_size = max(1, int(minimum_chunk_size))
     if len(cameras) <= max_views:
         return [cameras]
     anchor_count = max(0, min(int(anchor_count), len(cameras)))
@@ -296,8 +308,44 @@ def _camera_chunks(
     anchors = cameras[:anchor_count]
     remainder = cameras[anchor_count:]
     width = max_views - anchor_count
-    return [[*anchors, *remainder[offset:offset + width]]
-            for offset in range(0, len(remainder), width)]
+    chunks = [
+        [*anchors, *remainder[offset:offset + width]]
+        for offset in range(0, len(remainder), width)
+    ]
+    if len(chunks[-1]) >= minimum_chunk_size:
+        return chunks
+    if anchor_count:
+        raise ValueError(
+            "alignment anchors do not provide the requested minimum DA3 "
+            f"chunk size ({minimum_chunk_size})"
+        )
+    if max_views < minimum_chunk_size:
+        raise ValueError(
+            "init.da3.max_views must be at least "
+            f"{minimum_chunk_size} for pose-conditioned DA3 inference"
+        )
+
+    deficit = minimum_chunk_size - len(chunks[-1])
+    moved: list[int] = []
+    for chunk in reversed(chunks[:-1]):
+        transfer = min(deficit, max(0, len(chunk) - minimum_chunk_size))
+        if transfer:
+            moved.extend(chunk[-transfer:])
+            del chunk[-transfer:]
+            deficit -= transfer
+        if deficit == 0:
+            break
+    chunks[-1][:0] = sorted(moved, key=cameras.index)
+
+    if deficit:
+        tail = set(chunks[-1])
+        padding = [camera for camera in cameras if camera not in tail][:deficit]
+        if len(padding) != deficit:
+            raise ValueError(
+                "not enough distinct cameras to construct a valid DA3 chunk"
+            )
+        chunks[-1][:0] = padding
+    return chunks
 
 
 def _as_homogeneous(ext: np.ndarray) -> np.ndarray:
@@ -2110,7 +2158,7 @@ def _generate_da3_points(
             )
             logger.info("DA3 selected conditioned cameras: %s", camera_ids)
             conditioned_chunks = _camera_chunks(
-                camera_ids, max_views, anchor_count=0,
+                camera_ids, max_views, anchor_count=0, minimum_chunk_size=3,
             )
         else:
             for camera in dataset.cameras:
@@ -2121,7 +2169,7 @@ def _generate_da3_points(
                 input_intrinsics[int(camera)] = np.asarray(view.intrinsic, np.float32)
             start_ordinal = 0
             conditioned_chunks = _camera_chunks(
-                camera_ids, max_views, anchor_count=0,
+                camera_ids, max_views, anchor_count=0, minimum_chunk_size=3,
             )
 
         per_view_cap = pre_fuse_per_view_cap(max_points, len(camera_ids))
@@ -2131,6 +2179,7 @@ def _generate_da3_points(
                 dataset.view(frame, candidate_camera_ids[0]).timestamp
             )
             frame_bundles: list[_PredictionBundle] = []
+            frame_bundle_cameras: list[list[int]] = []
             frame_diagnostic_start = len(diagnostics_rows)
             for chunk_index, camera_chunk in enumerate(conditioned_chunks):
                 views, reference_timestamp, residuals = _synchronized_views(
@@ -2164,6 +2213,7 @@ def _generate_da3_points(
                         device=postprocess_device,
                     )
                 frame_bundles.append(bundle)
+                frame_bundle_cameras.append(list(camera_chunk))
                 diagnostics_rows.append({
                     "frame": frame,
                     "reference_timestamp": reference_timestamp,
@@ -2178,8 +2228,11 @@ def _generate_da3_points(
                     },
                 })
             with timer.stage("global_consistency"):
+                unique_frame_bundle = _unique_camera_bundle(
+                    frame_bundles, frame_bundle_cameras,
+                )
                 frame_clouds, global_diagnostics = _filter_prediction_bundles(
-                    frame_bundles, options, device=postprocess_device,
+                    [unique_frame_bundle], options, device=postprocess_device,
                 )
             for row in diagnostics_rows[frame_diagnostic_start:]:
                 row["global_geometry"] = _serializable_geometry(global_diagnostics)

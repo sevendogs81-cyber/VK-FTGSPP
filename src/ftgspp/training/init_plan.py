@@ -7,7 +7,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, is_dataclass, replace
 from typing import Any
 
-L1_ALGORITHM = "ftgspp-da3-l1-v1"
+L1_ALGORITHM = "ftgspp-da3-l1-v2"
 L2_ALGORITHM = "ftgspp-da3-l2-v4-cuda"
 L3_ALGORITHM = "ftgspp-init-l3-v4"
 

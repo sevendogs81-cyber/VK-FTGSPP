@@ -374,11 +374,106 @@ class DA3InitializerTests(unittest.TestCase):
     def test_camera_chunks_keep_anchor(self):
         self.assertEqual(_camera_chunks([0, 1, 2, 3, 4], 3), [[0, 1, 2], [0, 3, 4]])
 
-    def test_camera_chunks_are_sequential_without_alignment_anchors(self):
+    def test_camera_chunks_rebalance_undersized_conditioned_tail(self):
         self.assertEqual(
-            _camera_chunks(list(range(8)), 6, anchor_count=0),
-            [list(range(6)), [6, 7]],
+            _camera_chunks(
+                list(range(8)), 6, anchor_count=0, minimum_chunk_size=3,
+            ),
+            [list(range(5)), [5, 6, 7]],
         )
+        self.assertEqual(
+            _camera_chunks(
+                list(range(13)), 6, anchor_count=0, minimum_chunk_size=3,
+            ),
+            [list(range(6)), [6, 7, 8, 9], [10, 11, 12]],
+        )
+
+    def test_camera_chunks_only_repeat_when_unique_rebalance_is_impossible(self):
+        chunks = _camera_chunks(
+            list(range(5)), 4, anchor_count=0, minimum_chunk_size=3,
+        )
+        self.assertEqual(chunks, [[0, 1, 2], [0, 3, 4]])
+        self.assertEqual(set().union(*map(set, chunks)), set(range(5)))
+
+    def test_conditioned_camera_chunks_reject_too_small_forward_batch(self):
+        with self.assertRaisesRegex(ValueError, "max_views must be at least 3"):
+            _camera_chunks(
+                list(range(3)), 2, anchor_count=0, minimum_chunk_size=3,
+            )
+
+    def test_conditioned_chunk_padding_is_removed_before_consistency(self):
+        class RecordingDA3(_FakeDA3):
+            def __init__(self):
+                self.batch_sizes = []
+
+            def inference(self, images, **kwargs):
+                self.batch_sizes.append(len(images))
+                return super().inference(images, **kwargs)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            views = []
+            intrinsic = np.eye(3, dtype=np.float32)
+            for camera in range(5):
+                path = root / f"c{camera}-f0.png"
+                cv2.imwrite(
+                    str(path), np.full((4, 4, 3), 30 + camera, np.uint8),
+                )
+                angle = 2.0 * np.pi * camera / 5.0
+                w2c = np.eye(4, dtype=np.float32)
+                w2c[0, 3] = -np.cos(angle)
+                w2c[1, 3] = -np.sin(angle)
+                views.append(View(
+                    path=path, frame=0, camera_id=camera, timestamp=0.0,
+                    w2c=w2c, source_intrinsic=intrinsic,
+                    intrinsic=intrinsic, distortion=np.zeros(5, np.float32),
+                    size=(4, 4),
+                ))
+            dataset = Scene(
+                frames=[0], cameras=list(range(5)),
+                train_cameras=list(range(5)), eval_cameras=[],
+                camera_split_source="conditioned chunk test",
+                train_views=views, eval_views=[], fps=1.0, source_root=root,
+                time_offsets={camera: 0.0 for camera in range(5)},
+                calibration_available=True,
+            )
+            config = SimpleNamespace(
+                data=SimpleNamespace(root=root),
+                run=SimpleNamespace(gpu=0),
+                train=SimpleNamespace(seed=0),
+                init=SimpleNamespace(
+                    keyframe_stride=1,
+                    da3=SimpleNamespace(
+                        model_name="fake", model_path=None, device="cpu",
+                        quality="fast", process_res=4,
+                        process_res_method="upper_bound_resize",
+                        max_views=4, fusion_views=5, max_points=80,
+                        min_consistent_views=1, voxel_size=0.25,
+                        confidence_percentile=0.0, use_sky_mask=True,
+                        use_ray_pose=False, ref_view_strategy="first",
+                        input_cameras="train", cache_path=root / "cache",
+                    ),
+                ),
+            )
+            model = RecordingDA3()
+            with patch(
+                "ftgspp.optional.da3._load_model", return_value=(model, "cpu"),
+            ):
+                generate_da3_points(config, dataset, [0])
+
+            manifest = json.loads(
+                (resolve_da3_cache_root(root / "cache") / "manifest.json")
+                .read_text(encoding="utf-8")
+            )
+            self.assertEqual(model.batch_sizes, [3, 3])
+            self.assertEqual(
+                [row["cameras"] for row in manifest["diagnostics"]],
+                [[0, 1, 2], [0, 3, 4]],
+            )
+            self.assertTrue(all(
+                row["global_geometry"]["global_consistency_views"] == 5
+                for row in manifest["diagnostics"]
+            ))
 
     def test_camera_chunks_share_one_time_reference(self):
         views = []
