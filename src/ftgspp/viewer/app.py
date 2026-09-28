@@ -19,6 +19,30 @@ def default_export_root(asset):
     return asset.model_path.parent / DEFAULT_EXPORT_DIRECTORY
 
 
+def catalog_runs(root):
+    """Completed 4DAnyone and DNA-Rendering runs the remote viewer can switch."""
+
+    root = Path(root).expanduser().resolve()
+    if not root.is_dir():
+        raise ValueError(f"Scene catalog is not a directory: {root}")
+    runs = []
+    for child in sorted(root.iterdir()):
+        if not child.is_dir():
+            continue
+        if not (child / "gaussians.npz").is_file():
+            continue
+        if not (child / "viewer_manifest.json").is_file():
+            continue
+        config = child / "config.resolved.yaml"
+        if not config.is_file():
+            continue
+        text = config.read_text(encoding="utf-8", errors="replace")
+        if "/4danyone/" not in text and "/dna_rendering/" not in text:
+            continue
+        runs.append(child)
+    return runs
+
+
 def parser_for(command):
     p = argparse.ArgumentParser(prog=f"ftgspp {command}")
     sources = p.add_mutually_exclusive_group(required=True)
@@ -51,6 +75,11 @@ def parser_for(command):
         p.add_argument("--port", type=int, default=8765, help="remote HTTP/WebSocket port")
         p.add_argument("--quality", choices=("faithful", "interactive"))
         p.add_argument("--target-fps", type=float)
+        p.add_argument(
+            "--catalog",
+            type=Path,
+            help="run directory whose 4DAnyone and DNA-Rendering scenes the remote viewer can switch",
+        )
         p.add_argument("--no-vsync", action="store_true")
         p.add_argument(
             "--session",

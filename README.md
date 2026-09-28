@@ -1,5 +1,7 @@
 # TurboGS
 
+![TurboGS DNA-Rendering dynamic scene showcase](docs/assets/turbogs_dna_teaser.gif)
+
 **TurboGS accelerates explicit-velocity 4D Gaussian training with a native
 Vulkan pipeline.** Compared with a conventional CUDA + gsplat implementation,
 it delivers a **2.22× average training speedup**, with individual-scene step

@@ -67,6 +67,18 @@
       .row select {
         width: 110px;
       }
+      #sceneRow {
+        display: none;
+        flex-direction: column;
+        align-items: stretch;
+        gap: 6px;
+      }
+      #sceneRow.visible {
+        display: flex;
+      }
+      #sceneRow select {
+        width: 100%;
+      }
       button,
       select,
       input {
@@ -230,6 +242,10 @@
     <aside>
       <h1>FTGSPP Viewer</h1>
       <div id="label" class="sub">Connecting…</div>
+      <div id="sceneRow">
+        <label>Scene</label>
+        <select id="scenes"></select>
+      </div>
       <h2>Camera</h2>
       <div class="row">
         <label>Capture view</label
@@ -959,6 +975,18 @@
               $("camera").append(o);
             });
             $("camera").disabled = !meta.cameras.length;
+            const sceneNames = Array.isArray(msg.scenes) ? msg.scenes : [];
+            $("scenes").replaceChildren();
+            sceneNames.forEach((name) => {
+              const option = document.createElement("option");
+              option.value = name;
+              option.textContent = name;
+              $("scenes").append(option);
+            });
+            if (msg.scene) $("scenes").value = msg.scene;
+            $("scenes").disabled = sceneNames.length < 2;
+            if ($("sceneRow").classList)
+              $("sceneRow").classList.toggle("visible", sceneNames.length > 1);
             sync();
             renderKeys();
             inflight = true;
@@ -1024,6 +1052,7 @@
             pathDirty = true;
             if (msg.action === "render" || msg.action === "update")
               inflight = false;
+            if (msg.action === "switch_scene") $("scenes").disabled = false;
             if (msg.action === "export_video") {
               setExporting(false);
               $("exportStatus").textContent = `Export error: ${msg.message}`;
@@ -1120,6 +1149,11 @@
           keysDown.delete(e.key.toLowerCase()),
         );
         $("camera").onchange = () => capture(Number($("camera").value));
+        $("scenes").onchange = () => {
+          $("scenes").disabled = true;
+          $("status").textContent = `Loading ${$("scenes").value}…`;
+          ws.send(JSON.stringify({ type: "switch_scene", scene: $("scenes").value }));
+        };
         $("fit").onclick = fit;
         $("reset").onclick = reset;
         $("rollLeft").onclick = () => {

@@ -113,6 +113,7 @@ class RemoteViewer:
         self.recording_started = None
         self.recording_keys = []
         self.recorded_path = None
+        self.catalog: list[Path] = []
 
     def start_renderer(self):
         self._rgba = None
@@ -280,13 +281,64 @@ class RemoteViewer:
         self.render_width, self.render_height = rw, rh
         self.capture_width, self.capture_height = cw, ch
 
+    def hello_message(self):
+        current = self.asset.model_path.parent.name
+        return dict(
+            type="hello", metadata=self.asset.metadata, state=self.state,
+            model_sha256=self.asset.sha256, recording=self.recording_summary(),
+            output_path=str(self.output.resolve()),
+            scenes=[path.name for path in self.catalog],
+            scene=current if self.catalog else None,
+        )
+
+    def activate_scene(self, name: str) -> None:
+        matches = [path for path in self.catalog if path.name == name]
+        if len(matches) != 1:
+            raise ValueError(f"Unknown scene: {name}")
+        target = matches[0]
+        if target == self.asset.model_path.parent.resolve():
+            return
+        if not self.args.no_session:
+            try:
+                save_session(self.session, self.asset, self.state)
+            except OSError as exc:
+                print(f"Remote viewer could not save session: {exc}", flush=True)
+        from .app import default_export_root
+        from .asset import load_asset
+
+        asset = load_asset(
+            target,
+            time_range=self.args.time_range,
+            fps=self.args.fps,
+            sh_degree=self.args.sh_degree,
+            marginal_threshold=self.args.marginal_threshold,
+        )
+        self.renderer.upload(asset.model.arrays())
+        asset.model = None
+        self.asset = asset
+        self._rgba = None
+        self._forward_key = self._encoded_key = self._encoded = None
+        self.recording_started = None
+        self.recording_keys = []
+        self.recorded_path = None
+        if not self.args.output:
+            self.output = default_export_root(asset)
+        if not self.args.session:
+            self.session = asset.model_path.parent / "viewer_session.json"
+        if not self.args.camera_path:
+            self.path_file = asset.model_path.parent / "viewer_path.json"
+        self.state = initial_state(asset, self.args)
+
     async def serve_client(self, ws):
         if self.client is not None:
             await ws.close(code=1013, reason="One viewer client at a time")
             return
         self.client = ws
         wake = asyncio.Event()
-        pending = {"render": True, "capture": False, "export": False, "video": False}
+        pending = {
+            "render": True, "capture": False, "export": False, "video": False,
+            "switch": None,
+        }
         stopping = False
         cancelled = threading.Event()
         export_active = False
@@ -304,9 +356,29 @@ class RemoteViewer:
                 export = pending["export"]
                 video = pending["video"]
                 render = pending["render"]
-                pending.update(render=False, capture=False, export=False, video=False)
+                switch = pending["switch"]
+                pending.update(
+                    render=False, capture=False, export=False, video=False, switch=None,
+                )
                 state = dict(self.state)
                 render_width, render_height = self.render_width, self.render_height
+                if switch:
+                    try:
+                        await asyncio.to_thread(self.activate_scene, switch)
+                    except Exception as exc:
+                        if stopping:
+                            return
+                        await self.send(ws, dict(
+                            type="error", action="switch_scene", message=str(exc),
+                        ))
+                        await self.send(ws, self.hello_message())
+                    else:
+                        if stopping:
+                            return
+                        await self.send(ws, self.hello_message())
+                        state = dict(self.state)
+                        render_width, render_height = self.render_width, self.render_height
+                        render = True
                 try:
                     if video:
                         export_state, plan, job_cancel = video
@@ -398,11 +470,7 @@ class RemoteViewer:
 
         job = asyncio.create_task(worker())
         try:
-            await self.send(ws, dict(
-                type="hello", metadata=self.asset.metadata, state=self.state,
-                model_sha256=self.asset.sha256, recording=self.recording_summary(),
-                output_path=str(self.output.resolve()),
-            ))
+            await self.send(ws, self.hello_message())
             async for raw in ws:
                 action = None
                 try:
@@ -507,6 +575,22 @@ class RemoteViewer:
                                 "scene_mode",
                             )
                         }))
+                        wake.set()
+                    elif action == "switch_scene":
+                        if not self.catalog:
+                            raise ValueError("This viewer has no scene catalog")
+                        if export_active or pending["video"] or pending["export"]:
+                            raise ValueError(
+                                "Wait for the current export to finish before switching scenes"
+                            )
+                        if self.recording_started is not None:
+                            raise ValueError(
+                                "Stop the interaction recording before switching scenes"
+                            )
+                        name = message.get("scene")
+                        if not isinstance(name, str) or not name:
+                            raise ValueError("Scene name required")
+                        pending["switch"] = name
                         wake.set()
                     elif action == "cancel_export":
                         if export_cancel is None:
@@ -785,6 +869,20 @@ async def async_run(args, asset):
     if not 1 <= args.port <= 65535:
         raise ValueError("Port must be 1..65535")
     viewer = RemoteViewer(args, asset)
+    catalog_root = getattr(args, "catalog", None)
+    if catalog_root is not None:
+        from .app import catalog_runs
+
+        viewer.catalog = catalog_runs(catalog_root)
+        if not viewer.catalog:
+            raise ValueError(f"No 4DAnyone or DNA-Rendering runs in {catalog_root}")
+        current = asset.model_path.parent.resolve()
+        if current not in viewer.catalog:
+            raise ValueError(f"Opened run is not in the scene catalog {catalog_root}: {current}")
+        print(
+            "Scenes: " + ", ".join(path.name for path in viewer.catalog),
+            flush=True,
+        )
     html = files("ftgspp.viewer").joinpath("remote.html").read_bytes()
     await asyncio.to_thread(viewer.start_renderer)
 

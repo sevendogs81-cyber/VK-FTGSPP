@@ -13,7 +13,7 @@ import cv2
 import numpy as np
 import pytest
 
-from ftgspp.viewer.app import parser_for
+from ftgspp.viewer.app import catalog_runs, parser_for
 from ftgspp.viewer.asset import camera, fit_camera_extent
 from ftgspp.viewer.offline import compose
 from ftgspp.viewer.remote import RemoteViewer, VideoExportCancelled, wire
@@ -66,6 +66,20 @@ def viewer(tmp_path):
     v = RemoteViewer(args, asset)
     v.renderer = Renderer()
     return v
+
+
+def test_catalog_keeps_completed_4danyone_and_dna_runs(tmp_path):
+    def touch(run, text):
+        run.mkdir()
+        (run / "gaussians.npz").write_bytes(b"")
+        (run / "viewer_manifest.json").write_text("{}", encoding="utf-8")
+        (run / "config.resolved.yaml").write_text(text, encoding="utf-8")
+
+    touch(tmp_path / "karina", "root: /data/4danyone/douyin/karina\n")
+    touch(tmp_path / "0025_11", "root: /data/dna_rendering/0025_11\n")
+    touch(tmp_path / "other", "root: /data/somewhere/else\n")
+    (tmp_path / "incomplete").mkdir()
+    assert [path.name for path in catalog_runs(tmp_path)] == ["0025_11", "karina"]
 
 
 def test_default_exports_are_beside_the_model_and_have_an_obvious_name(viewer):
