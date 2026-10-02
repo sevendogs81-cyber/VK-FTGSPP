@@ -1,7 +1,6 @@
 """Cache correctness, session interoperability and bounded render scheduling."""
 
 import asyncio
-import io
 import json
 from pathlib import Path
 import shutil
@@ -33,6 +32,10 @@ class Renderer:
         self.times = []
         self.destinations = []
         self.fail = False
+        self.uploads = []
+
+    def upload(self, arrays):
+        self.uploads.append(arrays)
 
     def render(self, c, t, sh, threshold):
         self.times.append(t)
@@ -90,6 +93,85 @@ def test_explicit_export_directory_still_wins(viewer, tmp_path):
     viewer.args.output = tmp_path / "custom-captures"
     overridden = RemoteViewer(viewer.args, viewer.asset)
     assert overridden.output == viewer.args.output
+
+
+def test_scene_switch_prepares_state_before_replacing_gpu_model(viewer, tmp_path, monkeypatch):
+    class Model:
+        def __init__(self, marker):
+            self.marker = marker
+
+        def arrays(self):
+            return {"marker": self.marker}
+
+    def asset(root, marker, *, camera_count=1):
+        c = camera(dict(
+            width=64, height=64, K=[[50, 0, 32], [0, 50, 32], [0, 0, 1]],
+            w2c=np.eye(4), timestamp=.25,
+        ))
+        return SimpleNamespace(
+            model_path=root / "gaussians.npz", model=Model(marker), sha256=marker,
+            metadata=dict(
+                initial_camera=c, cameras=[c] * camera_count,
+                sh_degree=2, marginal_threshold=.02, world_up=[0, -1, 0], fps=24,
+            ),
+        )
+
+    current_root = viewer.asset.model_path.parent.resolve()
+    good_root, bad_root = tmp_path / "good", tmp_path / "bad"
+    good_root.mkdir()
+    bad_root.mkdir()
+    good = asset(good_root, "good")
+    bad = asset(bad_root, "bad", camera_count=0)
+    viewer.catalog = [current_root, good_root, bad_root]
+
+    def load(target, **_kwargs):
+        return {good_root: good, bad_root: bad}[target]
+
+    monkeypatch.setattr("ftgspp.viewer.asset.load_asset", load)
+    viewer.activate_scene("good")
+    assert viewer.asset is good and good.model is None
+    assert viewer.renderer.uploads == [{"marker": "good"}]
+    assert viewer.output == good_root / "exports"
+    assert viewer.session == good_root / "viewer_session.json"
+    assert viewer.path_file == good_root / "viewer_path.json"
+    assert viewer.state["camera"]["width"] == 64
+
+    viewer.args.camera = 0
+    with pytest.raises(ValueError, match="outside available cameras"):
+        viewer.activate_scene("bad")
+    assert viewer.asset is good
+    assert viewer.renderer.uploads == [{"marker": "good"}]
+
+
+def test_failed_scene_upload_restores_old_model_and_discards_cache(viewer, tmp_path, monkeypatch):
+    old = viewer.asset
+    target = tmp_path / "next"
+    target.mkdir()
+    new = SimpleNamespace(
+        model_path=target / "gaussians.npz", sha256="new", metadata=old.metadata,
+        model=SimpleNamespace(arrays=lambda: {"model": "new"}),
+    )
+    recovery = SimpleNamespace(sha256=old.sha256, model=SimpleNamespace(
+        arrays=lambda: {"model": "old"},
+    ))
+    monkeypatch.setattr("ftgspp.viewer.asset.load_asset", lambda path, **kw:
+                        new if path == target else recovery)
+    viewer.catalog = [target]
+    viewer.render_image(viewer.state, 48, 32)
+    assert viewer._encoded_key is not None
+    uploads = []
+
+    def upload(arrays):
+        uploads.append(arrays["model"])
+        if arrays["model"] == "new":
+            raise RuntimeError("out of GPU memory")
+
+    viewer.renderer.upload = upload
+    with pytest.raises(RuntimeError, match="previous model restored"):
+        viewer.activate_scene("next")
+    assert viewer.asset is old
+    assert uploads == ["new", "old"]
+    assert viewer._forward_key is viewer._encoded_key is viewer._rgba is None
 
 
 def test_remote_cache_tracks_render_and_display_dependencies(viewer):
@@ -303,11 +385,9 @@ def test_broken_ffmpeg_pipe_reports_the_encoder_error(viewer, monkeypatch):
             self.closed = True
 
     class Process:
-        def __init__(self):
+        def __init__(self, stderr):
             self.stdin = Input()
-            self.stderr = io.BytesIO(
-                b"Error initializing output stream: encoder unavailable\n"
-            )
+            stderr.write(b"Error initializing output stream: encoder unavailable\n")
             self.returncode = None
 
         def wait(self, timeout=None):
@@ -327,7 +407,7 @@ def test_broken_ffmpeg_pipe_reports_the_encoder_error(viewer, monkeypatch):
 
     def start(args, **kwargs):
         command.extend(args)
-        return Process()
+        return Process(kwargs["stderr"])
 
     monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/ffmpeg")
     monkeypatch.setattr(subprocess, "Popen", start)
@@ -337,6 +417,24 @@ def test_broken_ffmpeg_pipe_reports_the_encoder_error(viewer, monkeypatch):
     assert command[command.index("-tune") + 1] == "zerolatency"
     assert command[command.index("-threads") + 1] == "4"
     assert not list(viewer.output.glob("*.mp4"))
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg is optional")
+def test_video_manifest_reports_padded_size_and_late_cancel_is_honored(viewer):
+    state = wire(viewer.state)
+    plan = viewer.prepare_video_export(state, dict(
+        mode="view", fps=10, width=47, height=31, time_start=.4, time_end=.6,
+    ))
+    target = viewer.export_video(state, plan)
+    manifest = json.loads(target.with_suffix(".json").read_text())
+    assert (manifest["width"], manifest["height"]) == (48, 32)
+    assert manifest["frames"][0]["camera"]["width"] == 47
+    cancelled = threading.Event()
+    before = set(viewer.output.iterdir())
+    with pytest.raises(VideoExportCancelled):
+        viewer.export_video(state, plan, is_cancelled=cancelled.is_set,
+                            progress=lambda i, n, elapsed: cancelled.set() if i == n else None)
+    assert set(viewer.output.iterdir()) == before
 
 
 def test_interaction_recording_captures_camera_and_4d_time_independently(viewer, monkeypatch):
@@ -368,6 +466,171 @@ def test_interaction_recording_captures_camera_and_4d_time_independently(viewer,
     assert midpoint["w2c"][0, 3] == pytest.approx(.375)
 
 
+def test_full_interaction_recording_can_still_stop(viewer, monkeypatch):
+    monkeypatch.setattr("ftgspp.viewer.remote.MAX_RECORDED_KEYS", 2)
+    ticks = iter([10.0, 10.5])
+    monkeypatch.setattr("ftgspp.viewer.remote.time.monotonic", lambda: next(ticks))
+    viewer.start_interaction_recording()
+    viewer.record_interaction_sample()
+    with pytest.raises(ValueError, match="exceeds 2 samples"):
+        viewer.record_interaction_sample()
+    summary = viewer.stop_interaction_recording()
+    assert summary == dict(active=False, sample_count=2, duration=.5)
+    assert len(viewer.recorded_path["keyframes"]) == 2
+
+
+def test_path_export_is_bounded_and_cancelled_output_is_removed(viewer, monkeypatch):
+    monkeypatch.setattr("ftgspp.viewer.remote.MAX_VIDEO_FRAMES", 2)
+    state = wire(viewer.state)
+    first, last = wire(state["camera"]), wire(state["camera"])
+    state.update(bookmarks=[first, last], path_times=[0.0, 1.0])
+    with pytest.raises(ValueError, match="Path export exceeds 2 frames"):
+        viewer.export_path(state, 48, 32)
+    assert not list(viewer.output.glob("path_*"))
+    assert not list(viewer.output.glob(".path_*"))
+
+    state["path_times"] = [0.0, 1 / 30]
+    cancelled = threading.Event()
+    cancelled.set()
+    with pytest.raises(RuntimeError, match="cancelled"):
+        viewer.export_path(state, 48, 32, cancelled)
+    assert not list(viewer.output.iterdir())
+    # A disconnect during the final render must also prevent publication.
+    cancelled.clear()
+    render_image = viewer.render_image
+
+    def render_then_cancel(*args):
+        result = render_image(*args)
+        cancelled.set()
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(viewer, "render_image", render_then_cancel)
+        with pytest.raises(RuntimeError, match="cancelled"):
+            viewer.export_path(state, 48, 32, cancelled)
+    assert not list(viewer.output.iterdir())
+    target = viewer.export_path(state, 48, 32)
+    assert json.loads((target / "render.json").read_text())["frame_count"] == 1
+    assert (target / "000000.png").is_file()
+    assert not list(viewer.output.glob(".path_*"))
+
+
+class Socket:
+    def __init__(self):
+        self.incoming, self.outgoing = asyncio.Queue(), asyncio.Queue()
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        item = await self.incoming.get()
+        if item is None:
+            raise StopAsyncIteration
+        return json.dumps(item)
+
+    async def send(self, data):
+        await self.outgoing.put(data)
+
+    async def receive(self, kind):
+        while True:
+            data = await asyncio.wait_for(self.outgoing.get(), 3)
+            if isinstance(data, bytes):
+                if kind == "image":
+                    return data
+            else:
+                message = json.loads(data)
+                if message["type"] == kind:
+                    return message
+                assert message["type"] != "error", message
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_scene_switch_serializes_commands_and_always_sends_a_frame(viewer, monkeypatch, fails):
+    started, release = threading.Event(), threading.Event()
+    old = viewer.asset
+    viewer.catalog = [old.model_path.parent]
+
+    def switch(name):
+        started.set()
+        assert release.wait(5)
+        if fails:
+            raise ValueError("invalid scene")
+        viewer.asset = SimpleNamespace(**dict(vars(old), sha256="new"))
+        viewer.state = dict(viewer.state, time=.25)
+
+    monkeypatch.setattr(viewer, "activate_scene", switch)
+
+    async def exercise():
+        ws = Socket()
+        task = asyncio.create_task(viewer.serve_client(ws))
+        try:
+            await ws.receive("image")
+            await ws.incoming.put(dict(type="switch_scene", scene="next"))
+            assert await asyncio.to_thread(started.wait, 3)
+            await ws.incoming.put(dict(type="update", state=dict(time=99)))
+            await ws.incoming.put(dict(type="capture"))
+            error = await ws.receive("error")
+            assert error["action"] == "capture" and "switch" in error["message"]
+            assert viewer.state["time"] == .4
+            release.set()
+            if fails:
+                assert (await ws.receive("error"))["action"] == "switch_scene"
+            hello = await ws.receive("hello")
+            await ws.receive("image")
+            assert hello["model_sha256"] == (old.sha256 if fails else "new")
+            # Queued commands from a previous model must not contaminate the
+            # current scene even if they arrive after the switch completes.
+            await ws.incoming.put(dict(type="update", model_sha256="stale", state=dict(time=77)))
+            await ws.incoming.put(dict(type="capture", model_sha256="stale"))
+            assert "previous scene" in (await ws.receive("error"))["message"]
+            assert viewer.state["time"] == (.4 if fails else .25)
+            await ws.incoming.put(dict(type="update", model_sha256=viewer.asset.sha256,
+                                       state=dict(time=.6)))
+            await ws.receive("image")
+            assert viewer.state["time"] == .6
+        finally:
+            release.set()
+            await ws.incoming.put(None)
+            await asyncio.wait_for(task, 3)
+        assert viewer.client is None
+
+    asyncio.run(exercise())
+
+
+def test_active_png_export_rejects_competing_jobs_and_keeps_latest_view(viewer, monkeypatch):
+    started, release = threading.Event(), threading.Event()
+    viewer.catalog = [viewer.asset.model_path.parent]
+
+    def export(*_args):
+        started.set()
+        assert release.wait(5)
+        return viewer.output / "path"
+
+    monkeypatch.setattr(viewer, "export_path", export)
+
+    async def exercise():
+        ws = Socket()
+        task = asyncio.create_task(viewer.serve_client(ws))
+        try:
+            await ws.receive("image")
+            await ws.incoming.put(dict(type="export_path"))
+            assert await asyncio.to_thread(started.wait, 3)
+            for action in ("start_recording", "export_path", "switch_scene"):
+                await ws.incoming.put(dict(type=action, scene="other"))
+                assert (await ws.receive("error"))["action"] == action
+            await ws.incoming.put(dict(type="update", state=dict(time=.9)))
+            release.set()
+            await ws.receive("saved")
+            await ws.receive("image")
+            assert viewer.renderer.times[-1] == .9
+        finally:
+            release.set()
+            await ws.incoming.put(None)
+            await asyncio.wait_for(task, 3)
+
+    asyncio.run(exercise())
+
+
 def test_latest_frame_and_capture_snapshot_are_bounded(viewer):
     started, release = threading.Event(), threading.Event()
     original_render = viewer.renderer.render
@@ -379,18 +642,6 @@ def test_latest_frame_and_capture_snapshot_are_bounded(viewer):
     viewer.renderer.render = slow_first
 
     async def exercise():
-        class Socket:
-            def __init__(self):
-                self.incoming, self.outgoing = asyncio.Queue(), asyncio.Queue()
-            def __aiter__(self):
-                return self
-            async def __anext__(self):
-                item = await self.incoming.get()
-                if item is None:
-                    raise StopAsyncIteration
-                return json.dumps(item)
-            async def send(self, data):
-                await self.outgoing.put(data)
         ws = Socket()
         task = asyncio.create_task(viewer.serve_client(ws))
         try:

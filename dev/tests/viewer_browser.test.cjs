@@ -325,6 +325,11 @@ test("browser preserves aspect, navigation playback, deltas and decode backpress
     assert.ok(patch.time > before, `${label}: advancing time reaches the server`);
   };
   nodes.get("play").click();
+  const beforeStall = Number(nodes.get("time").value);
+  now += 500;
+  tick();
+  assert.ok(Math.abs(Number(nodes.get("time").value) - beforeStall - .55) < 1e-8,
+    "playback uses elapsed wall time even when animation frames stall");
   for (const button of [0, 1, 2]) {
     stage.listeners.pointerdown({
       button, clientX: 20, clientY: 20, pointerId: 1, preventDefault() {},
@@ -408,4 +413,37 @@ test("browser preserves aspect, navigation playback, deltas and decode backpress
   const recordedRequest = ws.sent.at(-1);
   assert.equal(recordedRequest.type, "export_video");
   assert.equal(recordedRequest.export.mode, "recording");
+
+  // A new scene invalidates the selected key from the previous path. Scene
+  // switching also uses the normal guarded sender and exposes the catalog.
+  nodes.get("keys").children[0].children[0].click();
+  await ws.onmessage({ data: JSON.stringify({
+    type: "hello",
+    model_sha256: "second-hash",
+    state: { ...state, bookmarks: [], path_times: [] },
+    output_path: "/runs/second/exports",
+    scenes: ["first", "second"],
+    scene: "second",
+    recording: { active: false, sample_count: 0, duration: 0 },
+    metadata: {
+      initial_camera: camera, cameras: [], center: [0, 0, 1], radius: 1,
+      world_up: [0, -1, 0], sample_times: [2, 3, 4],
+      time_start: 2, time_end: 4, fps: 30,
+    },
+  }) });
+  nodes.get("keyReplace").click();
+  assert.equal(nodes.get("toast").textContent, "Select a key first");
+  assert.equal(nodes.get("scenes").children.length, 2);
+  assert.equal(nodes.get("scenes").value, "second");
+  nodes.get("scenes").value = "first";
+  nodes.get("scenes").onchange();
+  assert.deepEqual(ws.sent.at(-1), {
+    type: "switch_scene", model_sha256: "second-hash", scene: "first",
+  });
+  const duringSwitch = ws.sent.length;
+  nodes.get("shot").click();
+  nodes.get("recordToggle").click();
+  flushTimers();
+  tick();
+  assert.equal(ws.sent.length, duringSwitch, "old scene commands stop during switching");
 });

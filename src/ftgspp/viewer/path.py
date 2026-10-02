@@ -11,7 +11,7 @@ PATH_SCHEMA = "ftgspp-camera-path-v1"
 
 
 def validate_path(data):
-    if data.get("schema") != PATH_SCHEMA:
+    if not isinstance(data, dict) or data.get("schema") != PATH_SCHEMA:
         raise ValueError("Unsupported camera path schema")
     keys = data.get("keyframes", [])
     if not keys:
@@ -62,7 +62,10 @@ class CameraPath:
         return float(self.times[-1] - self.times[0])
 
     def sample(self, t, width=None, height=None):
-        t = np.clip(float(t), self.times[0], self.times[-1])
+        t = float(t)
+        if not np.isfinite(t):
+            raise ValueError("Path sample time must be finite")
+        t = np.clip(t, self.times[0], self.times[-1])
         if self.slerp is None:
             return scaled_camera(self.cameras[0], width, height)
         i = int(
@@ -72,10 +75,8 @@ class CameraPath:
         )
         f = (t - self.times[i]) / (self.times[i + 1] - self.times[i])
         # Use one output extent; interpolate normalized intrinsics after rescaling.
-        width = width or self.cameras[0]["width"]
-        height = height or round(
-            width * self.cameras[0]["height"] / self.cameras[0]["width"]
-        )
+        extent = scaled_camera(self.cameras[0], width, height)
+        width, height = extent["width"], extent["height"]
         a, b = (scaled_camera(c, width, height) for c in self.cameras[i : i + 2])
         pose = np.eye(4)
         pose[:3, :3] = self.slerp(t).as_matrix()

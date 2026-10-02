@@ -3,19 +3,21 @@
 
 import argparse
 import asyncio
+from collections import deque
 import json
 import os
 from pathlib import Path
+import queue
 import re
-import select
 import shutil
 import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from urllib.error import HTTPError
-from urllib.request import urlopen
+from urllib.request import ProxyHandler, build_opener
 
 import cv2
 import numpy as np
@@ -38,6 +40,8 @@ async def receive(ws, kind):
 
 async def check(port, token, scene):
     base = f"http://127.0.0.1:{port}"
+    # Test loopback directly even on hosts with HTTP(S)/SOCKS proxies configured.
+    urlopen = build_opener(ProxyHandler({})).open
     try:
         urlopen(base + "/", timeout=5)
         raise AssertionError("HTTP page accepted a missing token")
@@ -47,17 +51,17 @@ async def check(port, token, scene):
     assert b"FTGSPP Viewer" in html and b"Camera path" in html
     endpoint = f"ws://127.0.0.1:{port}/ws?token={token}"
     try:
-        async with connect(endpoint, origin="http://evil.example"):
+        async with connect(endpoint, origin="http://evil.example", proxy=None):
             raise AssertionError("WebSocket accepted a foreign Origin")
     except InvalidStatus as exc:
         assert exc.response.status_code == 403
     try:
-        async with connect(f"ws://127.0.0.1:{port}/ws?token=wrong", origin=base):
+        async with connect(f"ws://127.0.0.1:{port}/ws?token=wrong", origin=base, proxy=None):
             raise AssertionError("WebSocket accepted a wrong token")
     except InvalidStatus as exc:
         assert exc.response.status_code == 403
 
-    async with connect(endpoint, origin=base) as ws:
+    async with connect(endpoint, origin=base, proxy=None) as ws:
         hello = await receive(ws, "hello")
         assert hello["output_path"] == str((scene / "exports").resolve())
         frame = await receive(ws, "frame")
@@ -65,7 +69,7 @@ async def check(port, token, scene):
         assert jpeg[:3] == b"\x01\xff\xd8", frame
         assert cv2.imdecode(np.frombuffer(jpeg[1:], np.uint8), cv2.IMREAD_COLOR).shape[:2] == (frame["height"], frame["width"])
         try:
-            async with connect(endpoint, origin=base):
+            async with connect(endpoint, origin=base, proxy=None):
                 raise AssertionError("Accepted second viewer")
         except InvalidStatus as exc:
             assert exc.response.status_code == 503
@@ -159,7 +163,7 @@ async def check(port, token, scene):
         await receive(ws, "frame")
         await receive(ws, "binary")
 
-    async with connect(endpoint, origin=base) as ws:
+    async with connect(endpoint, origin=base, proxy=None) as ws:
         hello = await receive(ws, "hello")
         await receive(ws, "frame")
         await receive(ws, "binary")
@@ -171,7 +175,7 @@ async def check(port, token, scene):
     deadline = time.monotonic() + 3
     while True:
         try:
-            async with connect(endpoint, origin=base) as ws:
+            async with connect(endpoint, origin=base, proxy=None) as ws:
                 await receive(ws, "hello")
                 await receive(ws, "frame")
                 await receive(ws, "binary")
@@ -216,20 +220,39 @@ def main():
         process = subprocess.Popen([sys.executable, "-c", code], cwd=Path.cwd(), env=env,
                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                    text=True, bufsize=1)
+        lines = queue.Queue()
+
+        def read_output():
+            # select() on the fd misses lines already buffered by TextIOWrapper,
+            # including the URL when native startup logs arrive in one chunk.
+            for line in process.stdout:
+                lines.put(line)
+
+        reader = threading.Thread(target=read_output, daemon=True)
+        reader.start()
+        startup_log = deque(maxlen=100)
         try:
-            deadline = time.monotonic() + 30
+            deadline = time.monotonic() + 90
             token = None
             while time.monotonic() < deadline:
                 if process.poll() is not None:
-                    raise AssertionError(f"Viewer exited with {process.returncode}")
-                ready, _, _ = select.select([process.stdout], [], [], 0.2)
-                if ready:
-                    line = process.stdout.readline()
-                    match = re.search(rf"Remote viewer: http://127\.0\.0\.1:{port}/\?token=(\S+)", line)
-                    if match:
-                        token = match.group(1)
-                        break
-            assert token, "Viewer did not publish a URL"
+                    break
+                try:
+                    line = lines.get(timeout=0.2)
+                except queue.Empty:
+                    continue
+                startup_log.append(line)
+                match = re.search(rf"Remote viewer: http://127\.0\.0\.1:{port}/\?token=(\S+)", line)
+                if match:
+                    token = match.group(1)
+                    break
+            if token is None:
+                while not lines.empty():
+                    startup_log.append(lines.get_nowait())
+                raise AssertionError(
+                    f"Viewer did not publish a URL (exit={process.poll()}):\n"
+                    + "".join(startup_log)
+                )
             asyncio.run(check(port, token, scene))
         finally:
             process.terminate()
@@ -238,6 +261,8 @@ def main():
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
+            reader.join(timeout=1)
+            process.stdout.close()
 
 
 if __name__ == "__main__":

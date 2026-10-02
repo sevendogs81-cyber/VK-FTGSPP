@@ -309,6 +309,8 @@ def main(argv=None, *, command="viewer"):
                 "--no-vsync, --frames, --screenshot and --stats-json are desktop-only; "
                 "use the remote UI for PNG captures"
             )
+        if command == "viewer" and args.catalog is not None and not args.remote:
+            raise ValueError("--catalog requires --remote")
         asset = load_asset(
             args.run or args.model,
             time_range=args.time_range,

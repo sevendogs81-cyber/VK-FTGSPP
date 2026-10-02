@@ -473,6 +473,9 @@
           keysDown = new Set(),
           playClock = 0,
           frameInfo = "",
+          switching = false,
+          modelHash,
+          sceneEpoch = 0,
           exporting = false,
           recordPending = false,
           recording = { active: false, sample_count: 0, duration: 0 };
@@ -530,10 +533,12 @@
           ];
         };
         const send = (type, more = {}) => {
-          if (ws.readyState === 1) ws.send(JSON.stringify({ type, ...more }));
+          if (ws.readyState === 1 && (!switching || type === "switch_scene"))
+            ws.send(JSON.stringify({ type, model_sha256: modelHash, ...more }));
         };
         function acceptState(next) {
           state = next;
+          selectedKey = -1;
           sentState = {};
           for (const [key, value] of Object.entries(state)) {
             if (key !== "bookmarks" && key !== "path_times")
@@ -570,7 +575,7 @@
           };
         }
         const sendAction = (type, more = {}) => {
-          if (!state || ws.readyState !== 1) return;
+          if (!state || switching || ws.readyState !== 1) return;
           send(type, { ...updateMessage(), ...more });
         };
         function toast(msg) {
@@ -639,7 +644,9 @@
           refreshRecordingUI();
         }
         function refreshRecordingUI() {
-          $("recordToggle").disabled = recordPending || exporting;
+          $("scenes").disabled = switching || exporting || recording.active ||
+            $("scenes").children.length < 2;
+          $("recordToggle").disabled = switching || recordPending || exporting;
           $("recordClear").disabled =
             recordPending || exporting || recording.active || !recording.sample_count;
           $("recordToggle").textContent = recording.active
@@ -752,7 +759,7 @@
         function requestFrame() {
           if (!state) return;
           dirty = true;
-          if (inflight || document.hidden || ws.readyState !== 1) return;
+          if (switching || inflight || document.hidden || ws.readyState !== 1) return;
           const now = performance.now(),
             delay = Math.max(
               0,
@@ -762,7 +769,7 @@
         }
         function flush() {
           renderTimer = 0;
-          if (inflight || !dirty || document.hidden || ws.readyState !== 1)
+          if (switching || inflight || !dirty || document.hidden || ws.readyState !== 1)
             return;
           dirty = false;
           inflight = true;
@@ -830,7 +837,7 @@
         function orbit(dx, dy) {
           let p = cameraParts(state.camera),
             v = sub(p.pos, pivot),
-            yawAxis = meta.world_up || [0, -1, 0],
+            yawAxis = state.world_up || meta.world_up || [0, -1, 0],
             yaw = -dx * 0.005,
             pitch = -dy * 0.005;
           v = rotate(v, yawAxis, yaw);
@@ -851,7 +858,7 @@
         }
         function look(dx, dy) {
           let p = cameraParts(state.camera),
-            yawAxis = meta.world_up || [0, -1, 0],
+            yawAxis = state.world_up || meta.world_up || [0, -1, 0],
             yaw = -dx * 0.005,
             pitch = -dy * 0.005,
             r = rotate(p.right, yawAxis, yaw),
@@ -910,6 +917,7 @@
         ws.onerror = () => toast("WebSocket error");
         ws.onmessage = async (ev) => {
           if (ev.data instanceof Blob) {
+            const epoch = sceneEpoch;
             const kind = new Uint8Array(
                 await ev.data.slice(0, 1).arrayBuffer(),
               )[0],
@@ -919,18 +927,21 @@
                 kind === 2 ? "image/png" : "image/jpeg",
               );
             if (kind === 1) {
+              if (switching || epoch !== sceneEpoch) return;
               const old = $("view").src,
                 url = URL.createObjectURL(blob);
               try {
                 $("view").src = url;
                 await $("view").decode();
-                $("empty").hidden = true;
+                if (epoch === sceneEpoch) $("empty").hidden = true;
               } catch (error) {
                 toast("Image decode failed");
               } finally {
                 if (old.startsWith("blob:")) URL.revokeObjectURL(old);
-                inflight = false;
-                if (dirty) requestFrame();
+                if (epoch === sceneEpoch && !switching) {
+                  inflight = false;
+                  if (dirty) requestFrame();
+                }
               }
             } else if (kind === 2) {
               let a = document.createElement("a");
@@ -943,8 +954,15 @@
           }
           let msg = JSON.parse(ev.data);
           if (msg.type === "hello") {
+            ++sceneEpoch;
+            switching = false;
+            modelHash = msg.model_sha256;
+            exporting = false;
             meta = msg.metadata;
             acceptState(msg.state);
+            drag = null;
+            keysDown.clear();
+            playClock = state.time;
             home = structuredClone(meta.initial_camera);
             pivot = meta.center.slice();
             $("label").textContent = meta.label || "Scene";
@@ -984,7 +1002,7 @@
               $("scenes").append(option);
             });
             if (msg.scene) $("scenes").value = msg.scene;
-            $("scenes").disabled = sceneNames.length < 2;
+            setExporting(false);
             if ($("sceneRow").classList)
               $("sceneRow").classList.toggle("visible", sceneNames.length > 1);
             sync();
@@ -1052,7 +1070,11 @@
             pathDirty = true;
             if (msg.action === "render" || msg.action === "update")
               inflight = false;
-            if (msg.action === "switch_scene") $("scenes").disabled = false;
+            if (msg.action === "switch_scene") {
+              switching = false;
+              inflight = false;
+              refreshRecordingUI();
+            }
             if (msg.action === "export_video") {
               setExporting(false);
               $("exportStatus").textContent = `Export error: ${msg.message}`;
@@ -1150,9 +1172,13 @@
         );
         $("camera").onchange = () => capture(Number($("camera").value));
         $("scenes").onchange = () => {
+          if (switching || exporting || recording.active || ws.readyState !== 1) return;
+          switching = true;
+          drag = null;
+          keysDown.clear();
           $("scenes").disabled = true;
           $("status").textContent = `Loading ${$("scenes").value}…`;
-          ws.send(JSON.stringify({ type: "switch_scene", scene: $("scenes").value }));
+          send("switch_scene", { scene: $("scenes").value });
         };
         $("fit").onclick = fit;
         $("reset").onclick = reset;
@@ -1310,13 +1336,13 @@
         $("pathSave").onclick = () => sendAction("save_path");
         $("pathLoad").onclick = () => send("load_path");
         $("recordToggle").onclick = () => {
-          if (recordPending || exporting) return;
+          if (!state || switching || ws.readyState !== 1 || recordPending || exporting) return;
           recordPending = true;
           refreshRecordingUI();
           sendAction(recording.active ? "stop_recording" : "start_recording");
         };
         $("recordClear").onclick = () => {
-          if (recordPending || recording.active || exporting) return;
+          if (switching || ws.readyState !== 1 || recordPending || recording.active || exporting) return;
           recordPending = true;
           refreshRecordingUI();
           send("clear_recording");
@@ -1329,7 +1355,7 @@
         $("exportWidth").oninput = updateExportSummary;
         $("exportFps").oninput = updateExportSummary;
         $("videoExport").onclick = () => {
-          if (!state || exporting) return;
+          if (!state || switching || ws.readyState !== 1 || exporting) return;
           const mode = $("exportMode").value,
             sceneMode = $("pathSceneMode").value,
             fps = Number($("exportFps").value),
@@ -1393,6 +1419,7 @@
         function scheduleTick() {
           if (
             !tickId &&
+            !switching &&
             ws.readyState === 1 &&
             !document.hidden &&
             (state?.playing || (drag?.mode === "look" && keysDown.size))
@@ -1402,11 +1429,12 @@
         }
         function tick(now) {
           tickId = 0;
-          let dt = Math.min(0.1, (now - previous) / 1000);
+          const elapsed = Math.max(0, (now - previous) / 1000),
+            dt = Math.min(0.1, elapsed);
           previous = now;
-          if (document.hidden || !state) return;
+          if (document.hidden || switching || !state) return;
           if (state.playing) {
-            playClock += dt * state.speed;
+            playClock += elapsed * state.speed;
             let lo = meta.time_start,
               hi = meta.time_end;
             if (playClock > hi) {

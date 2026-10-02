@@ -34,6 +34,20 @@ current browser and SSH; it does not need an NVIDIA GPU. The remote extra adds
 headless installation continues to omit the remote extra; `--with-viewer` is
 only for the local native window. Both flags can be used together.
 
+To switch between completed DNA-Rendering and 4DAnyone runs in one browser,
+pass their parent directory with `--catalog`:
+
+```bash
+ftgspp viewer --remote --run /path/to/runs/0012_09 --catalog /path/to/runs
+```
+
+The catalog includes immediate subdirectories with `gaussians.npz`,
+`viewer_manifest.json`, and a resolved config identifying either dataset.
+Finish exports and stop recording before switching. Commands from the previous
+scene are discarded or rejected while switching. Sessions, camera paths, and
+exports follow the selected run unless their locations were explicitly supplied.
+Failed model uploads attempt to restore the previous model from disk.
+
 The remote UI has orbit, pan, look/fly, optical-axis roll, dolly, fit/reset, calibrated capture
 cameras, playback/speed/loop/sample snap, RGB/Alpha/T, background/exposure,
 SH/threshold, faithful/interactive quality, PNG screenshot, camera path
@@ -255,9 +269,15 @@ installs and checks these tools for the supported setup path.
 The remote worker serializes export with interactive rendering because both use
 one renderer. View updates received during export are coalesced and the newest
 view is rendered afterward. A video export is limited to 3840×2160, 240 FPS and
-100,000 frames. Cancellation, disconnects and encoder errors remove the partial
+100,000 frames. PNG path sequences have the same frame-count cap and are
+published only after all frames and their manifest are complete; interrupted
+sequences are removed. Interaction recording stops automatically at 10,000
+samples, preserving the captured path for export. Cancellation, disconnects and
+encoder errors remove the partial
 MP4; completed videos and their manifests remain. Use the headless CLI for
-unattended batch export. JSON is the implemented camera-path exchange format;
+unattended batch export. Odd image dimensions are padded to even dimensions for
+H.264; the video manifest records the encoded dimensions and each frame retains
+its original render camera. JSON is the implemented camera-path exchange format;
 EasyMocap path import/export is not included.
 
 ## Headless export

@@ -64,7 +64,10 @@ def test_camera_validation_and_resize():
     bad = dict(c, w2c=np.zeros((4, 4)))
     with pytest.raises(ValueError, match="rigid"):
         camera(bad)
-    for key, value in (("width", 0), ("timestamp", float("nan"))):
+    for key, value in (
+        ("width", 0), ("width", True), ("timestamp", True),
+        ("timestamp", float("nan")),
+    ):
         with pytest.raises(ValueError):
             camera(dict(c, **{key: value}))
 
@@ -131,6 +134,20 @@ def test_path_slerp_and_separate_time():
         validate_path(data)
 
 
+def test_path_height_only_and_nonfinite_sample_time():
+    c = inferred_metadata(fixture_model())["initial_camera"]
+    for count in (1, 2):
+        path = CameraPath(dict(schema=PATH_SCHEMA, keyframes=[
+            dict(path_time=i, camera=c) for i in range(count)
+        ]))
+        resized = path.sample(.5, height=360)
+        assert (resized["width"], resized["height"]) == (640, 360)
+        np.testing.assert_allclose(resized["K"][:2], c["K"][:2] * .5)
+        for t in (float("nan"), float("inf")):
+            with pytest.raises(ValueError, match="must be finite"):
+                path.sample(t)
+
+
 def test_session_hash_and_validation(tmp_path):
     a = SimpleNamespace(sha256="abc", model_path=tmp_path / "m.npz")
     save_session(tmp_path / "session.json", a, dict(time=1.0, playing=True))
@@ -140,12 +157,25 @@ def test_session_hash_and_validation(tmp_path):
         load_session(tmp_path / "session.json", a)
     for value in (
         {"time": float("nan")},
+        {"time": True},
+        {"playing": "false"},
+        {"selected_camera": 1.5},
         {"world_up": [0, 0, 0]},
         {"sh_degree": 4},
         {"background": [-1, 0, 0]},
     ):
         with pytest.raises(ValueError):
             validate_state(value)
+
+    c = inferred_metadata(fixture_model())["initial_camera"]
+    normalized = validate_state(dict(
+        bookmarks=[c, c], path_times=["0", "1"],
+        background=np.array([0.1, 0.2, 0.3]),
+    ))
+    assert normalized["path_times"] == [0.0, 1.0]
+    assert normalized["background"] == [0.1, 0.2, 0.3]
+    with pytest.raises(ValueError, match="Bookmarks without path times"):
+        validate_state(dict(bookmarks=[c]))
 
 
 def test_atomic_no_clobber(tmp_path):

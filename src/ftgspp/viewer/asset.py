@@ -30,12 +30,16 @@ def json_value(value):
 
 
 def atomic_json(path: Path, value, *, overwrite=True):
+    payload = json.dumps(value, default=json_value, indent=2, allow_nan=False) + "\n"
+    atomic_bytes(path, payload.encode("utf-8"), overwrite=overwrite)
+
+
+def atomic_bytes(path: Path, payload: bytes, *, overwrite=False):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(value, default=json_value, indent=2, allow_nan=False) + "\n"
     fd, name = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
+        with os.fdopen(fd, "wb") as f:
             f.write(payload)
         if overwrite:
             os.replace(name, path)
@@ -48,7 +52,12 @@ def atomic_json(path: Path, value, *, overwrite=True):
 def camera(value):
     c = dict(value)
     for key in ("width", "height"):
-        n = int(c[key])
+        if isinstance(c[key], (bool, np.bool_)):
+            raise ValueError(f"Invalid camera {key}: {c[key]}")
+        try:
+            n = int(c[key])
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(f"Invalid camera {key}: {c[key]}") from exc
         if n != c[key] or not 1 <= n <= 16384:
             raise ValueError(f"Invalid camera {key}: {c[key]}")
         c[key] = n
@@ -76,10 +85,13 @@ def camera(value):
         raise ValueError(
             "w2c must be a rigid OpenCV pose (+X right, +Y down, +Z forward)"
         )
+    timestamp = c.get("timestamp", 0)
+    if isinstance(timestamp, (bool, np.bool_)):
+        raise ValueError("Non-finite camera timestamp")
     c.update(
         K=k,
         w2c=w,
-        timestamp=float(c.get("timestamp", 0)),
+        timestamp=float(timestamp),
         name=str(c.get("name", "Camera")),
     )
     if not math.isfinite(c["timestamp"]):
@@ -115,8 +127,10 @@ def scaled_camera(c, width=None, height=None):
     c = camera(c)
     if width is None and height is None:
         return c
-    width = width or round(height * c["width"] / c["height"])
-    height = height or round(width * c["height"] / c["width"])
+    if width is None:
+        width = max(1, round(height * c["width"] / c["height"]))
+    if height is None:
+        height = max(1, round(width * c["height"] / c["width"]))
     k = c["K"].copy()
     k[0] *= width / c["width"]
     k[1] *= height / c["height"]

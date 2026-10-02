@@ -9,7 +9,7 @@ import shutil
 import subprocess
 import time
 import numpy as np
-from .asset import atomic_json
+from .asset import atomic_bytes, atomic_json
 from .path import CameraPath
 
 
@@ -45,8 +45,7 @@ def compose(
     if ft.ndim != 3 or ft.shape[2] != 4 or not np.isfinite(ft).all():
         raise ValueError("Expected finite HxWx4 foreground/transmittance")
     if not transparent and mode == 0:
-        # The remote viewer composes every frame on the CPU. Keep only one RGB
-        # float image alive instead of allocating several full-frame temporaries.
+        # Keep only one RGB float image alive for desktop/reference captures.
         rgb = ft[..., :3].copy()
         bg = np.asarray(background, dtype=np.float32)
         if checker:
@@ -107,9 +106,7 @@ def _write_png(path, image):
     ok, encoded = cv2.imencode(".png", image)
     if not ok:
         raise RuntimeError("PNG encoding failed")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("xb") as f:
-        f.write(encoded.tobytes())
+    atomic_bytes(path, encoded.tobytes())
 
 
 def display_options(state):

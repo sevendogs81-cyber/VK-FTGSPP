@@ -9,6 +9,7 @@ import os
 import secrets
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from importlib.resources import files
@@ -18,7 +19,7 @@ from urllib.parse import parse_qs, urlsplit
 import cv2
 import numpy as np
 
-from .asset import fit_camera_extent, json_value, scaled_camera
+from .asset import atomic_bytes, fit_camera_extent, json_value, scaled_camera
 from .offline import display_options, native_module, shader_dir
 from .path import CameraPath, from_state, load_path, save_path
 from .session import load_session, save_session, validate_state
@@ -40,10 +41,27 @@ class VideoExportCancelled(RuntimeError):
     pass
 
 
+def _bounded_frame_count(duration, fps, *, label):
+    """Return a deterministic frame count without allowing numeric overflow."""
+
+    duration, fps = float(duration), float(fps)
+    if not math.isfinite(duration) or duration < 0 or not math.isfinite(fps) or fps <= 0:
+        raise ValueError(f"Invalid {label.lower()} duration or FPS")
+    samples = duration * fps
+    if not math.isfinite(samples) or samples - 1e-9 > MAX_VIDEO_FRAMES:
+        raise ValueError(f"{label} exceeds {MAX_VIDEO_FRAMES:,} frames")
+    count = max(1, math.ceil(samples - 1e-9))
+    if count > MAX_VIDEO_FRAMES:
+        raise ValueError(f"{label} exceeds {MAX_VIDEO_FRAMES:,} frames")
+    return count
+
+
 def remote_state(state):
     # Desktop sessions also carry window overlays and runtime counters. These
     # must not round-trip into the browser's control messages.
     state = validate_state({k: v for k, v in state.items() if k in STATE_FIELDS})
+    if len(state.get("bookmarks", [])) > 256:
+        raise ValueError("Too many path keyframes")
     # Retain the field for old sessions/clients, but aspect is always fixed.
     return dict(state, lock_camera=True)
 
@@ -70,8 +88,8 @@ def initial_state(asset, args):
     session = args.session or asset.model_path.parent / "viewer_session.json"
     if session.is_file() and not args.no_session:
         try:
-            state.update(load_session(session, asset))
-        except (ValueError, KeyError, OSError) as exc:
+            state.update(remote_state(load_session(session, asset)))
+        except (ValueError, KeyError, OSError, TypeError, OverflowError) as exc:
             print(f"Remote viewer ignored session: {exc}", flush=True)
     if args.camera is not None:
         state.update(camera=c, time=c["timestamp"], selected_camera=args.camera, lock_camera=True)
@@ -82,6 +100,8 @@ def initial_state(asset, args):
             bookmarks=[k["camera"] for k in path["keyframes"]],
             path_times=[k["path_time"] for k in path["keyframes"]],
         )
+    if not -1 <= state["selected_camera"] < len(meta["cameras"]):
+        state["selected_camera"] = -1
     return remote_state(state)
 
 
@@ -186,7 +206,7 @@ class RemoteViewer:
         return self._encoded, elapsed
 
     async def send(self, ws, message):
-        await ws.send(json.dumps(wire(message), separators=(",", ":"), allow_nan=False))
+        await ws.send(json.dumps(message, default=json_value, separators=(",", ":"), allow_nan=False))
 
     def recording_summary(self):
         keys = self.recording_keys if self.recording_started is not None else (
@@ -223,12 +243,16 @@ class RemoteViewer:
     def stop_interaction_recording(self):
         if self.recording_started is None:
             raise ValueError("Interaction recording is not active")
-        self.record_interaction_sample()
+        # Hitting the cap must still leave a recording that can be stopped and
+        # exported.  The update that reached the cap already captured the most
+        # recent accepted state.
+        if len(self.recording_keys) < MAX_RECORDED_KEYS:
+            self.record_interaction_sample()
         self.recording_started = None
         if len(self.recording_keys) < 2:
             raise ValueError("Interaction recording needs at least two samples")
         self.recorded_path = dict(
-            schema="ftgspp-camera-path-v1", keyframes=self.recording_keys,
+            schema="ftgspp-camera-path-v1", keyframes=list(self.recording_keys),
         )
         return self.recording_summary()
 
@@ -244,9 +268,6 @@ class RemoteViewer:
         if not isinstance(updates, dict) or set(updates) - STATE_FIELDS:
             raise ValueError("Unknown or invalid state fields")
         updates = dict(updates)
-        for key in ("playing", "loop", "snap", "lock_camera", "checker", "transparent", "interactive"):
-            if key in updates and not isinstance(updates[key], bool):
-                raise ValueError(f"{key} must be a boolean")
         if "selected_camera" in updates:
             i = updates["selected_camera"]
             if type(i) is not int or not -1 <= i < len(self.asset.metadata["cameras"]):
@@ -254,6 +275,8 @@ class RemoteViewer:
         if "bookmarks" in updates or "path_times" in updates:
             updates.setdefault("bookmarks", self.state["bookmarks"])
             updates.setdefault("path_times", self.state["path_times"])
+            if not isinstance(updates["bookmarks"], list):
+                raise ValueError("Bookmarks must be an array")
             if len(updates["bookmarks"]) > 256:
                 raise ValueError("Too many path keyframes")
         # Validate only modified values. Playback must not revalidate hundreds
@@ -313,21 +336,42 @@ class RemoteViewer:
             sh_degree=self.args.sh_degree,
             marginal_threshold=self.args.marginal_threshold,
         )
-        self.renderer.upload(asset.model.arrays())
-        asset.model = None
-        self.asset = asset
+        # Prepare every fallible piece before replacing the resident GPU model.
+        # This keeps the old asset, renderer, and browser state consistent when
+        # a scene has an incompatible camera/session/path configuration.
+        state = initial_state(asset, self.args)
+        output = self.args.output or default_export_root(asset)
+        session = self.args.session or asset.model_path.parent / "viewer_session.json"
+        path_file = self.args.camera_path or asset.model_path.parent / "viewer_path.json"
+        # Native upload releases the old buffers before allocating the new ones.
+        # Invalidate cached pixels even when upload fails, then reload the old
+        # model on failure without keeping two models resident during browsing.
         self._rgba = None
         self._forward_key = self._encoded_key = self._encoded = None
+        try:
+            self.renderer.upload(asset.model.arrays())
+        except Exception as exc:
+            asset.model = None
+            try:
+                previous = load_asset(self.asset.model_path)
+                if previous.sha256 != self.asset.sha256:
+                    raise ValueError("Previous model changed on disk")
+                self.renderer.upload(previous.model.arrays())
+            except Exception as recovery:
+                raise RuntimeError(
+                    f"Scene upload failed ({exc}); restoring the previous model "
+                    f"also failed ({recovery}). Reload a scene or restart the viewer."
+                ) from exc
+            raise RuntimeError(f"Scene upload failed ({exc}); previous model restored") from exc
+        asset.model = None
+        self.asset = asset
+        self.state = state
+        self.output = output
+        self.session = session
+        self.path_file = path_file
         self.recording_started = None
         self.recording_keys = []
         self.recorded_path = None
-        if not self.args.output:
-            self.output = default_export_root(asset)
-        if not self.args.session:
-            self.session = asset.model_path.parent / "viewer_session.json"
-        if not self.args.camera_path:
-            self.path_file = asset.model_path.parent / "viewer_path.json"
-        self.state = initial_state(asset, self.args)
 
     async def serve_client(self, ws):
         if self.client is not None:
@@ -343,10 +387,11 @@ class RemoteViewer:
         cancelled = threading.Event()
         export_active = False
         export_cancel = None
+        switch_active = False
         wake.set()
 
         async def worker():
-            nonlocal export_active, export_cancel
+            nonlocal export_active, export_cancel, switch_active
             while True:
                 await wake.wait()
                 wake.clear()
@@ -363,32 +408,36 @@ class RemoteViewer:
                 state = dict(self.state)
                 render_width, render_height = self.render_width, self.render_height
                 if switch:
+                    switch_active = True
                     try:
-                        await asyncio.to_thread(self.activate_scene, switch)
-                    except Exception as exc:
-                        if stopping:
-                            return
-                        await self.send(ws, dict(
-                            type="error", action="switch_scene", message=str(exc),
-                        ))
-                        await self.send(ws, self.hello_message())
-                    else:
+                        try:
+                            await asyncio.to_thread(self.activate_scene, switch)
+                        except Exception as exc:
+                            if stopping:
+                                return
+                            await self.send(ws, dict(
+                                type="error", action="switch_scene", message=str(exc),
+                            ))
                         if stopping:
                             return
                         await self.send(ws, self.hello_message())
                         state = dict(self.state)
                         render_width, render_height = self.render_width, self.render_height
                         render = True
+                    finally:
+                        switch_active = False
                 try:
                     if video:
                         export_state, plan, job_cancel = video
                         export_active = True
                         loop = asyncio.get_running_loop()
+                        progress_pending = None
 
                         def progress(completed, total, elapsed):
-                            if stopping:
+                            nonlocal progress_pending
+                            if stopping or (progress_pending is not None and not progress_pending.done()):
                                 return
-                            asyncio.run_coroutine_threadsafe(self.send(ws, dict(
+                            progress_pending = asyncio.run_coroutine_threadsafe(self.send(ws, dict(
                                 type="export_progress", completed=completed,
                                 total=total, elapsed=elapsed,
                             )), loop)
@@ -417,6 +466,7 @@ class RemoteViewer:
                             export_active = False
                             export_cancel = None
                     if export:
+                        export_active = True
                         try:
                             result = await asyncio.to_thread(self.export_path, *export, cancelled)
                             if stopping:
@@ -427,6 +477,8 @@ class RemoteViewer:
                                 await self.send(ws, dict(
                                     type="error", action="export_path", message=str(exc),
                                 ))
+                        finally:
+                            export_active = False
                     if capture:
                         capture_state, width, height = capture
                         width, height = fit_camera_extent(capture_state["camera"], width, height)
@@ -438,8 +490,7 @@ class RemoteViewer:
                         from .app import unique_path
                         from .asset import atomic_json
                         target = unique_path(self.output, "capture", ".png")
-                        with target.open("xb") as file:
-                            file.write(data)
+                        atomic_bytes(target, data)
                         atomic_json(target.with_suffix(".json"), dict(
                             schema="ftgspp-capture-v1", model_sha256=self.asset.sha256,
                             camera=dict(
@@ -480,6 +531,17 @@ class RemoteViewer:
                     if not isinstance(message, dict):
                         raise ValueError("Expected a JSON object")
                     action = message.get("type")
+                    if message.get("model_sha256", self.asset.sha256) != self.asset.sha256:
+                        if action == "update":
+                            continue
+                        raise ValueError("Command belongs to a previous scene")
+                    if switch_active or pending["switch"] is not None:
+                        # Browser updates describe the old scene and will be
+                        # superseded by the new hello/state.  Other commands
+                        # must be retried explicitly against the new scene.
+                        if action == "update":
+                            continue
+                        raise ValueError("Wait for the scene switch to finish")
                     if action in (
                         "capture", "save_session", "save_path", "sample_path",
                         "export_path", "export_video", "start_recording", "stop_recording",
@@ -487,7 +549,12 @@ class RemoteViewer:
                         self.apply_update(message)
                     if action == "update":
                         self.apply_update(message)
-                        self.record_interaction_sample()
+                        if self.recording_started is not None:
+                            self.record_interaction_sample()
+                            if len(self.recording_keys) == MAX_RECORDED_KEYS:
+                                await self.send(ws, dict(
+                                    type="recording_stopped", **self.stop_interaction_recording(),
+                                ))
                         pending["render"] = True
                         wake.set()
                     elif action == "capture":
@@ -497,7 +564,7 @@ class RemoteViewer:
                         save_session(self.session, self.asset, self.state)
                         await self.send(ws, dict(type="saved", action="session", path=str(self.session)))
                     elif action == "load_session":
-                        self.state.update(remote_state(load_session(self.session, self.asset)))
+                        self.apply_update(dict(state=remote_state(load_session(self.session, self.asset))))
                         await self.send(ws, dict(type="state", state=self.state))
                         pending["render"] = True
                         wake.set()
@@ -506,10 +573,10 @@ class RemoteViewer:
                         await self.send(ws, dict(type="saved", action="path", path=str(self.path_file)))
                     elif action == "load_path":
                         path = load_path(self.path_file)
-                        self.state.update(
+                        self.apply_update(dict(state=dict(
                             bookmarks=[k["camera"] for k in path["keyframes"]],
                             path_times=[k["path_time"] for k in path["keyframes"]],
-                        )
+                        )))
                         await self.send(ws, dict(type="state", state=self.state))
                     elif action == "sample_path":
                         path = CameraPath(from_state(self.state))
@@ -583,6 +650,10 @@ class RemoteViewer:
                             raise ValueError(
                                 "Wait for the current export to finish before switching scenes"
                             )
+                        if pending["capture"]:
+                            raise ValueError(
+                                "Wait for the pending screenshot before switching scenes"
+                            )
                         if self.recording_started is not None:
                             raise ValueError(
                                 "Stop the interaction recording before switching scenes"
@@ -599,7 +670,7 @@ class RemoteViewer:
                         await self.send(ws, dict(type="export_cancel_requested"))
                     else:
                         raise ValueError("Unknown viewer action")
-                except (ValueError, KeyError, OSError, TypeError, json.JSONDecodeError) as exc:
+                except (ValueError, KeyError, OSError, TypeError, OverflowError) as exc:
                     await self.send(ws, dict(type="error", action=action, message=str(exc)))
         finally:
             stopping = True
@@ -628,27 +699,34 @@ class RemoteViewer:
         from .asset import atomic_json
         path = CameraPath(from_state(state))
         width, height = fit_camera_extent(path.cameras[0], width, height)
-        target = unique_path(self.output, "path")
-        target.mkdir(exist_ok=False)
         fps = self.args.fps or self.asset.metadata["fps"]
-        count = max(1, math.ceil(path.duration * fps - 1e-9))
-        frames = []
-        for i in range(count):
+        count = _bounded_frame_count(path.duration, fps, label="Path export")
+        target = unique_path(self.output, "path")
+        temporary = Path(tempfile.mkdtemp(prefix=".path_", dir=self.output))
+        try:
+            frames = []
+            for i in range(count):
+                if cancelled is not None and cancelled.is_set():
+                    raise RuntimeError("Path export cancelled after client disconnect")
+                c = path.sample(path.times[0] + i / fps, width, height)
+                current = dict(state, camera=c, time=c["timestamp"])
+                data, _ = self.render_image(current, width, height, True)
+                name = f"{i:06d}.png"
+                (temporary / name).write_bytes(data)
+                frames.append(dict(file=name, path_time=i / fps, camera=c))
+            atomic_json(temporary / "render.json", dict(
+                schema="ftgspp-render-v1", model_sha256=self.asset.sha256,
+                fps=fps, frame_count=count, sh_degree=state["sh_degree"],
+                marginal_threshold=state["marginal_threshold"],
+                display=display_options(state), frames=frames,
+            ))
             if cancelled is not None and cancelled.is_set():
                 raise RuntimeError("Path export cancelled after client disconnect")
-            c = path.sample(path.times[0] + i / fps, width, height)
-            current = dict(state, camera=c, time=c["timestamp"])
-            data, _ = self.render_image(current, width, height, True)
-            name = f"{i:06d}.png"
-            (target / name).write_bytes(data)
-            frames.append(dict(file=name, path_time=i / fps, camera=c))
-        atomic_json(target / "render.json", dict(
-            schema="ftgspp-render-v1", model_sha256=self.asset.sha256,
-            fps=fps, frame_count=count, sh_degree=state["sh_degree"],
-            marginal_threshold=state["marginal_threshold"],
-            display=display_options(state), frames=frames,
-        ))
-        return target
+            temporary.rename(target)
+            return target
+        except BaseException:
+            shutil.rmtree(temporary, ignore_errors=True)
+            raise
 
     def prepare_video_export(self, state, options):
         if not isinstance(options, dict):
@@ -724,9 +802,7 @@ class RemoteViewer:
             ))
 
         width, height = fit_camera_extent(path.cameras[0], width, height)
-        count = max(1, math.ceil(path.duration * fps - 1e-9))
-        if count > MAX_VIDEO_FRAMES:
-            raise ValueError(f"Video export exceeds {MAX_VIDEO_FRAMES:,} frames")
+        count = _bounded_frame_count(path.duration, fps, label="Video export")
         return dict(
             mode=mode, path=path, fps=fps, width=width, height=height,
             duration=path.duration, frame_count=count, scene_mode=scene_mode,
@@ -756,9 +832,17 @@ class RemoteViewer:
             "-threads", str(VIDEO_ENCODER_THREADS),
             "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(temporary),
         ]
-        process = subprocess.Popen(
-            command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-        )
+        # A PIPE that is read only after all frames have been written can fill
+        # with encoder diagnostics and deadlock both processes. Spool stderr,
+        # then retain only its tail in the error shown to the client.
+        errors = tempfile.TemporaryFile()
+        try:
+            process = subprocess.Popen(
+                command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=errors,
+            )
+        except BaseException:
+            errors.close()
+            raise
         frames = []
         started = last_progress = time.monotonic()
         settings = display_options(state)
@@ -766,8 +850,10 @@ class RemoteViewer:
         self._forward_key = self._encoded_key = self._encoded = None
 
         def encoder_result():
-            stderr = process.stderr.read() if process.stderr is not None else b""
-            return process.wait(), stderr.decode(errors="replace").strip()
+            code = process.wait()
+            errors.seek(0, os.SEEK_END)
+            errors.seek(max(0, errors.tell() - 65536))
+            return code, errors.read().decode(errors="replace").strip()
 
         def encoder_failure(default):
             code, message = encoder_result()
@@ -818,12 +904,15 @@ class RemoteViewer:
             code, message = encoder_result()
             if code:
                 raise RuntimeError(f"ffmpeg failed ({code}): {message or 'unknown error'}")
+            if is_cancelled():
+                raise VideoExportCancelled("Video export cancelled")
             os.replace(temporary, target)
             report = dict(
                 schema="ftgspp-video-export-v1", model_sha256=self.asset.sha256,
                 video=target.name, mode=plan["mode"], fps=fps,
                 duration=plan["duration"], frame_count=count,
-                width=width, height=height, sh_degree=state["sh_degree"],
+                width=width + width % 2, height=height + height % 2,
+                sh_degree=state["sh_degree"],
                 marginal_threshold=state["marginal_threshold"],
                 export_seconds=time.monotonic() - started,
                 scene_timeline=dict(
@@ -840,13 +929,16 @@ class RemoteViewer:
             atomic_json(target.with_suffix(".json"), report)
             return target
         except BaseException:
+            # Terminate before closing stdin: closing a buffered pipe may flush
+            # pending data and otherwise block on an encoder that stopped reading.
+            if process.poll() is None:
+                process.terminate()
             if process.stdin is not None and not process.stdin.closed:
                 try:
                     process.stdin.close()
                 except BrokenPipeError:
                     pass
             if process.poll() is None:
-                process.terminate()
                 try:
                     process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
@@ -856,6 +948,7 @@ class RemoteViewer:
             target.unlink(missing_ok=True)
             raise
         finally:
+            errors.close()
             self._forward_key = self._encoded_key = self._encoded = None
 
 
