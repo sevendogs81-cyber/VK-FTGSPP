@@ -90,6 +90,7 @@ init:
     target_bounds: null
     pixel_transform_convention: source_index_scale
 train:
+  batch_size: 1
   iterations: 30000
   background:
     mode: fixed

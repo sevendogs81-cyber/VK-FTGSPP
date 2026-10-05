@@ -41,6 +41,8 @@ if TYPE_CHECKING:
     from ftgspp.training.distributed import DistributedPlan
 
 FORMAT = 6
+LOCAL_BATCH_FORMAT = 7
+LOCAL_BATCH_ABI = "ftgspp-local-batch4-fp32-mean-v1"
 LATEST_MANIFEST = "latest.json"
 MAIN_SELECTED_CHECKPOINT = "main_selected.npz"
 HARD_FINAL_CHECKPOINT = "hard_final.npz"
@@ -132,6 +134,11 @@ def validate_training_clocks(
     clocks["wall_seconds"] = float(wall)
     if clocks["optimizer_steps"] != iteration + 1 or clocks["views_seen"] < clocks["optimizer_steps"]:
         raise ResumeCompatibilityError("checkpoint training clocks are inconsistent with iteration")
+    if training.get("local_batch") is not None:
+        if training["local_batch"] != {"abi": LOCAL_BATCH_ABI, "size": 4}:
+            raise ResumeCompatibilityError("unsupported checkpoint local_batch contract")
+        if clocks["views_seen"] != 4 * clocks["optimizer_steps"]:
+            raise ResumeCompatibilityError("local batch clocks must record four views per update")
     return clocks, None
 
 
@@ -443,6 +450,12 @@ def _algorithm_config(config: AppConfig) -> dict[str, object]:
             "relocation_score_mode": "default",
         },
     }
+    if config.train.batch_size > 1:
+        values["optimizer"]["local_batch"] = {
+            "abi": LOCAL_BATCH_ABI, "size": int(config.train.batch_size),
+            "reduction": "equal-view-fp32-mean", "adam_batch_scaling": "none",
+            "sh_clock": "phase_local_optimizer_step*batch_size",
+        }
     return dict(_jsonable(values))
 
 
@@ -508,6 +521,9 @@ def build_checkpoint_metadata(
         synchronous=distributed.enabled,
         sampling_policy=distributed.sampling_policy,
     )
+    if config.train.batch_size > 1:
+        sampler_abi = sampler_abi.replace("slot=step*world_size+rank",
+            "slot=step*batch_size+microview") + ";batch_size=4"
     if distributed.sampling_policy == "flat_epoch":
         sampler_alignment = (
             "quality-oriented-flat-view-random-reshuffling;uniform-marginal;"
@@ -537,6 +553,7 @@ def build_checkpoint_metadata(
         "views_seen": (
             optimizer_steps
             * int(distributed.world_size)
+            * int(config.train.batch_size)
         ),
         "wall_seconds": 0.0,
     }
@@ -567,7 +584,7 @@ def build_checkpoint_metadata(
             if effective_sparse is None else effective_sparse
         ),
     }
-    return {
+    metadata = {
         "phase": str(phase),
         "phase_step": int(phase_step),
         "training": {
@@ -622,6 +639,13 @@ def build_checkpoint_metadata(
         "algorithm": _algorithm_manifest(config),
         "runtime": _jsonable(provenance),
     }
+    if config.train.batch_size > 1:
+        metadata["training"]["local_batch"] = {"abi": LOCAL_BATCH_ABI, "size": 4}
+        metadata["training"]["clocks"]["consumers"].update({
+            "sampling": "slot=phase_local_optimizer_step*4+microview",
+            "sh_schedule": "phase_local_optimizer_step*4 exposures; interval=1000",
+        })
+    return metadata
 
 
 def capture_checkpoint_snapshot(
@@ -672,6 +696,11 @@ def load_model(path: Path) -> NativeGaussians:
         })
 
 
+def _snapshot_format(metadata: Mapping[str, object]) -> int:
+    enhanced = metadata.get("training", {}).get("local_batch")
+    return LOCAL_BATCH_FORMAT if enhanced else FORMAT
+
+
 def save_checkpoint_snapshot(
     path: Path,
     snapshot: CheckpointSnapshot,
@@ -689,7 +718,7 @@ def save_checkpoint_snapshot(
     arrays.update({
         f"optimizer__{key}": value for key, value in snapshot.optimizer.items()
     })
-    arrays["runtime__format"] = np.asarray(FORMAT, np.int32)
+    arrays["runtime__format"] = np.asarray(_snapshot_format(snapshot.metadata), np.int32)
     arrays["runtime__iteration"] = np.asarray(snapshot.iteration, np.int64)
     arrays["runtime__metadata"] = np.asarray(json.dumps(
         _jsonable(snapshot.metadata), sort_keys=True, allow_nan=False,
@@ -723,7 +752,7 @@ def publish_checkpoint(
     save_checkpoint_snapshot(target, snapshot, overwrite=False)
     if update_latest:
         pointer = {
-            "format": FORMAT,
+            "format": _snapshot_format(snapshot.metadata),
             "iteration": int(snapshot.iteration),
             "checkpoint": name,
         }
@@ -744,7 +773,7 @@ def load_checkpoint_full(
         if format_array.size != 1 or format_array.dtype.kind not in "iu":
             raise ValueError(f"checkpoint format tag is not an integer scalar: {path}")
         format_value = int(format_array.reshape(-1)[0])
-        if format_value != FORMAT:
+        if format_value not in (FORMAT, LOCAL_BATCH_FORMAT):
             raise ValueError(f"unsupported native checkpoint format in {path}")
         model_values = {
             key.removeprefix("model__"): _contiguous_copy(archive[key])
@@ -762,7 +791,7 @@ def load_checkpoint_full(
         iteration = int(iteration_array.reshape(-1)[0])
         if iteration < -1:
             raise ValueError(f"checkpoint iteration must be >= -1: {path}")
-        if format_value == FORMAT:
+        if format_value in (FORMAT, LOCAL_BATCH_FORMAT):
             if "runtime__metadata" not in archive.files:
                 raise ValueError(
                     f"V{format_value} checkpoint has no runtime metadata: {path}"
@@ -773,7 +802,9 @@ def load_checkpoint_full(
                     f"V{format_value} checkpoint metadata is not a mapping: {path}"
                 )
             metadata = dict(metadata)
-    if format_value == FORMAT:
+            if format_value != _snapshot_format(metadata):
+                raise ValueError("checkpoint format and local batch identity disagree")
+    if format_value in (FORMAT, LOCAL_BATCH_FORMAT):
         raw_layout = metadata.get("layout", {})
         if not isinstance(raw_layout, Mapping):
             raise ValueError(f"checkpoint layout manifest is not a mapping: {path}")
@@ -891,7 +922,7 @@ def validate_resume_compatibility(
             )
     for key in (
         "seed", "sampling_policy", "sampler_abi", "phase_seed_formula",
-        "phase_seeds", "reduction",
+        "phase_seeds", "reduction", "local_batch",
     ):
         if saved_training.get(key) != current_training.get(key):
             errors.append(
@@ -1082,7 +1113,7 @@ def latest_checkpoint(directory: Path) -> Path | None:
     if manifest.is_file():
         try:
             pointer = json.loads(manifest.read_text(encoding="utf-8"))
-            if int(pointer["format"]) != FORMAT:
+            if int(pointer["format"]) not in (FORMAT, LOCAL_BATCH_FORMAT):
                 raise ValueError(
                     f"latest pointer format is {pointer['format']}, expected {FORMAT}"
                 )
@@ -1095,10 +1126,10 @@ def latest_checkpoint(directory: Path) -> Path | None:
             with np.load(target, allow_pickle=False) as archive:
                 checkpoint_format = int(archive["runtime__format"])
                 checkpoint_iteration = int(archive["runtime__iteration"])
-            if checkpoint_format != FORMAT:
+            if checkpoint_format not in (FORMAT, LOCAL_BATCH_FORMAT) or checkpoint_format != int(pointer["format"]):
                 raise ValueError(
-                    "latest pointer target is not a V6 checkpoint; migrate it "
-                    "with ftgspp-convert-checkpoint before resume"
+                    "latest pointer and checkpoint formats disagree or are unsupported; "
+                    "expected a matching V6 or V7 checkpoint"
                 )
             if checkpoint_iteration != int(pointer["iteration"]):
                 raise ValueError(

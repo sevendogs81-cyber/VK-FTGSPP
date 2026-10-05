@@ -13,11 +13,12 @@ Clone the repository, run one setup script, then use the `ftgspp` CLI. YAML
 examples live in the clone; the wheel provides the command rather than a public
 import library.
 
-**First release trains on one GPU.** One view produces one optimizer update.
+**Training uses one GPU.** By default, one view produces one optimizer update.
+Foreground runs can opt into `train.batch_size: 4`: four sequential views share
+one FP32 mean gradient and one Adam update. See [training configuration](docs/usage.md).
 Two-device synchronous training is **in development**: the pair code,
 `dev/tests/gpu/` scripts, and the controlled GPU workflow stay in the tree for
-engineering, but they are not a supported user path. Local gradient
-accumulation is not part of the interface.
+engineering, but they are not a supported user path.
 
 **License:** non-commercial research and educational use only, not an
 OSI-approved or commercially permissive open-source license. Read [LICENSE](LICENSE)

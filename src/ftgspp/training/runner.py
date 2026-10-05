@@ -51,6 +51,7 @@ from ftgspp.io.hashing import file_sha256
 from ftgspp.data.scene import Scene
 from ftgspp.training.sampler import (
     sample_rank_views,
+    sample_batch_views,
     sampling_phase_seed,
 )
 from ftgspp.training.distributed import (
@@ -427,7 +428,7 @@ def _finite_rgb(array: np.ndarray) -> bool:
 
 
 def _rank_view_audit(
-    dataset: Scene, view_indices: tuple[int, ...],
+    dataset: Scene, view_indices: tuple[int, ...], *, local_batch: bool = False,
 ) -> list[dict[str, int | float]]:
     """Describe the one view assigned to each synchronous rank."""
 
@@ -435,7 +436,8 @@ def _rank_view_audit(
     for slot, view_index in enumerate(view_indices):
         view = dataset.train_views[int(view_index)]
         result.append({
-            "rank": int(slot),
+            "rank": 0 if local_batch else int(slot),
+            **({"microview": int(slot)} if local_batch else {}),
             "view": int(view_index),
             "frame": int(view.frame),
             "camera": int(view.camera_id),
@@ -444,11 +446,12 @@ def _rank_view_audit(
     return result
 
 
-def _background_context_audit(contexts) -> dict[str, object]:
+def _background_context_audit(contexts, *, local_batch: bool = False) -> dict[str, object]:
     """Persist the exact immutable background consumed by a logical step."""
 
     rows = [{
-        "rank": int(rank),
+        "rank": 0 if local_batch else int(rank),
+        **({"microview": int(rank)} if local_batch else {}),
         "color": [float(value) for value in context.color],
         "sampler_version": str(context.version),
         "phase": str(context.phase),
@@ -1558,16 +1561,22 @@ class NativeRunner:
 
     def _optimizer_update(self, backend, group, views, step, should_log,
                           next_views, *, phase="main"):
-        """One view per rank, one exchange (pair only), one Adam update."""
+        """One complete local minibatch or one view per rank, then one Adam."""
         world_size = len(views)
-        background_contexts = sample_rank_backgrounds(
-            self.config.train.background,
-            phase=phase,
-            logical_step=int(step),
-            world_size=world_size,
-        )
+        local_batch = int(self.config.train.batch_size)
+        if local_batch > 1:
+            background_contexts = tuple(
+                sample_rank_backgrounds(self.config.train.background, phase=phase,
+                    logical_step=int(step) * local_batch + slot, world_size=1)[0]
+                for slot in range(local_batch)
+            )
+        else:
+            background_contexts = sample_rank_backgrounds(
+                self.config.train.background, phase=phase,
+                logical_step=int(step), world_size=world_size,
+            )
         backgrounds = tuple(context.color for context in background_contexts)
-        background_audit = _background_context_audit(background_contexts)
+        background_audit = _background_context_audit(background_contexts, local_batch=local_batch > 1)
         if group is not None:
             result = group.train_step(
                 views, step, collect_loss=should_log,
@@ -1584,14 +1593,18 @@ class NativeRunner:
                     raise RuntimeError("synchronous log step did not return loss scalars")
                 scalars = dict(result["loss"])
             return scalars, timing, fields
-        collect_grads = should_log and _log_geometry_grads_enabled()
+        # Existing gradient summaries describe the most recent raw backward,
+        # not the four-view mean. Do not label that as a batch gradient.
+        collect_grads = local_batch == 1 and should_log and _log_geometry_grads_enabled()
         if collect_grads:
             backend.set_collect_geometry_grad_stats(True)
         try:
-            backend.train_view(
-                views[0], step, collect_loss=should_log,
-                background=backgrounds[0],
-            )
+            if local_batch > 1:
+                backend.train_batch(views, step, collect_loss=should_log,
+                                    backgrounds=backgrounds)
+            else:
+                backend.train_view(views[0], step, collect_loss=should_log,
+                                   background=backgrounds[0])
             scalars = backend.last_loss() if should_log else None
             if collect_grads:
                 scalars.update(backend.geometry_gradient_stats())
@@ -1722,7 +1735,7 @@ class NativeRunner:
         group: SynchronousBackendGroup | None = None
         training_clocks: dict[str, int | float] = {}
         performance_profile = _TrainingPerformanceProfile(
-            views_per_step=distributed.world_size,
+            views_per_step=distributed.world_size * self.config.train.batch_size,
         )
         reporter = _TrainingReporter()
         rgb_prefetch_executor: ThreadPoolExecutor | None = None
@@ -2097,7 +2110,7 @@ class NativeRunner:
                 "snapshot_interval=%d save_checkpoints=%s export_best=%s",
                 distributed.mode,
                 distributed.world_size,
-                distributed.world_size,
+                distributed.world_size * self.config.train.batch_size,
                 distributed.reduction,
                 group.transport if group is not None else distributed.backend,
                 distributed.sampling_policy,
@@ -2240,6 +2253,10 @@ class NativeRunner:
             )
 
             def _sample_batch(local_step: int) -> tuple[int, ...]:
+                if self.config.train.batch_size > 1:
+                    return sample_batch_views(seed=main_phase_seed, step=local_step,
+                        batch_size=self.config.train.batch_size,
+                        num_views=len(dataset.train_views))
                 return sample_rank_views(
                     seed=main_phase_seed,
                     step=local_step,
@@ -2310,7 +2327,7 @@ class NativeRunner:
                 )
                 training_clocks["views_seen"] = (
                     int(training_clocks["views_seen"])
-                    + distributed.world_size
+                    + distributed.world_size * self.config.train.batch_size
                 )
                 training_clocks["wall_seconds"] = (
                     wall_clock_base + max(0.0, time.perf_counter() - begin)
@@ -2327,10 +2344,11 @@ class NativeRunner:
                         "view": int(view_index),
                         "views": [int(value) for value in rank_views],
                         "rank_view_audit": _rank_view_audit(
-                            dataset, rank_views,
+                            dataset, rank_views, local_batch=self.config.train.batch_size > 1,
                         ),
                         "world_size": distributed.world_size,
-                        "views_per_step": distributed.world_size,
+                        "views_per_step": distributed.world_size * self.config.train.batch_size,
+                        "batch_size": self.config.train.batch_size,
                         "sampling_policy": distributed.sampling_policy,
                         "world_size_lr_scaling": str(
                             distributed.world_size_lr_scaling
@@ -2421,7 +2439,7 @@ class NativeRunner:
                     logger.info(
                         "iteration %d/%d, %.2f steps/s, %.2f views/s",
                         step, self.config.train.iterations, step_rate,
-                        step_rate * distributed.world_size,
+                        step_rate * distributed.world_size * self.config.train.batch_size,
                     )
                 if (
                     wall_eval_interval > 0

@@ -108,7 +108,7 @@ def main(argv: list[str] | None = None) -> None:
     commands.add_parser("render", help="headless camera/path PNG and optional video export")
     doctor = commands.add_parser("doctor", help="check native devices without creating a run")
     doctor.add_argument("--devices", nargs="+", type=int, default=[0])
-    train = commands.add_parser("train", help="train from YAML or resume a V6 run")
+    train = commands.add_parser("train", help="train from YAML or resume a V6/V7 run")
     source = train.add_mutually_exclusive_group(required=True)
     source.add_argument("--config", type=Path)
     source.add_argument("--resume", type=Path)

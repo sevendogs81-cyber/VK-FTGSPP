@@ -19,7 +19,7 @@ def node(**distributed):
 
 
 @pytest.mark.parametrize("removed", [
-    "train.batch_size=1", "train.batch_size=2", "distributed.global_batch_size=2",
+    "distributed.global_batch_size=2",
     "distributed.K=1", "distributed.microsteps=1", "init.roma=true",
     "train.K=1", "pipeline.stages=[init,train]", "pipeline.check_only=true",
     "run.log_dir=logs", "train.image_objective=scene_rgb_v1",

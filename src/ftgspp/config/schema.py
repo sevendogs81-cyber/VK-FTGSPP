@@ -215,6 +215,8 @@ class BackgroundConfig:
 @dataclass
 class TrainConfig:
     iterations: int = MISSING
+    # One Adam update averages four sequential views on the same GPU.
+    batch_size: int = 1
     lrs: dict[str, float] = field(default_factory=dict)
     lr_schedules: dict[str, float] = field(default_factory=dict)
     relocation: RelocationConfig = field(default_factory=RelocationConfig)

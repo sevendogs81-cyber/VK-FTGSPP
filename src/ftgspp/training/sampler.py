@@ -164,6 +164,15 @@ def _torch_random_sampler_stream(
     return values
 
 
+def sample_batch_views(*, seed: int, step: int, batch_size: int,
+                       num_views: int) -> tuple[int, ...]:
+    """Group the unchanged flat-epoch exposure stream into optimizer batches."""
+    if isinstance(batch_size, bool) or batch_size not in (1, 4):
+        raise ValueError("batch_size must be 1 or 4")
+    return sample_rank_views(seed=seed, step=step, world_size=batch_size,
+                             num_views=num_views, sampling_policy="flat_epoch")
+
+
 def sample_rank_views(
     *, seed: int, step: int, world_size: int, num_views: int,
     sampling_policy: str = "flat_epoch",

@@ -86,6 +86,23 @@ public:
     bool force_sync_overflow_ = false;
     uint32_t force_sync_overflow_exact_ = 0;
     bool relocation_stats_checkpoint_valid_ = false;
+    struct LocalBatch {
+        bool active = false;
+        bool internal = false;
+        int step = -1;
+        uint32_t consumed = 0;
+        bool collect_loss = false;
+        std::array<float, 6> loss{};
+    } local_batch_;
+    Buffer<float> local_batch_gradient_;
+    bool last_local_batch_loss_valid_ = false;
+    std::array<float, 6> last_local_batch_loss_{};
+
+    void require_no_local_batch(const char* operation) const {
+        if (local_batch_.active && !local_batch_.internal)
+            throw std::runtime_error(std::string(operation) +
+                " is forbidden inside an unfinished local batch");
+    }
     std::optional<VulkanGSPipeline::PackedTransferTicket> eval_rgb_ticket_;
     size_t last_eval_view_idx_ = 0;
     bool last_eval_apply_color_correction_ = false;
@@ -231,6 +248,7 @@ public:
         config.seed = 0u;
         config.sparse_distributed = false;
         config.optimizer_batch_size = 1u;
+        config.local_batch_size = 1u;
         config.min_opacity = 0.005f;
     }
 
@@ -323,11 +341,14 @@ public:
     }
 
     void configure_ftgspp(py::dict cfg) {
+        require_no_local_batch("configure_ftgspp");
+        last_local_batch_loss_valid_ = false;
         // Fail before mutation: removed or misspelled fields are not ignored.
         static const std::vector<std::string> keys = {
             "max_steps",
             "max_sh_degree",
             "effective_pair_adam",
+            "local_batch_size",
             "seed",
             "ssim_lambda",
             "image_objective",
@@ -372,6 +393,9 @@ public:
         };
         set_int("max_steps", config.max_steps);
         set_int("max_sh_degree", config.max_sh_degree);
+        set_uint("local_batch_size", config.local_batch_size);
+        if (config.local_batch_size != 1u && config.local_batch_size != 4u)
+            throw std::invalid_argument("local_batch_size must be 1 or 4");
         if (cfg.contains("effective_pair_adam"))
             config.optimizer_batch_size =
                 cfg["effective_pair_adam"].cast<bool>() ? 2u : 1u;
@@ -425,6 +449,8 @@ public:
         py::array_t<float, py::array::c_style | py::array::forcecast> velocities,
         py::array_t<float, py::array::c_style | py::array::forcecast> gates
     ) {
+        require_no_local_batch("set_dynamic_gaussians");
+        last_local_batch_loss_valid_ = false;
         auto mean = means.request();
         auto scale = log_scales.request();
         auto rot = rotations.request();
@@ -519,6 +545,7 @@ public:
     }
 
     void clear_dynamic_views() {
+        require_no_local_batch("clear_dynamic_views");
         trainer.clear_external_dataset();
     }
 
@@ -1812,6 +1839,7 @@ public:
     }
 
     void resolve_tile_overflow(bool force_drain = false) {
+        require_no_local_batch("resolve_tile_overflow");
         if (resolving_tile_overflow_)
             return;
         resolving_tile_overflow_ = true;
@@ -1882,6 +1910,7 @@ public:
     }
 
     void drain_for_structure_change() {
+        require_no_local_batch("structure change");
         trainer.drain("relocation");
     }
 
@@ -2221,6 +2250,8 @@ public:
         size_t view_idx, int step, bool collect_loss_scalar=true,
         const std::array<float, 3>& background={0.0f, 0.0f, 0.0f}
     ) {
+        require_no_local_batch("train_dynamic_view_to_loss");
+        last_local_batch_loss_valid_ = false;
         if (step < 0)
             throw std::invalid_argument("training step must be nonnegative");
         if (pending_loss_)
@@ -2246,7 +2277,9 @@ public:
         trainer.get_train_camera(view_idx, uniforms);
         uniforms.step = step;
         uniforms.active_sh = config.hard_separation
-            ? config.max_sh_degree : std::min(step / 1000, config.max_sh_degree);
+            ? config.max_sh_degree : std::min(
+                int((int64_t(step) * config.local_batch_size) / 1000),
+                config.max_sh_degree);
         auto deviceGuard = DeviceGuard(&trainer);
         dynamic_forward(timestamp);
         const bool corrected_for_loss = color_correction_active(step);
@@ -2267,6 +2300,7 @@ public:
     }
 
     void backward_dynamic_view_from_loss_raw(size_t view_idx, int step) {
+        require_no_local_batch("backward_dynamic_view_from_loss_raw");
         require_pending_loss(view_idx, step);
         if (view_idx >= trainer.num_train())
             throw std::out_of_range("dynamic train view index is out of range");
@@ -2276,7 +2310,7 @@ public:
                 "gradients from an unfinished generation");
         trainer.requireFTGSPPFloat32AtomicAdd();
         const float timestamp = trainer.get_train_timestamp(view_idx);
-        if (gradient_state == GradientState::Idle) {
+        if (gradient_state == GradientState::Idle && !local_batch_.active) {
             const size_t n = buffers.num_splats;
             if (buffers.relocation_stats.deviceSize() == 2 * n)
                 trainer.resizeDeviceBuffer(
@@ -2284,7 +2318,7 @@ public:
         }
         {
             auto deviceGuard = DeviceGuard(&trainer);
-            if (gradient_state == GradientState::Idle) {
+            if (gradient_state == GradientState::Idle && !local_batch_.active) {
                 const size_t n = buffers.num_splats;
                 if (buffers.relocation_stats.deviceSize() == 2 * n) {
                     trainer.copyFromDeviceToDevice(
@@ -2373,9 +2407,127 @@ public:
     }
 
     void optimizer_step(int step) {
+        require_no_local_batch("optimizer_step");
+        trainer.requireFTGSPPFloat32AtomicAdd();
         if (session_->dense)
             throw std::runtime_error("pair training requires the pair optimizer");
         apply_ready_optimizer(step);
+    }
+
+    void begin_batch(int step, bool collect_loss = true) {
+        require_no_local_batch("begin_batch");
+        if (step < 0 || config.local_batch_size != 4u ||
+            config.optimizer_batch_size != 1u || config.image_objective != 1u ||
+            config.color_correction || config.hard_separation ||
+            config.sparse_distributed || session_->dense)
+            throw std::runtime_error("batch four requires ordinary single-device foreground Adam");
+        if (gradient_state != GradientState::Idle || pending_loss_)
+            throw std::runtime_error("begin_batch requires an idle optimizer");
+        resolve_tile_overflow(true);
+        trainer.telemetry().reset_step();
+        trainer.telemetry().step = uint64_t(step);
+        trainer.setSubmissionMeta(step, true);
+        const auto entries = packed_gradient_entries(false);
+        trainer.resizeDeviceBuffer(local_batch_gradient_,
+            entries.back().offset + entries.back().count);
+        const size_t n = buffers.num_splats;
+        if (buffers.relocation_stats.deviceSize() != 2*n)
+            trainer.clearDeviceBuffer(buffers.relocation_stats, 2*n);
+        trainer.resizeDeviceBuffer(buffers.relocation_stats_generation, 2*n);
+        {
+            auto guard = DeviceGuard(&trainer);
+            trainer.copyFromDeviceToDevice(buffers.relocation_stats,
+                buffers.relocation_stats_generation);
+            // The last SH block has padded lanes which backward never writes.
+            trainer.clearDeviceBuffer(buffers.grad_sh_coeffs,
+                48*_CEIL_ROUND(n, SH_REORDER_SIZE));
+        }
+        relocation_stats_checkpoint_valid_ = true;
+        local_batch_ = LocalBatch{};
+        local_batch_.active = true;
+        local_batch_.step = step;
+        local_batch_.collect_loss = collect_loss;
+        last_local_batch_loss_valid_ = false;
+    }
+
+    void abort_batch(uint32_t exact_count = 0u) {
+        if (!local_batch_.active)
+            return;
+        // No Adam has run. Restore the pre-batch relocation sums as well as
+        // clearing the forward/gradient/latch state before deterministic replay.
+        apply_sync_tile_capacity(exact_count);
+        local_batch_ = LocalBatch{};
+        last_local_batch_loss_valid_ = false;
+    }
+
+    bool accumulate_batch_view(size_t view_idx,
+        const std::array<float, 3>& background = {0.0f, 0.0f, 0.0f}) {
+        if (!local_batch_.active || local_batch_.consumed >= 4u)
+            throw std::runtime_error("accumulate_batch_view requires an incomplete batch");
+        local_batch_.internal = true;
+        try {
+            train_dynamic_view_to_loss(view_idx, local_batch_.step,
+                local_batch_.collect_loss, background);
+            backward_dynamic_view_from_loss_raw(view_idx, local_batch_.step);
+        } catch (...) {
+            local_batch_.internal = false;
+            throw;
+        }
+        local_batch_.internal = false;
+        trainer.waitAllComputeSlots("local_batch_microview");
+        auto retired = trainer.collectRetiredTileOverflow();
+        if (force_sync_overflow_) {
+            retired.overflow = true;
+            retired.exact_count = std::max(retired.exact_count,
+                force_sync_overflow_exact_);
+            force_sync_overflow_ = false;
+        }
+        if (retired.fatal)
+            throw std::runtime_error("batch tile invariant/prefix abort; refusing replay");
+        if (retired.overflow) {
+            abort_batch(retired.exact_count);
+            return false;
+        }
+        const auto entries = packed_gradient_entries();
+        {
+            auto guard = DeviceGuard(&trainer);
+            for (const auto& entry : entries)
+                trainer.executeFTGSPPPeerMean(local_batch_gradient_.deviceBuffer,
+                    entry.buffer->deviceBuffer, entry.count, 1.0f, 0.25f,
+                    entry.offset, 0, local_batch_.consumed == 0u);
+        }
+        if (local_batch_.collect_loss) {
+            trainer.copyFromDevice(buffers.loss_accum);
+            for (size_t i = 0; i < 6; ++i)
+                local_batch_.loss[i] += buffers.loss_accum[i] * 0.25f;
+        }
+        // This raw gradient has now been consumed by the device accumulator.
+        // The batch guard still prohibits unrelated updates or structural IO.
+        gradient_state = GradientState::Idle;
+        gradient_step = -1;
+        ++local_batch_.consumed;
+        return true;
+    }
+
+    void commit_batch() {
+        if (!local_batch_.active || local_batch_.consumed != 4u || pending_loss_)
+            throw std::runtime_error("commit_batch requires four completed microviews");
+        const auto entries = packed_gradient_entries(false);
+        {
+            auto guard = DeviceGuard(&trainer);
+            for (const auto& entry : entries)
+                trainer.executeFTGSPPPeerMean(entry.buffer->deviceBuffer,
+                    local_batch_gradient_.deviceBuffer, entry.count,
+                    0.0f, 1.0f, 0, entry.offset, true);
+        }
+        gradient_state = GradientState::LocalReady;
+        gradient_step = local_batch_.step;
+        apply_ready_optimizer(local_batch_.step);
+        trainer.waitAllComputeSlots("local_batch_commit");
+        last_local_batch_loss_ = local_batch_.loss;
+        last_local_batch_loss_valid_ = local_batch_.collect_loss;
+        relocation_stats_checkpoint_valid_ = false;
+        local_batch_ = LocalBatch{};
     }
 
     void apply_ready_optimizer(int step) {
@@ -2431,6 +2583,7 @@ public:
     }
 
     void train_dynamic_view_from_loss(size_t view_idx, int step) {
+        require_no_local_batch("train_dynamic_view_from_loss");
         if (session_->dense)
             throw std::runtime_error("pair training requires the pair optimizer");
         require_pending_loss(view_idx, step);
@@ -2551,6 +2704,7 @@ public:
     void set_sh_coefficients(
         py::array_t<float, py::array::c_style | py::array::forcecast> sh_coeffs
     ) {
+        require_no_local_batch("set_sh_coefficients");
         auto sh = sh_coeffs.request();
         const size_t n = buffers.num_splats;
         if (sh.ndim != 3 || (size_t)sh.shape[0] != n ||
@@ -2583,6 +2737,7 @@ public:
     }
 
     py::array_t<float> relocation_stats_state() {
+        require_no_local_batch("relocation_stats_state");
         const size_t n = buffers.num_splats;
         if (buffers.relocation_stats.deviceSize() != 2 * n)
             throw std::runtime_error(
@@ -2593,6 +2748,7 @@ public:
     void set_relocation_stats_state(
         py::array_t<float, py::array::c_style | py::array::forcecast> values
     ) {
+        require_no_local_batch("set_relocation_stats_state");
         auto data = values.request();
         const size_t n = buffers.num_splats;
         if (data.ndim != 2 || (size_t)data.shape[0] != n || data.shape[1] != 2)
@@ -2712,6 +2868,7 @@ public:
     }
 
     py::dict get_optimizer_state() {
+        require_no_local_batch("get_optimizer_state");
         py::dict state;
         state["g_xyz_ws"] = buffer_to_array<float, float>(buffers.g_xyz_ws);
         state["g_sh_coeffs_1"] = buffer_to_array<float, float>(buffers.g_sh_coeffs_1);
@@ -2753,19 +2910,22 @@ public:
     }
 
     py::dict get_last_loss() {
+        require_no_local_batch("get_last_loss");
         if (buffers.loss_accum.deviceBuffer.size != 6*sizeof(float))
             throw std::runtime_error("no native loss is available before the first training step");
-        {
+        if (!last_local_batch_loss_valid_) {
             py::gil_scoped_release release;
             trainer.copyFromDevice(buffers.loss_accum);
         }
+        const float* values = last_local_batch_loss_valid_
+            ? last_local_batch_loss_.data() : buffers.loss_accum.data();
         py::dict result;
-        const float l1 = buffers.loss_accum[0];
-        const float ssim = buffers.loss_accum[1];
-        const float reg_opacity = buffers.loss_accum[2];
-        const float reg_scale = buffers.loss_accum[3];
-        const float gate = buffers.loss_accum[4];
-        const float color_cc = buffers.loss_accum[5];
+        const float l1 = values[0];
+        const float ssim = values[1];
+        const float reg_opacity = values[2];
+        const float reg_scale = values[3];
+        const float gate = values[4];
+        const float color_cc = values[5];
         const float image_loss = l1 + ssim;
         const float total_loss = image_loss + reg_opacity + reg_scale + gate
             + color_cc;
@@ -2781,6 +2941,7 @@ public:
     }
 
     void set_optimizer_state(py::dict state) {
+        require_no_local_batch("set_optimizer_state");
         auto restore = [&](const char* key, Buffer<float>& target, size_t expected) {
             if (!state.contains(key))
                 throw std::runtime_error(std::string("optimizer state is missing ") + key);
@@ -2943,6 +3104,7 @@ public:
     }
 
     void clear_relocation_stats_state() {
+        require_no_local_batch("clear_relocation_stats_state");
         const size_t n = buffers.num_splats;
         if (buffers.relocation_stats.deviceSize() != 2 * n)
             throw std::runtime_error(
@@ -2954,6 +3116,7 @@ public:
     py::dict relocate_dynamic_native(
         int step, const std::string& mode, bool include_gate, uint32_t seed
     ) {
+        require_no_local_batch("relocate_dynamic_native");
         const int mode_id = mode == "partial_copy" ? 0 :
             mode == "exact_copy" ? 1 : mode == "3d_mcmc" ? 2 : -1;
         if (mode_id < 0)
@@ -3016,6 +3179,7 @@ public:
     }
 
     py::dict get_dynamic_gaussians() {
+        require_no_local_batch("get_dynamic_gaussians");
         py::dict result;
         result["means"] = buffer_to_array<float, float>(buffers.base_xyz_ws, 3);
         result["log_scales_opacity"] = buffer_to_array<float, float>(buffers.base_log_scales_opacity, 4);
@@ -3031,6 +3195,9 @@ public:
     }
 
     void configure_hard_separation_phase() {
+        require_no_local_batch("configure_hard_separation_phase");
+        if (config.local_batch_size != 1u)
+            throw std::runtime_error("local batch does not support hard separation");
         config.hard_separation = true;
         config.means_lr = 0.001f*1.6e-4f;
         config.means_lr_final = config.means_lr;
@@ -3186,7 +3353,7 @@ public:
 
 
     size_t get_vram_usage() {
-        return buffers.getTotalAllocSize();
+        return buffers.getTotalAllocSize() + local_batch_gradient_.deviceBuffer.allocSize;
     }
 
     size_t get_peak_vram_usage() {
@@ -3213,7 +3380,10 @@ public:
     }
 
     std::map<std::string, size_t> get_vram_breakdown() {
-        return buffers.getVramBreakdown();
+        auto result = buffers.getVramBreakdown();
+        if (local_batch_gradient_.deviceSize())
+            result["local_batch_gradient"] = local_batch_gradient_.deviceBuffer.allocSize;
+        return result;
     }
 
     void cleanup() {
@@ -3231,6 +3401,9 @@ public:
         host_mailbox_rank = -1;
         sparse_mailbox_rank = -1;
         relocation_mailbox_rank = -1;
+        trainer.drain("cleanup_local_batch");
+        if (local_batch_gradient_.deviceSize())
+            trainer.destroyBuffer(local_batch_gradient_.deviceBuffer);
         trainer.cleanupBuffers(buffers);
         trainer.cleanup();
         closed = true;
@@ -3262,6 +3435,17 @@ PYBIND11_MODULE(_ftgspp_vk, m) {
         .def(py::init<>())
         .def("initialize", &VkSplat::initialize, "Initialize the trainer with SPIRV code")
         .def("configure_ftgspp", &VkSplat::configure_ftgspp)
+        .def("begin_batch", &VkSplat::begin_batch,
+             py::arg("step"), py::arg("collect_loss") = true,
+             py::call_guard<py::gil_scoped_release>())
+        .def("accumulate_batch_view", &VkSplat::accumulate_batch_view,
+             py::arg("view_idx"),
+             py::arg("background") = std::array<float, 3>{0, 0, 0},
+             py::call_guard<py::gil_scoped_release>())
+        .def("commit_batch", &VkSplat::commit_batch,
+             py::call_guard<py::gil_scoped_release>())
+        .def("abort_batch", &VkSplat::abort_batch, py::arg("exact_count") = 0u,
+             py::call_guard<py::gil_scoped_release>())
         .def("set_dynamic_gaussians", &VkSplat::set_dynamic_gaussians,
              py::arg("means"), py::arg("log_scales"), py::arg("rotations"),
              py::arg("opacity_logits"), py::arg("sh_coeffs"), py::arg("times"),
@@ -3407,10 +3591,12 @@ PYBIND11_MODULE(_ftgspp_vk, m) {
              py::arg("roi_yxyx") = std::array<uint32_t, 4>{0u, 0u, 0u, 0u})
         .def("copy_pixel_rgb", &VkSplat::copy_pixel_rgb)
         .def("rasterizer_state", [](VkSplat& self) {
+            self.require_no_local_batch("rasterizer_state");
             py::gil_scoped_release release;
             return self.trainer.rasterizerCheckpoint();
         })
         .def("restore_rasterizer_state", [](VkSplat& self, const std::string& state) {
+            self.require_no_local_batch("restore_rasterizer_state");
             py::gil_scoped_release release;
             self.trainer.restoreRasterizerCheckpoint(state);
         })

@@ -45,6 +45,8 @@ struct TrainerConfig {
     // One preserves the historical Adam.  B>1 enables FTGSPP's effective
     // batch rule: beta1=0.9^B, beta2=0.999^B, eps=1e-15/sqrt(B).
     uint32_t optimizer_batch_size;
+    // Distinct from the optional pair Adam beta/epsilon compensation above.
+    uint32_t local_batch_size = 1u;
 
     inline float get_means_lr(int step, float scene_scale) const {
         float progress = fmin(float(step)/float(this->max_steps), 1.0f);

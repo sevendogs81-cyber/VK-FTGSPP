@@ -110,6 +110,18 @@ def apply_world_size_training_policy(
 
 
 def validate_static_config(config: AppConfig) -> None:
+    batch_size = config.train.batch_size
+    if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size not in (1, 4):
+        raise ValueError("train.batch_size must be the integer 1 or 4")
+    if batch_size == 4:
+        if (config.distributed.mode != "off" or config.pipeline.mode != "foreground"
+                or config.train.color_correction or config.train.hard_separation
+                or config.distributed.sampling_policy != "flat_epoch"
+                or config.distributed.world_size_lr_scaling != "none"):
+            raise ValueError(
+                "batch_size=4 requires single-device foreground, flat_epoch, "
+                "color_correction=false, hard_separation=false and no automatic LR scaling"
+            )
     pipeline_mode = str(config.pipeline.mode)
     if pipeline_mode not in PIPELINE_MODES:
         raise ValueError(

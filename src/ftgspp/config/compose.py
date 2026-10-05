@@ -146,6 +146,9 @@ def resolve_config(
     _register_resolvers()
     raw = OmegaConf.to_container(config, resolve=False)
     if isinstance(raw, dict):
+        raw_batch = raw.get("train", {}).get("batch_size", 1)
+        if isinstance(raw_batch, bool) or not isinstance(raw_batch, int):
+            raise ValueError("train.batch_size must be an integer, not a coerced scalar")
         eval_node = raw.get("eval")
         if isinstance(eval_node, dict):
             eval_node.pop("full_validation_on_export", None)

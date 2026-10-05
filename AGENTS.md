@@ -13,9 +13,10 @@ an application and CLI rather than a general-purpose import library.
 
 Preserve these boundaries:
 
-- The first-release supported training path uses one Vulkan device and one view
-  per optimizer update. Two-device synchronous code is retained for engineering
-  work but is not a supported user workflow. Do not present it as production
+- Supported training uses one Vulkan device and one view per optimizer update
+  by default. Ordinary foreground training can explicitly use batch size four
+  with an FP32 mean gradient and one Adam update. Two-device synchronous code
+  is retained for engineering work but is not a supported user workflow. Do not present it as production
   functionality.
 - The ordinary CLI and training runtime are Torch-free. Torch, BiRefNet-HR,
   Depth Anything 3, LPIPS, CUDA preparation accelerators, TensorBoard, and the
@@ -24,7 +25,7 @@ Preserve these boundaries:
   Image objective and evaluation protocol are derived contracts, not separate
   public switches.
 - A run resolves configuration once into an immutable effective plan. Resume
-  reuses the saved plan and V6 checkpoint semantics; it must not silently
+  reuses the saved plan and its V6 or local-batch V7 checkpoint semantics; it must not silently
   reinterpret current defaults.
 - Checkpoints, manifests, cache identities, camera paths, viewer sessions, and
   export-selection files are versioned protocols. Reject incompatible input
@@ -126,7 +127,7 @@ from distributions.
   - `stage_timer.py`: explicit wall-clock stage accounting.
 - `io/`
   - `model.py`: contiguous NumPy representation of native 4D Gaussians.
-  - `checkpoint.py`: V6 explicit model/optimizer checkpoints, phase state,
+  - `checkpoint.py`: V6 and local-batch V7 explicit model/optimizer checkpoints, phase state,
     provenance, resume validation, and atomic latest pointer.
   - `export_selection.py`: selected model and matching color-correction state.
   - `ply.py`: point PLY input and compatibility 4DGS output. Viewer PLY is not a

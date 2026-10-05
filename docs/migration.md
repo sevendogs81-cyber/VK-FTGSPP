@@ -7,9 +7,12 @@ There is no implicit migration of old execution semantics.
 - Remove `pipeline.stages` and `pipeline.check_only`. Training has one fixed
   initialize/resume → train → export sequence; use the separate doctor, prepare,
   eval and export CLI commands for those operations.
-- Remove train.batch_size, distributed.global_batch_size, K/microsteps and
-  configurable transfer-ring depths. One view is used per device and update.
-- Use V6 checkpoints only. Old Torch/field conversion and compatibility models
+- Remove distributed.global_batch_size, K/microsteps and configurable
+  transfer-ring depths. `train.batch_size` now accepts only 1 (default) or 4;
+  four-view accumulation is limited to ordinary single-device foreground runs.
+- Default training retains V6 checkpoints. Local batch four uses V7 with
+  an explicit algorithm identity; a V6 run
+  cannot be resumed as a batch-four run. Old Torch/field conversion and compatibility models
   have been removed. Retain an old checkout/environment to inspect old artifacts.
 - Python modules now live under config/data/training/io/optional in src layout.
   Numerical references and smoke helpers are tests, not installed public APIs.

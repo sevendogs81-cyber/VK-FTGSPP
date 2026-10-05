@@ -334,6 +334,7 @@ class NativeVulkanBackend:
         ]
         self.native.configure_ftgspp({
             "max_steps": int(config.train.iterations),
+            "local_batch_size": int(config.train.batch_size),
             "max_sh_degree": int(config.init.sh_degree),
             "effective_pair_adam": (
                 config.distributed.mode == "sync"
@@ -710,6 +711,35 @@ class NativeVulkanBackend:
             raise ValueError("background must be a finite RGB vector")
         color = tuple(float(value) for value in background_array)
         method(int(view_index), int(step), bool(collect_loss), color)
+
+    def train_batch(self, view_indices, step: int, *, collect_loss: bool = True,
+                    backgrounds) -> None:
+        """Average four complete view gradients on device, then commit one Adam."""
+        views = tuple(int(index) for index in view_indices)
+        colors = np.asarray(backgrounds, np.float32)
+        if len(views) != 4 or colors.shape != (4, 3) or not np.isfinite(colors).all():
+            raise ValueError("train_batch requires four views and four finite RGB backgrounds")
+        if np.any((colors < 0) | (colors > 1)):
+            raise ValueError("backgrounds must be in [0,1]")
+        if not callable(getattr(self.native, "begin_batch", None)):
+            raise NativeBackendUnavailable("native module lacks local batches; rebuild")
+        # Each distinct view may reveal a larger tile requirement. Four
+        # expansions need a fifth attempt to complete the fixed batch.
+        for _ in range(len(views) + 1):
+            self.native.begin_batch(int(step), bool(collect_loss))
+            try:
+                for index, color in zip(views, colors, strict=True):
+                    self._bind_train_rgb(index)
+                    if not self.native.accumulate_batch_view(index, tuple(float(x) for x in color)):
+                        break  # native restored pre-batch statistics; replay identical inputs
+                else:
+                    self.native.commit_batch()
+                    self._maybe_log_pipeline_telemetry(int(step))
+                    return
+            except BaseException:
+                self.native.abort_batch()
+                raise
+        raise RuntimeError("local batch tile overflow persisted after five attempts")
 
     def apply_sync_tile_capacity(self, exact_count: int) -> None:
         method = getattr(self.native, "apply_sync_tile_capacity", None)

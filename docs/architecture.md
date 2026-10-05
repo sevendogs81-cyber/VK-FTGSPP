@@ -13,7 +13,7 @@ but is in development and not a supported user path.
 - `src/ftgspp/training`: sampling, initialization, single-device optimizer
   updates, two phase schedules, evaluation and bounded image prefetch. Pair
   updates exist but are in development.
-- `src/ftgspp/io`: explicit NPZ models, V6 checkpoints, PLY.
+- `src/ftgspp/io`: explicit NPZ models, V6 and local-batch V7 checkpoints, PLY.
 - `src/ftgspp/viewer`: viewer asset validation, sessions, camera paths,
   headless export and the loopback SSH browser server.
 - `src/ftgspp/optional`: BiRefNet-HR masks, visual-hull/IBR preparation,
@@ -82,7 +82,7 @@ visual-hull preparation.
 
 ## One update
 
-Single GPU uses the fused backward/Adam path. Duplicate backward/Adam calls are
+Single GPU with batch size one uses the fused backward/Adam path. Duplicate backward/Adam calls are
 rejected; a forward loss is consumed exactly once. Overflow rollback restores
 relocation statistics and explicitly replays the same generation and views.
 
@@ -112,6 +112,18 @@ Phase-specific relocation/checkpoint hooks still have separate schedule loops.
 V6 saves model/Adam arrays, phase cursor, optimizer/sample/wall clocks, sampler
 identity and phase seeds, data/build fingerprints and per-rank adaptive rasterizer
 state. The saved effective YAML is loaded without rescaling LR or schedule length.
+Local batch four adds a V7 algorithm/sampler identity and records four exposures
+per optimizer update. It reuses backward-only kernels and the GPU weighted-add
+kernel, then invokes ordinary Adam once. A dedicated accumulator leaves parameter
+and moment buffers unchanged until all views succeed; tile overflow restores
+pre-batch relocation statistics and replays the same views/backgrounds. The B1
+default keeps the fused backward/Adam path and its V6 identity.
+The image objective and six loss-buffer fields are unchanged.
+B1 and B4 share the same `NativeRunner` training loop, data prefetch, loss,
+evaluation, relocation and checkpoint machinery. Local batch four is an update
+strategy inside that loop, not a second training pipeline. It adds no loss
+shader, optimizer variant or full-model host transfer; batch one does not
+allocate the local-batch accumulator or call the batch update API.
 `train.checkpoint_interval` is the shared hold-out eval and optional checkpoint
 cadence; `train.save_checkpoints` decides whether optimizer snapshots are written.
 One numbered checkpoint is written and latest.json is atomically replaced when

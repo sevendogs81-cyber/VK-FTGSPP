@@ -105,7 +105,9 @@ ftgspp export --model data/my_capture/runs/my_capture/gaussians.npz \
   --output model.ply
 ```
 
-Checkpoints are V6 only. Hold-out eval shares `train.checkpoint_interval`
+Default checkpoints remain V6; local batch four uses V7. Resume preserves
+the saved batch size and algorithm identity and rejects an
+incompatible configuration. Hold-out eval shares `train.checkpoint_interval`
 with optional optimizer snapshots (`train.save_checkpoints`).
 The `scene` profile enables color correction, marginal gating,
 gate-included relocation scoring, and hard separation by default. The
@@ -133,6 +135,23 @@ trains with random solid backgrounds, and ranks checkpoints by the joint
 foreground PSNR and foreground SSIM score over valid mask-interior windows.
 `ftgspp train --config ... --pipeline foreground` is the equivalent CLI
 override. Resume always reuses the saved mode.
+
+Single-device foreground training supports `train.batch_size: 4` (default: 1).
+Four sequential views are rendered at the same parameters, their complete
+gradients (including regularization) are averaged on the GPU in FP32, and Adam
+updates once. This requires `distributed.mode: off`, `sampling_policy: flat_epoch`,
+`world_size_lr_scaling: none`, and disabled color correction and hard separation.
+Learning rates, Adam betas and epsilon are not automatically scaled.
+
+`train.iterations`, LR decay, relocation, logging and checkpoint intervals count
+**optimizer updates**. `views_seen` and SH activation count image exposures.
+For equal exposure to a 200,000-update B1 run, use 50,000 updates at B4 and divide
+update-based interval/boundary settings by four, retaining the LR endpoint ratios.
+This matches the exposure schedule, not the number of Adam updates or convergence.
+The flat-epoch view order and random backgrounds match the corresponding B1
+exposure slots. Overflow replays all four views before committing any update.
+Only a complete batch may be checkpointed. Expect approximately `520 * N` extra
+bytes for raw/accumulated gradients, plus padding and relocation backup buffers.
 
 Masks are **not** always `manifests/masks.json`:
 
