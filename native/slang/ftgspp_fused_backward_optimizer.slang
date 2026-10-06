@@ -7,11 +7,31 @@
 
 import strategy_utils;
 
-// Despite the legacy file/SPIR-V name, this pipeline is now deliberately the
-// backward half only.  Keeping the entry name preserves the public runtime
-// surface; its descriptor contract intentionally changes and must be rebuilt
-// together with native C++.  ftgspp_explicit_adam.slang consumes these FP32
-// buffers in a second dispatch.
+// Shared parameter backward. The ordinary variant writes one raw gradient;
+// the local-batch specialization writes the four-view FP32 mean directly into
+// the same buffers consumed by ftgspp_explicit_adam.slang. No intermediate
+// gradient, separate reduction dispatch, or optimizer variant is needed.
+#ifndef LOCAL_BATCH_MEAN
+#define LOCAL_BATCH_MEAN 0
+#endif
+
+#if LOCAL_BATCH_MEAN
+// Preserve the previous reduction's multiply-then-add FP32 order. In particular,
+// do not contract the accumulated sum into an FMA or read stale first-view data.
+__generic<let dim: int>
+vector<float,dim> add_batch_gradient(
+    vector<float,dim> previous, vector<float,dim> gradient)
+{
+    precise vector<float,dim> scaled = gradient * 0.25f;
+    precise vector<float,dim> result = previous + scaled;
+    return result;
+}
+#define STORE_GRADIENT(target, gradient) \
+    if (reset_mean) { target = (gradient) * 0.25f; } \
+    else { target = add_batch_gradient(target, gradient); }
+#else
+#define STORE_GRADIENT(target, gradient) target = gradient;
+#endif
 
 // Persistent FTGSPP parameters (read-only during backward).
 layout(binding=0) StructuredBuffer<float> base_xyz_ws;
@@ -85,6 +105,18 @@ void main(uint3 tid : SV_DispatchThreadID, uniform FTGSPPBackwardUniforms unifor
     if (tile_work_aborted(work_control[0]))
         return;
     const uint idx = tid.x;
+#if LOCAL_BATCH_MEAN
+    // The dispatch rounds N up to SUBGROUP_SIZE == SH_REORDER_SIZE. Only the
+    // unused lanes of the final SH block need zeroing; valid lanes overwrite
+    // their complete gradient below. This avoids a full SH-buffer clear.
+    const bool reset_mean = uniforms.reserved2 > 0.5f;
+    if (idx >= uniforms.num_splats && reset_mean) {
+        const uint offset = idx % SH_REORDER_SIZE;
+        const uint base = idx - offset;
+        for (uint di = 0; di < 12u; ++di)
+            raw_grad_sh_coeffs[12u * base + di * SH_REORDER_SIZE + offset] = float4(0);
+    }
+#endif
     if (idx >= uniforms.num_splats)
         return;
 
@@ -204,12 +236,22 @@ void main(uint3 tid : SV_DispatchThreadID, uniform FTGSPPBackwardUniforms unifor
         grad_gate_raw -= uniforms.reg_gate * 20.0f * gate * (1.0f - gate);
     }
 
-    write_t3_float3(grad_mean, idx, raw_grad_base_xyz_ws);
-    raw_grad_base_log_scales_opacity[idx] =
-        float4(grad_log_scale, grad_opacity_logit);
-    raw_grad_times_durations[idx] = float2(grad_time, grad_duration);
-    raw_grad_velocities_gates[idx] = float4(grad_velocity, grad_gate_raw);
-    raw_grad_rotations[idx] = grad_rotation;
+    float3 output_mean;
+#if LOCAL_BATCH_MEAN
+    if (reset_mean)
+        output_mean = grad_mean * 0.25f;
+    else
+        output_mean = add_batch_gradient(
+            read_t3_float3(idx, raw_grad_base_xyz_ws), grad_mean);
+#else
+    output_mean = grad_mean;
+#endif
+    write_t3_float3(output_mean, idx, raw_grad_base_xyz_ws);
+    STORE_GRADIENT(raw_grad_base_log_scales_opacity[idx],
+        float4(grad_log_scale, grad_opacity_logit))
+    STORE_GRADIENT(raw_grad_times_durations[idx], float2(grad_time, grad_duration))
+    STORE_GRADIENT(raw_grad_velocities_gates[idx], float4(grad_velocity, grad_gate_raw))
+    STORE_GRADIENT(raw_grad_rotations[idx], grad_rotation)
 
     const uint reorder_offset = idx % SH_REORDER_SIZE;
     const uint reorder_base = idx - reorder_offset;
@@ -217,8 +259,9 @@ void main(uint3 tid : SV_DispatchThreadID, uniform FTGSPPBackwardUniforms unifor
     for (int di = 0; di < 12; ++di) {
         const uint cid = 12 * idx + di;
         const uint bid = 12 * reorder_base + di * SH_REORDER_SIZE + reorder_offset;
-        raw_grad_sh_coeffs[bid] =
+        const float4 grad_sh =
             (zero_grad || is_sh_skipped(uniforms.step, cid, num_sh))
             ? float4(0) : get_sh_coeff_4(v_gauss.d.sh_coeffs, di);
+        STORE_GRADIENT(raw_grad_sh_coeffs[bid], grad_sh)
     }
 }

@@ -7,24 +7,24 @@ There is no implicit migration of old execution semantics.
 - Remove `pipeline.stages` and `pipeline.check_only`. Training has one fixed
   initialize/resume → train → export sequence; use the separate doctor, prepare,
   eval and export CLI commands for those operations.
-- Remove distributed.global_batch_size, K/microsteps and configurable
+- Remove `distributed.global_batch_size`, `K`/`microsteps` and configurable
   transfer-ring depths. `train.batch_size` now accepts only 1 (default) or 4;
   four-view accumulation is limited to ordinary single-device foreground runs.
 - Default training retains V6 checkpoints. Local batch four uses V7 with
-  an explicit algorithm identity; a V6 run
-  cannot be resumed as a batch-four run. Old Torch/field conversion and compatibility models
-  have been removed. Retain an old checkout/environment to inspect old artifacts.
-- Python modules now live under config/data/training/io/optional in src layout.
+  an explicit algorithm identity; a V6 run cannot be resumed as a batch-four run.
+  Old Torch/field conversion and compatibility models have been removed.
+  Retain an old checkout/environment to inspect old artifacts.
+- Python modules now live under `src/ftgspp/{config,data,training,io,optional}/`.
   Numerical references and smoke helpers are tests, not installed public APIs.
 - The only synchronous backend is `pair_host` (`auto` resolves to it);
   the former `hierarchical_host` name and P≥3 implementations are removed.
   Two-device sync is in development in this community release; the documented
   first-release path is one GPU.
-- Native timestamps are two scalar arguments. There is no gradient finalizer,
+- The pair optimizer takes two scalar timestamps. There is no gradient finalizer,
   arbitrary batch-size setting, host gradient uploader or CPU gradient reducer.
   Unknown native configuration fields fail explicitly.
-- Initialization stays in memory. The redundant standalone separated.npz is gone.
-  The final standalone model is gaussians.npz. A main-only run selects it by
+- Initialization stays in memory. The redundant standalone `separated.npz` is gone.
+  The final standalone model is `gaussians.npz`. A main-only run selects it by
   hold-out joint PSNR+SSIM (`train.export_best`, default true); an enabled hard
   separation phase starts from that main selection and exports its terminal
   state. `ckpt/main_selected.npz` retains the phase handoff and
@@ -36,16 +36,17 @@ There is no implicit migration of old execution semantics.
   `--with-lpips` only for optional locked final-test LPIPS. The former
   aggregate `[foreground]` extra and `--core-only` switch are removed.
 - `FTGSPP_TRAIN_EVAL_INTERVAL` is removed. Mid-run hold-out eval uses
-  `train.checkpoint_interval`. Set `save_checkpoints: false` to eval without
-  writing ckpt files.
+  `train.checkpoint_interval`. Set `train.save_checkpoints: false` to evaluate
+  without writing optimizer checkpoint files.
 - `eval.lpips`, `eval.lpips_device`, `eval.lpips_batch_size`, and
   `eval.lpips_min_roi_size` are removed from training YAML. Optional LPIPS is
   requested only on a locked test split with `ftgspp eval --lpips`; device,
   batch size, and minimum region size are command-line options.
 - `eval.full_validation_on_export` is removed. Hold-out ranking (scene full-frame
-  PSNR+SSIM_2 or foreground object PSNR+mask-interior foreground SSIM_2) always runs on the GPU. Foreground
+  PSNR+SSIM_2 or foreground object PSNR+mask-interior foreground SSIM_2) runs on
+  the GPU. Foreground
   diagnostic metrics are computed after the best snapshot is selected, as a
-  required library pipeline step, not a per-dataset switch. Old YAML that still
+  required training-pipeline step, not a per-dataset switch. Old YAML that still
   names the retired key is ignored.
 - `run.log_dir` is removed. Training always writes stable application logs to
   `<output_path>/run.log`; resumed sessions append to that file.

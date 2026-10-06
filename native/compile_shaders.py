@@ -225,6 +225,10 @@ class ShaderCompiler:
             ShaderJob("ftgspp_fused_backward_optimizer_sh0", {"EXPORT_MODE": backward, "ACTIVE_SH_DEGREE": 0}),
             ShaderJob("ftgspp_fused_backward_optimizer_sh1", {"EXPORT_MODE": backward, "ACTIVE_SH_DEGREE": 1}),
             ShaderJob("ftgspp_fused_backward_optimizer_sh2", {"EXPORT_MODE": backward, "ACTIVE_SH_DEGREE": 2}),
+            *[ShaderJob(
+                "ftgspp_batch_mean_backward" + (f"_sh{degree}" if degree < 3 else ""),
+                {"EXPORT_MODE": backward, "ACTIVE_SH_DEGREE": degree, "LOCAL_BATCH_MEAN": 1},
+            ) for degree in range(4)],
         ], ["ftgspp_dynamic.slang", "vertex_shader.slang", "strategy_utils.slang",
              "config.slang", "utils.slang", "spherical_harmonics.slang",
              "ftgspp_work_control.slang"]))
@@ -233,6 +237,10 @@ class ShaderCompiler:
             ShaderJob("ftgspp_fused_dynamic_backward_adam_sh0", {"EXPORT_MODE": backward, "ACTIVE_SH_DEGREE": 0}),
             ShaderJob("ftgspp_fused_dynamic_backward_adam_sh1", {"EXPORT_MODE": backward, "ACTIVE_SH_DEGREE": 1}),
             ShaderJob("ftgspp_fused_dynamic_backward_adam_sh2", {"EXPORT_MODE": backward, "ACTIVE_SH_DEGREE": 2}),
+            *[ShaderJob(
+                "ftgspp_batch_commit" + (f"_sh{degree}" if degree < 3 else ""),
+                {"EXPORT_MODE": backward, "ACTIVE_SH_DEGREE": degree, "LOCAL_BATCH_COMMIT": 1},
+            ) for degree in range(4)],
         ], ["ftgspp_dynamic.slang", "vertex_shader.slang", "strategy_utils.slang",
              "config.slang", "utils.slang", "spherical_harmonics.slang",
              "ftgspp_work_control.slang"]))

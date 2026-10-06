@@ -3,6 +3,8 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
 
@@ -33,6 +35,30 @@ def make_model(n: int = 3) -> NativeGaussians:
 
 
 class NativeRuntimeTests(unittest.TestCase):
+    def test_train_binding_skips_implicit_validity_and_preserves_explicit_masks(self):
+        rgb = np.zeros((8, 9, 4), np.uint8)
+        implicit = SimpleNamespace(validity_path=None, load_validity=Mock(
+            side_effect=AssertionError("implicit validity must not allocate an image")))
+        mask = np.ones((8, 9), np.float32)
+        mask[0, 0] = 0.25
+        explicit = SimpleNamespace(validity_path=Path("validity.png"),
+                                   load_validity=Mock(return_value=mask))
+        backend = object.__new__(NativeVulkanBackend)
+        backend.native = Mock()
+        backend._dataset = SimpleNamespace(train_views=[implicit, explicit])
+        backend._rgb_cache = SimpleNamespace(get_or_load=lambda **_: rgb)
+        backend._bound_train_index = None
+        backend._bind_train_rgb(0)
+        backend.native.bind_dynamic_view_validity.assert_not_called()
+        backend._bind_train_rgb(1)
+        explicit.load_validity.assert_called_once_with()
+        index, is_train, value = backend.native.bind_dynamic_view_validity.call_args.args
+        self.assertEqual((index, is_train, value.dtype), (1, True, np.dtype('uint8')))
+        np.testing.assert_array_equal(value, mask >= .5)
+        backend._bind_train_rgb(0)
+        self.assertEqual(backend.native.bind_dynamic_view_validity.call_count, 1)
+        backend.native.release_dynamic_view_image.assert_called_with(1, True)
+
     def test_holdout_eval_uses_ssim2_data_range(self):
         prediction = np.zeros((13, 15, 3), dtype=np.float32)
         reference = np.ones_like(prediction)

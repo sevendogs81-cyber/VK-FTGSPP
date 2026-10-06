@@ -274,8 +274,12 @@ void VulkanGSTrainer::initialize(const std::map<std::string, std::string> &spirv
             pipeline_ftgspp_fused_backward_optimizer,
             spirv_paths.at("ftgspp_fused_backward_optimizer"));
         createComputePipeline(
+            pipeline_ftgspp_batch_mean_backward,
+            spirv_paths.at("ftgspp_batch_mean_backward"));
+        createComputePipeline(
             pipeline_ftgspp_fused_dynamic_backward_adam,
             spirv_paths.at("ftgspp_fused_dynamic_backward_adam"));
+        createComputePipeline(pipeline_ftgspp_batch_commit, spirv_paths.at("ftgspp_batch_commit"));
         for (int degree = 0; degree < 3; ++degree) {
             auto load_optional = [&](_ComputePipeline& pipeline, const std::string& name) {
                 auto it = spirv_paths.find(name);
@@ -287,8 +291,13 @@ void VulkanGSTrainer::initialize(const std::map<std::string, std::string> &spirv
                 pipeline_ftgspp_fused_backward_optimizer_sh[degree],
                 "ftgspp_fused_backward_optimizer_sh" + std::to_string(degree));
             load_optional(
+                pipeline_ftgspp_batch_mean_backward_sh[degree],
+                "ftgspp_batch_mean_backward_sh" + std::to_string(degree));
+            load_optional(
                 pipeline_ftgspp_fused_dynamic_backward_adam_sh[degree],
                 "ftgspp_fused_dynamic_backward_adam_sh" + std::to_string(degree));
+            load_optional(pipeline_ftgspp_batch_commit_sh[degree],
+                "ftgspp_batch_commit_sh" + std::to_string(degree));
         }
         createComputePipeline(
             pipeline_ftgspp_relocation_score,
@@ -666,7 +675,9 @@ void VulkanGSTrainer::executeFTGSPPBackward(
     VulkanGSPipelineBuffers& buffers,
     int step,
     float timestamp,
-    bool collect_loss_scalar
+    bool collect_loss_scalar,
+    bool local_batch_mean,
+    bool reset_mean
 ) {
     PerfTimer::Timer<PerfTimer::DynamicBackward> timer(this);
     requireFTGSPPFloat32AtomicAdd();
@@ -675,6 +686,20 @@ void VulkanGSTrainer::executeFTGSPPBackward(
         config, uniforms, n, step, timestamp);
     if (collect_loss_scalar)
         u.reserved_layout |= 0x80000000u;
+    u.reserved[2] = reset_mean ? 1.0f : 0.0f;
+
+    // Later microviews read the previous mean before writing it. Keep this
+    // dependency explicit even though the host currently waits between views.
+    if (local_batch_mean && !reset_mean) {
+        bufferMemoryBarrier({
+            { buffers.grad_base_xyz_ws.deviceBuffer, COMPUTE_SHADER_WRITE },
+            { buffers.grad_base_log_scales_opacity.deviceBuffer, COMPUTE_SHADER_WRITE },
+            { buffers.grad_times_durations.deviceBuffer, COMPUTE_SHADER_WRITE },
+            { buffers.grad_velocities_gates.deviceBuffer, COMPUTE_SHADER_WRITE },
+            { buffers.grad_sh_coeffs.deviceBuffer, TRANSFER_COMPUTE_SHADER_WRITE },
+            { buffers.grad_rotations.deviceBuffer, COMPUTE_SHADER_WRITE },
+        }, COMPUTE_SHADER_READ_WRITE);
+    }
 
     bufferMemoryBarrier({
         { buffers.tiles_touched.deviceBuffer, COMPUTE_SHADER_WRITE },
@@ -687,8 +712,10 @@ void VulkanGSTrainer::executeFTGSPPBackward(
     executeCompute(
         {{n, SUBGROUP_SIZE}}, &u, sizeof(u),
         select_trainer_sh(
-            pipeline_ftgspp_fused_backward_optimizer,
-            pipeline_ftgspp_fused_backward_optimizer_sh,
+            local_batch_mean ? pipeline_ftgspp_batch_mean_backward
+                             : pipeline_ftgspp_fused_backward_optimizer,
+            local_batch_mean ? pipeline_ftgspp_batch_mean_backward_sh
+                             : pipeline_ftgspp_fused_backward_optimizer_sh,
             uniforms.active_sh),
         {
             buffers.base_xyz_ws.deviceBuffer,
@@ -733,7 +760,8 @@ void VulkanGSTrainer::executeFTGSPPFusedDynamicBackwardAdam(
     int step,
     float timestamp,
     bool collect_loss_scalar,
-    bool collect_geometry_grad_stats
+    bool collect_geometry_grad_stats,
+    bool local_batch_commit
 ) {
     PerfTimer::Timer<PerfTimer::FusedDynamicBackwardAdam> timer(this);
     requireFTGSPPFloat32AtomicAdd();
@@ -764,13 +792,7 @@ void VulkanGSTrainer::executeFTGSPPFusedDynamicBackwardAdam(
         {buffers.grad_stats.deviceBuffer, TRANSFER_COMPUTE_SHADER_WRITE},
     }, COMPUTE_SHADER_READ_WRITE);
 
-    executeCompute(
-        {{n, SUBGROUP_SIZE}}, &u, sizeof(u),
-        select_trainer_sh(
-            pipeline_ftgspp_fused_dynamic_backward_adam,
-            pipeline_ftgspp_fused_dynamic_backward_adam_sh,
-            uniforms.active_sh),
-        {
+    std::vector<_VulkanBuffer> bindings = {
             buffers.base_xyz_ws.deviceBuffer,
             buffers.base_log_scales_opacity.deviceBuffer,
             buffers.times_durations.deviceBuffer,
@@ -796,7 +818,31 @@ void VulkanGSTrainer::executeFTGSPPFusedDynamicBackwardAdam(
             buffers.loss_accum.deviceBuffer,
             buffers.grad_stats.deviceBuffer,
             trainer_work_control(this, buffers),
+        };
+    if (local_batch_commit) {
+        bufferMemoryBarrier({
+            { buffers.grad_base_xyz_ws.deviceBuffer, COMPUTE_SHADER_WRITE },
+            { buffers.grad_base_log_scales_opacity.deviceBuffer, COMPUTE_SHADER_WRITE },
+            { buffers.grad_times_durations.deviceBuffer, COMPUTE_SHADER_WRITE },
+            { buffers.grad_velocities_gates.deviceBuffer, COMPUTE_SHADER_WRITE },
+            { buffers.grad_sh_coeffs.deviceBuffer, COMPUTE_SHADER_WRITE },
+            { buffers.grad_rotations.deviceBuffer, COMPUTE_SHADER_WRITE },
+        }, COMPUTE_SHADER_READ);
+        bindings.insert(bindings.end(), {
+            buffers.grad_base_xyz_ws.deviceBuffer,
+            buffers.grad_base_log_scales_opacity.deviceBuffer,
+            buffers.grad_times_durations.deviceBuffer,
+            buffers.grad_velocities_gates.deviceBuffer,
+            buffers.grad_sh_coeffs.deviceBuffer,
+            buffers.grad_rotations.deviceBuffer,
         });
+    }
+    executeCompute(
+        {{n, SUBGROUP_SIZE}}, &u, sizeof(u),
+        select_trainer_sh(
+            local_batch_commit ? pipeline_ftgspp_batch_commit : pipeline_ftgspp_fused_dynamic_backward_adam,
+            local_batch_commit ? pipeline_ftgspp_batch_commit_sh : pipeline_ftgspp_fused_dynamic_backward_adam_sh,
+            uniforms.active_sh), bindings);
     bufferMemoryBarrier({
         {buffers.base_xyz_ws.deviceBuffer, COMPUTE_SHADER_WRITE},
         {buffers.base_log_scales_opacity.deviceBuffer, COMPUTE_SHADER_WRITE},

@@ -33,6 +33,9 @@ class NativeContractTests(unittest.TestCase):
         header += (ROOT / "native" / "src" / "render" / "gs_renderer.h").read_text(encoding="utf-8")
         for name, count in self.PIPELINES.items():
             source = (SLANG / f"{name}.slang").read_text(encoding="utf-8")
+            if name == "ftgspp_fused_dynamic_backward_adam":
+                # B1 excludes the six read-only batch-mean descriptors.
+                source = re.sub(r"#if LOCAL_BATCH_COMMIT\n.*?#endif", "", source, flags=re.S)
             bindings = sorted(
                 int(value)
                 for value in re.findall(r"layout\s*\(\s*binding\s*=\s*(\d+)\s*\)", source)
@@ -327,6 +330,34 @@ class NativeContractTests(unittest.TestCase):
             self.assertIn(name, backward)
         self.assertIn("relocation_stats[idx] +=", backward)
         self.assertNotIn("relocation_stats[idx] =", backward)
+
+    def test_local_mean_shader_variants_are_registered_with_shared_layout(self):
+        # A compiled SPIR-V alone is insufficient: the binding must discover it
+        # and the trainer must instantiate the matching 19-buffer pipeline.
+        bindings = (ROOT / "native/src/bindings/python_bindings.cpp").read_text()
+        trainer = (ROOT / "native/src/training/gs_trainer.cpp").read_text()
+        header = (ROOT / "native/src/training/gs_trainer.h").read_text()
+        for suffix in ("", "_sh0", "_sh1", "_sh2"):
+            self.assertIn(f'"ftgspp_batch_mean_backward{suffix}"', bindings)
+        self.assertIn('spirv_paths.at("ftgspp_batch_mean_backward")', trainer)
+        self.assertIn('"ftgspp_batch_mean_backward_sh" + std::to_string(degree)', trainer)
+        self.assertIn('pipeline_ftgspp_batch_mean_backward = _ComputePipeline(19)', header)
+        batch = bindings[bindings.index('    void begin_batch('):bindings.index('    void apply_ready_optimizer(')]
+        self.assertNotIn('executeFTGSPPPeerMean', batch)
+        self.assertNotIn('local_batch_gradient_', bindings)
+
+    def test_batch_commit_specialization_matches_shared_b1_descriptor_prefix(self):
+        shader = (SLANG / 'ftgspp_fused_dynamic_backward_adam.slang').read_text()
+        bindings = (ROOT / 'native/src/bindings/python_bindings.cpp').read_text()
+        header = (ROOT / 'native/src/training/gs_trainer.h').read_text()
+        self.assertEqual(sorted(map(int, re.findall(r'layout\(binding=(\d+)\)', shader))), list(range(27)))
+        self.assertIn('pipeline_ftgspp_batch_commit = _ComputePipeline(27)', header)
+        for suffix in ('', '_sh0', '_sh1', '_sh2'):
+            self.assertIn(f'"ftgspp_batch_commit{suffix}"', bindings)
+        accumulate = bindings[bindings.index('    bool accumulate_batch_view('):bindings.index('    void commit_batch(')]
+        self.assertNotIn('executeFTGSPPFusedDynamicBackwardAdam', accumulate)
+        commit = bindings[bindings.index('    void commit_batch('):bindings.index('    void apply_ready_optimizer(')]
+        self.assertIn('executeFTGSPPFusedDynamicBackwardAdam', commit)
 
     def test_explicit_adam_consumes_then_clears_raw_gradients(self):
         adam = (SLANG / "ftgspp_explicit_adam.slang").read_text(encoding="utf-8")

@@ -92,9 +92,9 @@ public:
         int step = -1;
         uint32_t consumed = 0;
         bool collect_loss = false;
+        size_t final_view = 0;
         std::array<float, 6> loss{};
     } local_batch_;
-    Buffer<float> local_batch_gradient_;
     bool last_local_batch_loss_valid_ = false;
     std::array<float, 6> last_local_batch_loss_{};
 
@@ -299,10 +299,18 @@ public:
             "ftgspp_fused_backward_optimizer_sh0",
             "ftgspp_fused_backward_optimizer_sh1",
             "ftgspp_fused_backward_optimizer_sh2",
+            "ftgspp_batch_mean_backward",
+            "ftgspp_batch_mean_backward_sh0",
+            "ftgspp_batch_mean_backward_sh1",
+            "ftgspp_batch_mean_backward_sh2",
             "ftgspp_fused_dynamic_backward_adam",
             "ftgspp_fused_dynamic_backward_adam_sh0",
             "ftgspp_fused_dynamic_backward_adam_sh1",
             "ftgspp_fused_dynamic_backward_adam_sh2",
+            "ftgspp_batch_commit",
+            "ftgspp_batch_commit_sh0",
+            "ftgspp_batch_commit_sh1",
+            "ftgspp_batch_commit_sh2",
             "ftgspp_explicit_adam",
             "ftgspp_peer_mean",
             "ftgspp_sparse_flag",
@@ -1824,6 +1832,9 @@ public:
     void release_dynamic_view_image(size_t view_idx, bool is_train) {
         auto& target = is_train ? trainer.get_train_image(view_idx) : trainer.get_val_image(view_idx);
         py::gil_scoped_release release;
+        if (target.buffer.deviceBuffer.buffer != VK_NULL_HANDLE ||
+            target.validity.deviceBuffer.buffer != VK_NULL_HANDLE)
+            trainer.drain("release_view_buffers");
         trainer.destroyBuffer(target.buffer.deviceBuffer);
         target.buffer.deviceBuffer = _VulkanBuffer();
         target.buffer.clear();
@@ -2338,7 +2349,8 @@ public:
             rasterize_backward();
             trainer.executeFTGSPPBackward(
                 config, uniforms, buffers, step + 1, timestamp,
-                pending_collect_loss_scalar_);
+                pending_collect_loss_scalar_, local_batch_.active,
+                local_batch_.active && local_batch_.consumed == 0u);
             if (config.sparse_distributed)
                 trainer.writeFTGSPPSparseActiveFlags(buffers);
         }
@@ -2427,9 +2439,9 @@ public:
         trainer.telemetry().reset_step();
         trainer.telemetry().step = uint64_t(step);
         trainer.setSubmissionMeta(step, true);
-        const auto entries = packed_gradient_entries(false);
-        trainer.resizeDeviceBuffer(local_batch_gradient_,
-            entries.back().offset + entries.back().count);
+        // The existing Adam input buffers are the local mean accumulator.
+        // First-view stores overwrite any gradient left by an aborted batch.
+        packed_gradient_entries(false);
         const size_t n = buffers.num_splats;
         if (buffers.relocation_stats.deviceSize() != 2*n)
             trainer.clearDeviceBuffer(buffers.relocation_stats, 2*n);
@@ -2438,9 +2450,6 @@ public:
             auto guard = DeviceGuard(&trainer);
             trainer.copyFromDeviceToDevice(buffers.relocation_stats,
                 buffers.relocation_stats_generation);
-            // The last SH block has padded lanes which backward never writes.
-            trainer.clearDeviceBuffer(buffers.grad_sh_coeffs,
-                48*_CEIL_ROUND(n, SH_REORDER_SIZE));
         }
         relocation_stats_checkpoint_valid_ = true;
         local_batch_ = LocalBatch{};
@@ -2468,13 +2477,27 @@ public:
         try {
             train_dynamic_view_to_loss(view_idx, local_batch_.step,
                 local_batch_.collect_loss, background);
-            backward_dynamic_view_from_loss_raw(view_idx, local_batch_.step);
+            if (local_batch_.consumed == 3u) {
+                // Finish raster backward and validate overflow now, but leave
+                // parameter gradients/Adam for commit. Until then abort is safe.
+                require_pending_loss(view_idx, local_batch_.step);
+                auto guard = DeviceGuard(&trainer);
+                rasterize_backward();
+                local_batch_.final_view = view_idx;
+            } else {
+                backward_dynamic_view_from_loss_raw(view_idx, local_batch_.step);
+            }
         } catch (...) {
             local_batch_.internal = false;
             throw;
         }
         local_batch_.internal = false;
-        trainer.waitAllComputeSlots("local_batch_microview");
+        // Ordinary views can stay queued: their scratch/mean dependencies are
+        // ordered on the compute queue. Validate the whole batch before commit.
+        // Logging still completes each loss readback; injected faults retain
+        // their immediate rejection contract.
+        if (local_batch_.collect_loss || local_batch_.consumed == 3u || force_sync_overflow_)
+            trainer.waitAllComputeSlots("local_batch_microview");
         auto retired = trainer.collectRetiredTileOverflow();
         if (force_sync_overflow_) {
             retired.overflow = true;
@@ -2488,21 +2511,14 @@ public:
             abort_batch(retired.exact_count);
             return false;
         }
-        const auto entries = packed_gradient_entries();
-        {
-            auto guard = DeviceGuard(&trainer);
-            for (const auto& entry : entries)
-                trainer.executeFTGSPPPeerMean(local_batch_gradient_.deviceBuffer,
-                    entry.buffer->deviceBuffer, entry.count, 1.0f, 0.25f,
-                    entry.offset, 0, local_batch_.consumed == 0u);
-        }
-        if (local_batch_.collect_loss) {
+        if (local_batch_.collect_loss && local_batch_.consumed < 3u) {
             trainer.copyFromDevice(buffers.loss_accum);
             for (size_t i = 0; i < 6; ++i)
                 local_batch_.loss[i] += buffers.loss_accum[i] * 0.25f;
         }
-        // This raw gradient has now been consumed by the device accumulator.
-        // The batch guard still prohibits unrelated updates or structural IO.
+        // The first three parameter gradients are in the Adam input buffers;
+        // the fourth remains in raster-backward buffers until commit.
+        // The batch guard prohibits unrelated updates or structural IO.
         gradient_state = GradientState::Idle;
         gradient_step = -1;
         ++local_batch_.consumed;
@@ -2512,18 +2528,19 @@ public:
     void commit_batch() {
         if (!local_batch_.active || local_batch_.consumed != 4u || pending_loss_)
             throw std::runtime_error("commit_batch requires four completed microviews");
-        const auto entries = packed_gradient_entries(false);
         {
             auto guard = DeviceGuard(&trainer);
-            for (const auto& entry : entries)
-                trainer.executeFTGSPPPeerMean(entry.buffer->deviceBuffer,
-                    local_batch_gradient_.deviceBuffer, entry.count,
-                    0.0f, 1.0f, 0, entry.offset, true);
+            trainer.executeFTGSPPFusedDynamicBackwardAdam(
+                config, uniforms, buffers, local_batch_.step + 1,
+                trainer.get_train_timestamp(local_batch_.final_view),
+                local_batch_.collect_loss, false, true);
         }
-        gradient_state = GradientState::LocalReady;
-        gradient_step = local_batch_.step;
-        apply_ready_optimizer(local_batch_.step);
         trainer.waitAllComputeSlots("local_batch_commit");
+        if (local_batch_.collect_loss) {
+            trainer.copyFromDevice(buffers.loss_accum);
+            for (size_t i = 0; i < 6; ++i)
+                local_batch_.loss[i] += buffers.loss_accum[i] * 0.25f;
+        }
         last_local_batch_loss_ = local_batch_.loss;
         last_local_batch_loss_valid_ = local_batch_.collect_loss;
         relocation_stats_checkpoint_valid_ = false;
@@ -3353,7 +3370,7 @@ public:
 
 
     size_t get_vram_usage() {
-        return buffers.getTotalAllocSize() + local_batch_gradient_.deviceBuffer.allocSize;
+        return buffers.getTotalAllocSize();
     }
 
     size_t get_peak_vram_usage() {
@@ -3380,10 +3397,7 @@ public:
     }
 
     std::map<std::string, size_t> get_vram_breakdown() {
-        auto result = buffers.getVramBreakdown();
-        if (local_batch_gradient_.deviceSize())
-            result["local_batch_gradient"] = local_batch_gradient_.deviceBuffer.allocSize;
-        return result;
+        return buffers.getVramBreakdown();
     }
 
     void cleanup() {
@@ -3402,8 +3416,6 @@ public:
         sparse_mailbox_rank = -1;
         relocation_mailbox_rank = -1;
         trainer.drain("cleanup_local_batch");
-        if (local_batch_gradient_.deviceSize())
-            trainer.destroyBuffer(local_batch_gradient_.deviceBuffer);
         trainer.cleanupBuffers(buffers);
         trainer.cleanup();
         closed = true;

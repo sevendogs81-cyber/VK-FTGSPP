@@ -699,9 +699,6 @@ void VulkanGSPipeline::createDevice() {
     }
     
     vkGetDeviceQueue(device, queue_family_index, 0, &command_queue);
-    transfer_queue_ = command_queue;
-    transfer_queue_family_ = queue_family_index;
-    transfer_shares_compute_family_ = true;
 }
 
 void VulkanGSPipeline::createCommandPool() {

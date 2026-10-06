@@ -8,6 +8,10 @@
 import strategy_utils;
 import spherical_harmonics;
 
+#ifndef LOCAL_BATCH_COMMIT
+#define LOCAL_BATCH_COMMIT 0
+#endif
+
 // Single-device production path. It consumes raster backward outputs and
 // updates explicit FTGSPP parameters/moments directly, without materializing
 // the full raw-gradient ABI required by synchronous multi-device training.
@@ -34,6 +38,30 @@ layout(binding=17) RWStructuredBuffer<float4> g_rotations;
 layout(binding=18) RWByteAddressBuffer loss_accum;
 layout(binding=19) RWByteAddressBuffer grad_stats;
 layout(binding=20) StructuredBuffer<TileWorkControl> work_control;
+
+#if LOCAL_BATCH_COMMIT
+// The first three microviews accumulated directly into these buffers. The
+// fourth view's parameter backward and the ordinary Adam update share this
+// B1 shader, with identical FP32 multiply-then-add reduction semantics.
+layout(binding=21) StructuredBuffer<float> batch_grad_xyz;
+layout(binding=22) StructuredBuffer<float4> batch_grad_scale_opacity;
+layout(binding=23) StructuredBuffer<float2> batch_grad_time_duration;
+layout(binding=24) StructuredBuffer<float4> batch_grad_velocity_gate;
+layout(binding=25) StructuredBuffer<float4> batch_grad_sh;
+layout(binding=26) StructuredBuffer<float4> batch_grad_rotation;
+
+__generic<let dim: int>
+vector<float,dim> finish_batch_gradient(
+    vector<float,dim> previous, vector<float,dim> gradient)
+{
+    precise vector<float,dim> scaled = gradient * 0.25f;
+    precise vector<float,dim> result = previous + scaled;
+    return result;
+}
+#define OPTIMIZER_GRADIENT(previous, gradient) finish_batch_gradient(previous, gradient)
+#else
+#define OPTIMIZER_GRADIENT(previous, gradient) gradient
+#endif
 
 struct FTGSPPBackwardUniforms
 {
@@ -241,7 +269,8 @@ void main(uint3 tid : SV_DispatchThreadID, uniform FTGSPPBackwardUniforms unifor
         float3 m = read_mean(idx, g_base_xyz_ws, 2, 0);
         float3 v = read_mean(idx, g_base_xyz_ws, 2, 1);
         ftgspp_fused_adam(
-            x, grad_mean, m, v, uniforms.step, optimizer_batch_size,
+            x, OPTIMIZER_GRADIENT(read_t3_float3(idx, batch_grad_xyz), grad_mean),
+            m, v, uniforms.step, optimizer_batch_size,
             uniforms.lr_means);
         write_t3_float3(x, idx, base_xyz_ws);
         write_mean(m, idx, g_base_xyz_ws, 2, 0);
@@ -252,7 +281,8 @@ void main(uint3 tid : SV_DispatchThreadID, uniform FTGSPPBackwardUniforms unifor
         float4 m = g_base_log_scales_opacity[m1];
         float4 v = g_base_log_scales_opacity[m2];
         ftgspp_fused_adam(
-            x, grad_scale_opacity, m, v, uniforms.step,
+            x, OPTIMIZER_GRADIENT(batch_grad_scale_opacity[idx], grad_scale_opacity),
+            m, v, uniforms.step,
             optimizer_batch_size,
             float4(float3(uniforms.lr_scales), uniforms.lr_opacities));
         base_log_scales_opacity[idx] = x;
@@ -264,7 +294,8 @@ void main(uint3 tid : SV_DispatchThreadID, uniform FTGSPPBackwardUniforms unifor
         float2 m = g_times_durations[m1];
         float2 v = g_times_durations[m2];
         ftgspp_fused_adam(
-            x, grad_time_duration, m, v, uniforms.step,
+            x, OPTIMIZER_GRADIENT(batch_grad_time_duration[idx], grad_time_duration),
+            m, v, uniforms.step,
             optimizer_batch_size,
             float2(uniforms.lr_times, uniforms.lr_durations));
         times_durations[idx] = x;
@@ -281,7 +312,8 @@ void main(uint3 tid : SV_DispatchThreadID, uniform FTGSPPBackwardUniforms unifor
         float4 v = g_velocities_gates[m2];
         ftgspp_fused_adam(
             x,
-            hard_phase ? float4(grad_velocity_gate.xyz, 0.0f) : grad_velocity_gate,
+            OPTIMIZER_GRADIENT(batch_grad_velocity_gate[idx],
+                hard_phase ? float4(grad_velocity_gate.xyz, 0.0f) : grad_velocity_gate),
             m, v, uniforms.step, optimizer_batch_size,
             float4(
                 float3(uniforms.lr_velocities),
@@ -300,7 +332,8 @@ void main(uint3 tid : SV_DispatchThreadID, uniform FTGSPPBackwardUniforms unifor
         float4 m = g_rotations[m1];
         float4 v = g_rotations[m2];
         ftgspp_fused_adam(
-            x, grad_rotation, m, v, uniforms.step, optimizer_batch_size,
+            x, OPTIMIZER_GRADIENT(batch_grad_rotation[idx], grad_rotation),
+            m, v, uniforms.step, optimizer_batch_size,
             uniforms.lr_quats);
         rotations[idx] = bool(NORMALIZE_QUATS_IN_OPTIMIZER) ? normalize(x) : x;
         g_rotations[m1] = m;
@@ -335,7 +368,8 @@ void main(uint3 tid : SV_DispatchThreadID, uniform FTGSPPBackwardUniforms unifor
             float4 m = g_sh_coeffs_1[bid];
             float4 v = g_sh_coeffs_2[bid];
             ftgspp_fused_adam(
-                x, grad, m, v, uniforms.step, optimizer_batch_size, lr);
+                x, OPTIMIZER_GRADIENT(batch_grad_sh[bid], grad),
+                m, v, uniforms.step, optimizer_batch_size, lr);
             sh_coeffs[bid] = x;
             g_sh_coeffs_1[bid] = m;
             g_sh_coeffs_2[bid] = v;

@@ -360,6 +360,8 @@ protected:
         std::vector<std::pair<int, int>> markers;
     };
     std::array<ComputeSubmissionSlot, kComputeRingDepth> compute_slots_{};
+    // Errors must outlive submission-slot reuse until replay clears them.
+    RetiredTileOverflow retired_tile_overflow_{};
     uint32_t current_slot_index_ = 0;
 
     struct ReferenceUploadSlot {
@@ -379,10 +381,6 @@ protected:
     uint32_t reference_upload_cursor_ = 0;
     uint64_t reference_upload_generation_ = 0;
     int32_t pending_reference_slot_ = -1;
-    VkQueue transfer_queue_ = VK_NULL_HANDLE;
-    uint32_t transfer_queue_family_ = UINT32_MAX;
-    VkCommandPool transfer_command_pool_ = VK_NULL_HANDLE;
-    bool transfer_shares_compute_family_ = true;
     uint64_t pending_upload_wait_value_ = 0;
     uint64_t last_compute_signal_ = 0;
     uint32_t in_flight_count_ = 0;

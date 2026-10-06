@@ -3,10 +3,12 @@
 ![TurboGS DNA-Rendering dynamic scene showcase](docs/assets/turbogs_dna_teaser.gif)
 
 **TurboGS accelerates explicit-velocity 4D Gaussian training with a native
-Vulkan pipeline.** Compared with a conventional CUDA + gsplat implementation,
-it delivers a **2.22× average training speedup**, with individual-scene step
-throughput reaching **3.14×**. See the full
-[benchmark definition and results](docs/performance.md).
+Vulkan pipeline.** On six SelfCap clips measured on an RTX 4090, the reported
+train-only timings show a **2.22× aggregate speedup** over the original
+CUDA + gsplat implementation, with individual-scene throughput ratios up to
+**3.14×**. Evaluation and hard separation are excluded; relocation is timed
+differently by the two implementations. See the
+[timing definitions and results](docs/performance.md).
 
 The Linux/NVIDIA runtime uses Python 3.12 and keeps ordinary training Torch-free.
 Clone the repository, run one setup script, then use the `ftgspp` CLI. YAML
@@ -35,8 +37,8 @@ and [third-party notices](THIRD_PARTY.md) before use or redistribution.
 - Slang **2026.10** with `slangc` on `PATH` (the setup script pins this)
 - [uv](https://docs.astral.sh/uv/) **0.11.29**
 
-The compatibility decision is capability-based. A supported device must be an
-NVIDIA physical GPU that `ftgspp doctor` reports as **`VIABLE`**;
+The compatibility decision is capability-based. A supported device must be a
+physical NVIDIA GPU that `ftgspp doctor` reports as **`VIABLE`**;
 `POSSIBLY VIABLE` is not sufficient for the supported training path. Native
 training requires the compiled subgroup, workgroup, shared-memory, push-constant,
 Int16/Int64, and float32 buffer atomic-add limits. See the complete
@@ -76,19 +78,19 @@ data/my_capture/images/<camera_id>/<numeric-frame>.(png|jpg|...)
 ftgspp prepare dataset --images data/my_capture/images --fps 30 --eval-cameras 3
 ```
 
-`prepare` writes a starter YAML and prints the required initialization step.
-Replace
+`prepare` writes a starter YAML and prints initialization instructions. Replace
 `3` with a hold-out camera that already exists under `images/`, or omit
-`--eval-cameras`. `--devices` is the Vulkan id from `ftgspp doctor`, not
-`nvidia-smi`.
+`--eval-cameras`. Training uses the Vulkan device ID reported by
+`ftgspp doctor`, which may differ from the `nvidia-smi` index.
 
-Scene-mode `init.backend: auto` needs a complete keyframe RGB PLY set under
-`data/my_capture/points_stride10/`, or DA3 installed with `--with-da3` or
-`--with-init`. Without prepared PLYs or locally/network-accessible DA3 weights,
-training stops with an explicit initialization error. Full data rules, resume, eval,
-export, foreground, and extras: [docs/usage.md](docs/usage.md).
+With camera calibration, scene-mode `init.backend: auto` uses a complete
+keyframe RGB PLY set under `data/my_capture/points_stride10/`, or generates
+points with DA3. Uncalibrated captures require DA3 to estimate cameras as well.
+Install DA3 with `--with-da3` or `--with-init` and make its weights available
+locally or through the network when needed. See [usage](docs/usage.md) for data
+requirements, resume, evaluation, export and foreground reconstruction.
 
-After the configured point source exists:
+Once calibration and PLYs are ready, or DA3 is available:
 
 ```bash
 ftgspp train --config data/my_capture/ftgspp.yaml --devices 0
@@ -116,6 +118,11 @@ forward its loopback port:
 ```bash
 bash scripts/setup.sh --with-remote
 ftgspp viewer --remote --run /path/to/run --device 0
+```
+
+Run the tunnel command on your local computer:
+
+```bash
 ssh -L 8765:127.0.0.1:8765 USER@SERVER
 ```
 
@@ -128,7 +135,7 @@ camera paths and export. See [viewer setup, controls and limits](docs/viewer.md)
 - [Hardware compatibility, estimated runnable models, and validated GPUs](docs/hardware.md)
 - [Foreground, DA3, SelfCap, research YAML](docs/usage.md)
 - [Local, SSH browser and headless viewers](docs/viewer.md)
-- [SelfCap train-only speed](docs/performance.md)
+- [SelfCap timing and B1/B4 throughput](docs/performance.md)
 - [Architecture](docs/architecture.md)
 - [Migration from older FTGSPP layouts](docs/migration.md)
 - [Maintainer notes](CONTRIBUTING.md)
@@ -137,13 +144,13 @@ camera paths and export. See [viewer setup, controls and limits](docs/viewer.md)
 
 ```text
 TurboGS/
-├── src/ftgspp/        # installed Python CLI and orchestration
+├── src/ftgspp/         # installed Python CLI and orchestration
 ├── native/            # Vulkan C++ runtime and Slang shaders
 ├── examples/          # public YAML and manifest templates
 ├── scripts/           # supported one-command installer
 ├── docs/              # hardware, install, usage, viewer and architecture
 ├── dev/               # tests and unsupported research tools
-├── .github/workflows/ # CPU, artifact and controlled GPU checks
+├── .github/workflows/  # CPU, artifact and controlled GPU checks
 ├── pyproject.toml      # package, dependency and build definition
 └── uv.lock             # reproducible Python dependency lock
 ```
@@ -157,7 +164,9 @@ uv run --no-sync pytest
 
 Use this only when changing code. It rewrites `.venv` from the lockfile and
 does **not** install the wheel; CPU tests skip `_ftgspp_vk` when it is
-missing. Keep the Install venv for running `ftgspp`. Shader or C++ changes
-need `slangc` on `PATH` and `uv pip install .` (or `uv build --python 3.12`).
+missing. Use the environment created by `scripts/setup.sh` to run `ftgspp`.
+Shader or C++ changes need `slangc` on `PATH`. Rebuild and install with
+`uv pip install --python .venv/bin/python --reinstall --no-deps .`;
+`uv build --python 3.12` only creates an artifact and does not install it.
 CPU contract tests and native GPU numerical tests are engineering-correctness
 gates, not evidence of reconstruction quality.

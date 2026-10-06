@@ -41,13 +41,10 @@ void VulkanGSPipeline::createTimelineSemaphore() {
 }
 
 void VulkanGSPipeline::createTransferResources() {
+    retired_tile_overflow_ = RetiredTileOverflow{};
     // Upload on the same compute queue. Signaling one timeline from two
     // queues can race (a later upload value can land before the previous
     // compute signal) and hang the device.
-    transfer_queue_ = command_queue;
-    transfer_queue_family_ = queue_family_index;
-    transfer_shares_compute_family_ = true;
-    transfer_command_pool_ = VK_NULL_HANDLE;
 
     for (uint32_t i = 0; i < kReferenceRingDepth; ++i) {
         auto& slot = reference_upload_ring_[i];
@@ -132,13 +129,7 @@ void VulkanGSPipeline::destroyAsyncResources() noexcept {
         vkDestroySemaphore(device, compute_timeline_, nullptr);
         compute_timeline_ = VK_NULL_HANDLE;
     }
-    if (transfer_command_pool_ != VK_NULL_HANDLE &&
-        transfer_command_pool_ != command_pool) {
-        vkDestroyCommandPool(device, transfer_command_pool_, nullptr);
-        transfer_command_pool_ = VK_NULL_HANDLE;
-    }
     has_timeline_semaphore_ = false;
-    transfer_queue_ = VK_NULL_HANDLE;
 }
 
 void VulkanGSPipeline::harvestWorkControl(ComputeSubmissionSlot& slot) {
@@ -148,6 +139,23 @@ void VulkanGSPipeline::harvestWorkControl(ComputeSubmissionSlot& slot) {
     std::memcpy(&slot.wc, slot.wc_stager.mapped, sizeof(slot.wc));
     slot.wc_copy_recorded = false;
     slot.wc_valid = true;
+    auto& retired = retired_tile_overflow_;
+    if (slot.wc.abort_code == ftgspp::kTileAbortPrefix ||
+        slot.wc.abort_code == ftgspp::kTileAbortInvariant) {
+        retired.fatal = true;
+        retired.abort_code = slot.wc.abort_code;
+    } else if (slot.wc.overflow != 0) {
+        retired.overflow = true;
+        retired.exact_count = std::max(retired.exact_count, slot.wc.exact_count);
+        if (!retired.fatal)
+            retired.abort_code = std::max(retired.abort_code, slot.wc.abort_code);
+        if (slot.is_train) {
+            if (!retired.is_train || retired.step < 0 ||
+                (slot.step >= 0 && slot.step < retired.step))
+                retired.step = slot.step;
+            retired.is_train = true;
+        }
+    }
     // Eval forwards also copy TileWorkControl.  Their exact_count / overflow
     // must not drive train-step density or abort replay.
     if (slot.is_train) {
@@ -514,7 +522,7 @@ VulkanGSPipeline::ReferenceUploadTicket VulkanGSPipeline::enqueueReferenceRgba(
         slot.ready_value = 0;
         pending_upload_wait_value_ = 0;
     }
-    if (vkQueueSubmit(transfer_queue_, 1, &submit, slot.fallback_fence) != VK_SUCCESS)
+    if (vkQueueSubmit(command_queue, 1, &submit, slot.fallback_fence) != VK_SUCCESS)
         _THROW_ERROR("Failed to submit reference upload");
     slot.in_flight = true;
     slot.width = width;
@@ -616,7 +624,7 @@ VulkanGSPipeline::ReferenceUploadTicket VulkanGSPipeline::enqueueRgbaToDeviceBuf
         slot.ready_value = 0;
         pending_upload_wait_value_ = 0;
     }
-    if (vkQueueSubmit(transfer_queue_, 1, &submit, slot.fallback_fence) != VK_SUCCESS)
+    if (vkQueueSubmit(command_queue, 1, &submit, slot.fallback_fence) != VK_SUCCESS)
         _THROW_ERROR("Failed to submit reference image upload");
     slot.in_flight = true;
     slot.width = width;
@@ -743,29 +751,7 @@ void VulkanGSPipeline::harvestNextComputeSlot() {
 }
 
 VulkanGSPipeline::RetiredTileOverflow VulkanGSPipeline::collectRetiredTileOverflow() const {
-    RetiredTileOverflow out;
-    for (const auto& slot : compute_slots_) {
-        if (!slot.wc_valid)
-            continue;
-        if (slot.wc.abort_code == ftgspp::kTileAbortPrefix ||
-            slot.wc.abort_code == ftgspp::kTileAbortInvariant) {
-            out.fatal = true;
-            out.abort_code = slot.wc.abort_code;
-            continue;
-        }
-        if (slot.wc.overflow == 0)
-            continue;
-        out.overflow = true;
-        out.abort_code = std::max(out.abort_code, slot.wc.abort_code);
-        out.exact_count = std::max(out.exact_count, slot.wc.exact_count);
-        if (slot.is_train) {
-            if (!out.is_train || out.step < 0 ||
-                (slot.step >= 0 && slot.step < out.step))
-                out.step = slot.step;
-            out.is_train = true;
-        }
-    }
-    return out;
+    return retired_tile_overflow_;
 }
 
 VulkanGSPipeline::RetiredTileOverflow
@@ -796,6 +782,8 @@ VulkanGSPipeline::collectLastHarvestedOverflow() const {
 }
 
 void VulkanGSPipeline::clearRetiredTileOverflow() {
+    if (!retired_tile_overflow_.fatal)
+        retired_tile_overflow_ = RetiredTileOverflow{};
     for (auto& slot : compute_slots_) {
         slot.wc.overflow = 0;
         if (slot.wc.abort_code == ftgspp::kTileAbortOverflow ||

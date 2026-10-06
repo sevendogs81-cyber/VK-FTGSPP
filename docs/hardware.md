@@ -11,7 +11,7 @@ requires all of the following:
 
 - Linux x86_64 with glibc 2.28 or newer (2.31 or newer when installing the
   optional TensorBoard tools);
-- one physical NVIDIA GPU selected by its Vulkan device id;
+- one physical NVIDIA GPU selected by its Vulkan device ID;
 - a driver exposing Vulkan 1.2 and the native capabilities below;
 - a device reported as **`VIABLE`** by `ftgspp doctor`; and
 - enough device memory for the selected Gaussian count, image resolution,
@@ -95,8 +95,8 @@ runnable range even if a particular machine happens to initialize.
 
 ## Validated hardware
 
-The maintained GPU acceptance environment currently contains two NVIDIA
-GeForce RTX 4090 24 GB devices. Single-device training, evaluation, rendering,
+GPU acceptance has been exercised on NVIDIA GeForce RTX 4090 24 GB devices.
+Single-device training, evaluation, rendering,
 headless and browser viewers, numerical checks, overflow replay, checkpoints,
 and pipeline acceptance have been exercised on this hardware. The two-device
 tests are engineering checks for code that remains outside the supported user
@@ -115,7 +115,7 @@ Install the core environment, activate it, and run:
 ftgspp doctor --devices 0
 ```
 
-Use the Vulkan id printed in the device list. It can differ from the CUDA or
+Use the Vulkan ID printed in the device list. It can differ from the CUDA or
 `nvidia-smi` ordinal. A suitable result has all of these properties:
 
 1. The selected device name is the intended NVIDIA GPU, rather than

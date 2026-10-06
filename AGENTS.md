@@ -16,8 +16,8 @@ Preserve these boundaries:
 - Supported training uses one Vulkan device and one view per optimizer update
   by default. Ordinary foreground training can explicitly use batch size four
   with an FP32 mean gradient and one Adam update. Two-device synchronous code
-  is retained for engineering work but is not a supported user workflow. Do not present it as production
-  functionality.
+  is retained for engineering work but is not a supported user workflow. Do not
+  present it as production functionality.
 - The ordinary CLI and training runtime are Torch-free. Torch, BiRefNet-HR,
   Depth Anything 3, LPIPS, CUDA preparation accelerators, TensorBoard, and the
   browser server are optional capabilities and must stay lazily imported.
@@ -25,8 +25,8 @@ Preserve these boundaries:
   Image objective and evaluation protocol are derived contracts, not separate
   public switches.
 - A run resolves configuration once into an immutable effective plan. Resume
-  reuses the saved plan and its V6 or local-batch V7 checkpoint semantics; it must not silently
-  reinterpret current defaults.
+  reuses the saved plan and its V6 or local-batch V7 checkpoint semantics; it
+  must not silently reinterpret current defaults.
 - Checkpoints, manifests, cache identities, camera paths, viewer sessions, and
   export-selection files are versioned protocols. Reject incompatible input
   explicitly. Change a schema or ABI identifier when semantics change, and add
@@ -121,14 +121,14 @@ from distributions.
   - `objective.py`, `foreground_metrics.py`, and `temporal_metrics.py`: reference
     objective and diagnostic math.
   - `background.py`: deterministic solid-background sampling.
-  - `sampler.py`: checkpoint-reconstructible single-view sampling.
+  - `sampler.py`: checkpoint-reconstructible single-view and local-batch sampling.
   - `distributed.py` and `distributed_contract.py`: in-development two-device
     orchestration and its production invariants.
   - `stage_timer.py`: explicit wall-clock stage accounting.
 - `io/`
   - `model.py`: contiguous NumPy representation of native 4D Gaussians.
-  - `checkpoint.py`: V6 and local-batch V7 explicit model/optimizer checkpoints, phase state,
-    provenance, resume validation, and atomic latest pointer.
+  - `checkpoint.py`: V6 and local-batch V7 explicit model/optimizer checkpoints,
+    phase state, provenance, resume validation, and atomic latest pointer.
   - `export_selection.py`: selected model and matching color-correction state.
   - `ply.py`: point PLY input and compatibility 4DGS output. Viewer PLY is not a
     lossless native model because it omits dynamic gate state.

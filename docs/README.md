@@ -1,4 +1,4 @@
-# Docs
+# Documentation
 
 Start at the repository [README](../README.md). Use this folder when the
 landing page is not enough.
@@ -9,7 +9,7 @@ landing page is not enough.
 | [install.md](install.md) | Manual install, pins, and troubleshooting |
 | [usage.md](usage.md) | Prepare / train / eval, foreground, DA3, research YAML |
 | [viewer.md](viewer.md) | Local and SSH browser viewers, cameras, playback, screenshots and headless export |
-| [performance.md](performance.md) | SelfCap train-only speed tables |
+| [performance.md](performance.md) | SelfCap timing definitions and B1/B4 image-throughput benchmarks |
 | [architecture.md](architecture.md) | CLI, native, and config boundaries |
 | [migration.md](migration.md) | Breaking changes from older FTGSPP layouts |
 

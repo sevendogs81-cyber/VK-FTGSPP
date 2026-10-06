@@ -642,17 +642,20 @@ class NativeVulkanBackend:
         if self._bound_train_index is not None:
             self._release_bound_train_image(int(self._bound_train_index))
         self.native.bind_dynamic_view_image(int(view_index), True, rgb)
-        validity = np.ascontiguousarray(
-            view.load_validity() >= 0.5, dtype=np.uint8,
-        )
-        if not bool(np.all(validity)):
-            bind_validity = getattr(self.native, "bind_dynamic_view_validity", None)
-            if not callable(bind_validity):
-                raise NativeBackendUnavailable(
-                    "the native module lacks validity-buffer support; rebuild "
-                    "the Vulkan target"
-                )
-            bind_validity(int(view_index), True, validity)
+        # Missing validity files mean every pixel is valid. Avoid constructing
+        # and scanning full-resolution arrays just to rediscover that fact.
+        if view.validity_path is not None:
+            validity = np.ascontiguousarray(
+                view.load_validity() >= 0.5, dtype=np.uint8,
+            )
+            if not bool(np.all(validity)):
+                bind_validity = getattr(self.native, "bind_dynamic_view_validity", None)
+                if not callable(bind_validity):
+                    raise NativeBackendUnavailable(
+                        "the native module lacks validity-buffer support; rebuild "
+                        "the Vulkan target"
+                    )
+                bind_validity(int(view_index), True, validity)
         self._bound_train_index = int(view_index)
         return rgb
 

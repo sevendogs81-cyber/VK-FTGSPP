@@ -6,9 +6,11 @@ keep third-party attribution and the research-only licensing boundary.
 
 Users should install with `bash scripts/setup.sh` from a clone. Maintainers
 use Python 3.12, NumPy 2 and pybind11 3.0.1. CPU tests run with
-`uv sync --python 3.12 --extra dev --no-install-project`. Native or shader
-changes need a clean `uv pip install .` (or `uv build --python 3.12`) plus
-the relevant GPU fixtures. Keep Slang 2026.10 and uv 0.11.29 pins in
+`uv sync --locked --python 3.12 --extra dev --no-install-project`, followed by
+`uv run --no-sync pytest`. After native or shader changes, rebuild and install
+with `uv pip install --python .venv/bin/python --reinstall --no-deps .`, then run
+the relevant GPU fixtures. `uv build --python 3.12` creates a wheel without
+installing it. Keep Slang 2026.10 and uv 0.11.29 pins in
 `scripts/setup.sh` identical to `.github/workflows/artifacts.yml`.
 Shader layout changes must update the C++ push constants/descriptors and
 behavior tests together.

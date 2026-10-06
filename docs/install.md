@@ -1,4 +1,4 @@
-# Install
+# Installation
 
 The usual path is one script from a clone:
 
@@ -21,7 +21,7 @@ LPIPS fetch their model weights on first use unless cached.
 
 Building the wheel compiles C++ and every shader. That step does **not** need
 a GPU. `ftgspp doctor`, `train`, and `eval` do. CUDA ordinals and Vulkan
-device indices can differ; `--devices` is the Vulkan id from `doctor`, not
+device indices can differ; `--devices` is the Vulkan ID from `doctor`, not
 `nvidia-smi`.
 
 Not every NVIDIA GPU is supported. Read the
@@ -198,7 +198,7 @@ project-level uv resolver metadata.
 The selected device from `doctor` must be an NVIDIA GPU classified as `VIABLE`,
 not `POSSIBLY VIABLE`, `NOT VIABLE`, or `llvmpipe`. Use that device's JSON
 `device_id` as `--devices`. CUDA ordinals from `nvidia-smi` and
-Vulkan ids often differ: on a two-GPU Linux host, Vulkan index `1` can be
+Vulkan IDs often differ: on a two-GPU Linux host, Vulkan index `1` can be
 `llvmpipe` while `nvidia-smi` GPU `1` is the second NVIDIA card. Doctor opens
 a real device; it fails on a CPU-only build machine even when the wheel
 compiled. `scripts/setup.sh` treats a doctor failure as a warning so a CPU

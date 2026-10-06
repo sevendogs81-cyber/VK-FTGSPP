@@ -2,7 +2,8 @@
 
 The viewer supports a local GLFW / Dear ImGui window and a display-free browser
 mode for an SSH server. Both use the same native Vulkan 4DGS forward renderer.
-The local window reads the resident `float4(F.rgb, T)` buffer directly; the remote
+Here, `F` is the accumulated foreground color and `T` is transmittance. The
+local window reads the resident `float4(F.rgb, T)` buffer directly; the remote
 mode reads back, encodes and sends frames to the browser. The model stays on one
 server GPU. Headless export remains available without either UI.
 
@@ -48,10 +49,12 @@ scene are discarded or rejected while switching. Sessions, camera paths, and
 exports follow the selected run unless their locations were explicitly supplied.
 Failed model uploads attempt to restore the previous model from disk.
 
-The remote UI has orbit, pan, look/fly, optical-axis roll, dolly, fit/reset, calibrated capture
-cameras, playback/speed/loop/sample snap, RGB/Alpha/T, background/exposure,
-SH/threshold, faithful/interactive quality, PNG screenshot, camera path
-keyframes/preview/save/load/export, direct MP4 export, and session save/load.
+### Browser controls and image size
+
+The remote UI has orbit, pan, look/fly, optical-axis roll, dolly, fit/reset,
+calibrated capture cameras, playback/speed/loop/sample snap, RGB/Alpha/T,
+background/exposure, SH/threshold, faithful/interactive quality, PNG screenshot,
+camera path keyframes/preview/save/load/export, direct MP4 export, and session save/load.
 Session and path files are stored on the **server** beside the model by default.
 PNG screenshots, path image sequences, and MP4 videos are saved under
 `RUN/exports/`. Remote screenshots download automatically, and completed MP4
@@ -74,12 +77,16 @@ Selecting another calibrated camera uses that camera's original aspect.
 later boxes up to 1920×1080 for viewing. Screenshots and path exports fit the
 original aspect into the full browser viewport even when interactive quality
 reduces moving frames to 75%; their bounding box is capped at 3840×2160.
-Pixel dimensions are rounded to whole pixels. The model's SH degree and dynamic threshold are preserved in both
-quality modes. Interactive frames are JPEG quality 88; PNG output is lossless.
+Pixel dimensions are rounded to whole pixels. The model's SH degree and dynamic
+threshold are preserved in both quality modes. Interactive frames use JPEG
+quality 88; PNG output is lossless.
+
+### Remote rendering and timing
+
 Frames keep FP32 F/T on the GPU. A Vulkan compute shader composes display
-options and packs RGBA8; packing and D2H share one submission and completion
-wait. Readback writes a reusable uint8 NumPy buffer for existing JPEG/PNG
-encoding (4 bytes/pixel plus a 4-byte non-finite status, instead of 16
+options and packs RGBA8; packing and device-to-host (D2H) transfer share one
+submission and completion wait. Readback writes a reusable uint8 NumPy buffer
+for JPEG/PNG encoding (4 bytes/pixel plus a 4-byte non-finite status, instead of 16
 bytes/pixel). Unchanged render inputs reuse GPU F/T;
 exposure/background/mode changes only pack, read back and encode;
 identical image requests reuse the encoded bytes. The browser sends state
@@ -94,7 +101,7 @@ Remote access is protected by a random per-process URL token and a same-origin
 WebSocket check. Keep the printed URL private. The server rejects non-loopback
 binds; SSH forwarding is the intended network transport.
 
-## Install and open
+## Local desktop installation
 
 Linux x86_64, Python 3.12, a supported NVIDIA Vulkan GPU, and an X11 desktop
 (or XWayland providing Vulkan presentation) are required for the window.
@@ -246,8 +253,7 @@ The remote viewer exports MP4 directly from the browser in three modes:
 - **Keyframed camera path** samples the user-created spatial keyframes. Its 4D
   timeline is explicit and separate: freeze at one scene time, or advance over a
   selected scene-time range for the duration of the camera path.
-- **Fixed camera + scene time** is the earlier fixed-view behavior and is labeled
-  as such. It advances scene time without moving the camera.
+- **Fixed camera + scene time** advances scene time without moving the camera.
 
 The video panel controls FPS and output width; height follows the recorded/path
 camera aspect ratio. The UI reports effective extent, duration, and frame count
@@ -273,10 +279,10 @@ view is rendered afterward. A video export is limited to 3840×2160, 240 FPS and
 published only after all frames and their manifest are complete; interrupted
 sequences are removed. Interaction recording stops automatically at 10,000
 samples, preserving the captured path for export. Cancellation, disconnects and
-encoder errors remove the partial
-MP4; completed videos and their manifests remain. Use the headless CLI for
-unattended batch export. Odd image dimensions are padded to even dimensions for
-H.264; the video manifest records the encoded dimensions and each frame retains
+encoder errors remove the partial MP4; completed videos and their manifests
+remain. Use the headless CLI for unattended batch export. Odd image dimensions
+are padded to even dimensions for H.264; the video manifest records the encoded
+dimensions and each frame retains
 its original render camera. JSON is the implemented camera-path exchange format;
 EasyMocap path import/export is not included.
 

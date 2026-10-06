@@ -131,12 +131,14 @@ public:
     void executeFTGSPPBackward(
         const TrainerConfig &config, const VulkanGSRendererUniforms& uniforms,
         VulkanGSPipelineBuffers& buffers, int step, float timestamp,
-        bool collect_loss_scalar = true);
+        bool collect_loss_scalar = true,
+        bool local_batch_mean = false, bool reset_mean = false);
     void executeFTGSPPFusedDynamicBackwardAdam(
         const TrainerConfig &config, const VulkanGSRendererUniforms& uniforms,
         VulkanGSPipelineBuffers& buffers, int step, float timestamp,
         bool collect_loss_scalar = true,
-        bool collect_geometry_grad_stats = false);
+        bool collect_geometry_grad_stats = false,
+        bool local_batch_commit = false);
     void executeFTGSPPExplicitAdam(
         const TrainerConfig &config, const VulkanGSRendererUniforms& uniforms,
         VulkanGSPipelineBuffers& buffers, int step,
@@ -190,8 +192,18 @@ private:
     _ComputePipeline pipeline_ftgspp_eval_metrics = _ComputePipeline(6);
     _ComputePipeline pipeline_ftgspp_materialize = _ComputePipeline(6);
     _ComputePipeline pipeline_ftgspp_fused_backward_optimizer = _ComputePipeline(19);
+    _ComputePipeline pipeline_ftgspp_batch_mean_backward = _ComputePipeline(19);
+    _ComputePipeline pipeline_ftgspp_batch_mean_backward_sh[4] = {
+        _ComputePipeline(19), _ComputePipeline(19),
+        _ComputePipeline(19), _ComputePipeline(19),
+    };
     _ComputePipeline pipeline_ftgspp_fused_dynamic_backward_adam =
         _ComputePipeline(21);
+    _ComputePipeline pipeline_ftgspp_batch_commit = _ComputePipeline(27);
+    _ComputePipeline pipeline_ftgspp_batch_commit_sh[4] = {
+        _ComputePipeline(27), _ComputePipeline(27),
+        _ComputePipeline(27), _ComputePipeline(27),
+    };
     _ComputePipeline pipeline_ftgspp_fused_dynamic_backward_adam_sh[4] = {
         _ComputePipeline(21), _ComputePipeline(21),
         _ComputePipeline(21), _ComputePipeline(21),
