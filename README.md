@@ -1,4 +1,4 @@
-# VK-FTGSPP
+# VK-FTGSPP（FastGS）
 
 ![VK-FTGSPP DNA-Rendering dynamic scene showcase](docs/assets/vk-ftgspp_dna_teaser.gif)
 
