@@ -1,6 +1,6 @@
 # VK-FTGSPP
 
-![VK-FTGSPP DNA-Rendering dynamic scene showcase](docs/assets/turbogs_dna_teaser.gif)
+![VK-FTGSPP DNA-Rendering dynamic scene showcase](docs/assets/vk-ftgspp_dna_teaser.gif)
 
 **VK-FTGSPP accelerates explicit-velocity 4D Gaussian training with a native
 Vulkan pipeline.** On six SelfCap clips measured on an RTX 4090, the reported

@@ -217,9 +217,8 @@ fi
 
 activate="$ROOT/.venv/bin/activate"
 marker="# VK-FTGSPP: Slang compiler for native rebuilds"
-previous_marker="# TurboGS: Slang compiler for native rebuilds"
-legacy_marker="# FastGS: Slang compiler for native rebuilds"
-if ! grep -qF "$marker" "$activate" && ! grep -qF "$previous_marker" "$activate" && ! grep -qF "$legacy_marker" "$activate"; then
+# Recognize earlier project names without duplicating the compiler PATH entry.
+if ! grep -qE "^# .*: Slang compiler for native rebuilds$" "$activate"; then
   cat >> "$activate" <<EOF
 
 $marker

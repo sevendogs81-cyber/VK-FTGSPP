@@ -54,7 +54,7 @@ LABEL = 32
 CANVAS_SIZE = (COLUMNS * TILE_SIZE[0], HEADER + 3 * (TILE_SIZE[1] + LABEL))
 RUN_ROOT = Path("runs/fastgs_eval_v8_visual/final_200k")
 WORK_ROOT = Path("runs/4danyone_teaser_v8_200k/tight_subject")
-ASSET_STEM = "turbogs_4danyone_teaser"
+ASSET_STEM = "vk-ftgspp_4danyone_teaser"
 # User-approved framing exception: keep the visible body and hands; the trailing
 # cape may leave the tile. Reviewed around the full orbit and hand extrema.
 SPIDERMAN_BODY_CROP = (224, 104, 776, 768)
@@ -253,8 +253,8 @@ def compose_frame(repo: Path, i: int, framing: dict) -> Image.Image:
     canvas = Image.new("RGB", CANVAS_SIZE, "#05070b")
     draw = ImageDraw.Draw(canvas)
     title, subtitle, metadata = font(29, bold=True), font(15), font(15, bold=True)
-    draw.text((24, 8), "Turbo", font=title, fill="#f7f9ff")
-    draw.text((24 + draw.textlength("Turbo", font=title), 8), "GS", font=title, fill="#39c6ff")
+    draw.text((24, 8), "VK-", font=title, fill="#f7f9ff")
+    draw.text((24 + draw.textlength("VK-", font=title), 8), "FTGSPP", font=title, fill="#39c6ff")
     draw.text((25, 40), "Native Vulkan 4D Gaussian Splatting", font=subtitle, fill="#9aa7bd")
     draw.text((CANVAS_SIZE[0] - 24, 32), "4DAnyone  ·  12 dynamic scenes  ·  360° views",
               font=metadata, fill="#dce5f5", anchor="rm")
@@ -299,13 +299,13 @@ def compose(repo: Path, framing: dict | None = None) -> None:
     framing = measure_framing(repo) if framing is None else framing
     framing["spiderman"] = spiderman_body_framing()
     atomic_json(work / "framing_subject_fit.json", framing)
-    frames = work / "composite_spiderman_body.partial"
+    frames = work / "composite_vk_ftgspp.partial"
     frames.mkdir(exist_ok=False)
     for i in range(FRAME_COUNT):
         compose_frame(repo, i, framing).save(frames / f"{i:06d}.png", compress_level=1)
         if i % 30 == 0:
             print(f"Composed {i + 1}/{FRAME_COUNT}", flush=True)
-    complete = work / "composite_spiderman_body"
+    complete = work / "composite_vk_ftgspp"
     frames.rename(complete)
     assets = repo / "docs/assets"
     pattern = str(complete / "%06d.png")
@@ -332,7 +332,7 @@ def compose(repo: Path, framing: dict | None = None) -> None:
     poster_temporary.write_bytes((complete / "000000.png").read_bytes())
     poster_temporary.replace(poster)
     atomic_json(assets / f"{ASSET_STEM}.json", dict(
-        schema="turbogs-4danyone-teaser-v1", selection="v8 last / 200000 optimizer updates",
+        schema="vk-ftgspp-4danyone-teaser-v1", selection="v8 last / 200000 optimizer updates",
         scenes=sources, layout=dict(columns=COLUMNS, rows=3, width=CANVAS_SIZE[0], height=CANVAS_SIZE[1]),
         fps=FPS, frame_count=FRAME_COUNT, duration_seconds=FRAME_COUNT / FPS,
         gif_fps=15, path_duration_seconds=PATH_DURATION, source_extent=list(SOURCE_SIZE),

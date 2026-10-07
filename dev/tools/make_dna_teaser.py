@@ -240,9 +240,9 @@ def compose_frame(
     title = font(29, bold=True)
     subtitle = font(15)
     metadata = font(15, bold=True)
-    draw.text((24, 8), "Turbo", font=title, fill="#f7f9ff")
-    turbo_width = draw.textlength("Turbo", font=title)
-    draw.text((24 + turbo_width, 8), "GS", font=title, fill="#39c6ff")
+    draw.text((24, 8), "VK-", font=title, fill="#f7f9ff")
+    prefix_width = draw.textlength("VK-", font=title)
+    draw.text((24 + prefix_width, 8), "FTGSPP", font=title, fill="#39c6ff")
     draw.text((25, 40), "Native Vulkan 4D Gaussian Splatting", font=subtitle, fill="#9aa7bd")
     right = "DNA-Rendering  ·  10 dynamic scenes  ·  360° views"
     draw.text((CANVAS_SIZE[0] - 24, 32), right, font=metadata, fill="#dce5f5", anchor="rm")
@@ -290,10 +290,10 @@ def compose(repo: Path) -> None:
 
     assets = repo / "docs/assets"
     assets.mkdir(parents=True, exist_ok=True)
-    gif_temp = assets / "turbogs_dna_teaser.gif.tmp"
-    mp4_temp = assets / "turbogs_dna_teaser.mp4.tmp"
-    gif_final = assets / "turbogs_dna_teaser.gif"
-    mp4_final = assets / "turbogs_dna_teaser.mp4"
+    gif_temp = assets / "vk-ftgspp_dna_teaser.gif.tmp"
+    mp4_temp = assets / "vk-ftgspp_dna_teaser.mp4.tmp"
+    gif_final = assets / "vk-ftgspp_dna_teaser.gif"
+    mp4_final = assets / "vk-ftgspp_dna_teaser.mp4"
     for output in (gif_temp, mp4_temp):
         output.unlink(missing_ok=True)
     pattern = str(final_frames / "%06d.png")
