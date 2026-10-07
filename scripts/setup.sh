@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-command install for TurboGS. Pins match .github/workflows/artifacts.yml.
+# One-command install for VK-FTGSPP. Pins match .github/workflows/artifacts.yml.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -216,9 +216,10 @@ else
 fi
 
 activate="$ROOT/.venv/bin/activate"
-marker="# TurboGS: Slang compiler for native rebuilds"
+marker="# VK-FTGSPP: Slang compiler for native rebuilds"
+previous_marker="# TurboGS: Slang compiler for native rebuilds"
 legacy_marker="# FastGS: Slang compiler for native rebuilds"
-if ! grep -qF "$marker" "$activate" && ! grep -qF "$legacy_marker" "$activate"; then
+if ! grep -qF "$marker" "$activate" && ! grep -qF "$previous_marker" "$activate" && ! grep -qF "$legacy_marker" "$activate"; then
   cat >> "$activate" <<EOF
 
 $marker
@@ -322,7 +323,7 @@ fi
 
 cat <<EOF
 
-TurboGS training runtime is installed.
+VK-FTGSPP training runtime is installed.
 
   source $ROOT/.venv/bin/activate
 EOF

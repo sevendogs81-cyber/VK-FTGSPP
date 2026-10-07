@@ -5,7 +5,7 @@ These instructions apply to the entire repository. A more deeply nested
 
 ## Project contract
 
-TurboGS is a Linux x86_64, Python 3.12, NVIDIA Vulkan implementation of
+VK-FTGSPP is a Linux x86_64, Python 3.12, NVIDIA Vulkan implementation of
 explicit-velocity 4D Gaussian training. The supported product surface is the
 installed `ftgspp` command, documented YAML, one-device training, headless
 rendering, and the optional local and remote viewers. Treat this repository as

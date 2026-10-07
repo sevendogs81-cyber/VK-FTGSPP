@@ -1,8 +1,8 @@
-# TurboGS
+# VK-FTGSPP
 
-![TurboGS DNA-Rendering dynamic scene showcase](docs/assets/turbogs_dna_teaser.gif)
+![VK-FTGSPP DNA-Rendering dynamic scene showcase](docs/assets/turbogs_dna_teaser.gif)
 
-**TurboGS accelerates explicit-velocity 4D Gaussian training with a native
+**VK-FTGSPP accelerates explicit-velocity 4D Gaussian training with a native
 Vulkan pipeline.** On six SelfCap clips measured on an RTX 4090, the reported
 train-only timings show a **2.22× aggregate speedup** over the original
 CUDA + gsplat implementation, with individual-scene throughput ratios up to
@@ -47,8 +47,8 @@ Int16/Int64, and float32 buffer atomic-add limits. See the complete
 ## Installation
 
 ```bash
-git clone https://github.com/sevendogs81-cyber/TurboGS.git
-cd TurboGS
+git clone https://github.com/sevendogs81-cyber/VK-FTGSPP.git
+cd VK-FTGSPP
 bash scripts/setup.sh
 source .venv/bin/activate
 ```
@@ -143,7 +143,7 @@ camera paths and export. See [viewer setup, controls and limits](docs/viewer.md)
 ## Repository layout
 
 ```text
-TurboGS/
+VK-FTGSPP/
 ├── src/ftgspp/         # installed Python CLI and orchestration
 ├── native/            # Vulkan C++ runtime and Slang shaders
 ├── examples/          # public YAML and manifest templates

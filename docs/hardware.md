@@ -1,6 +1,6 @@
 # Hardware compatibility
 
-TurboGS does not support every NVIDIA GPU. The first-release hardware contract
+VK-FTGSPP does not support every NVIDIA GPU. The first-release hardware contract
 is capability-based because the Vulkan features exposed by the installed driver
 matter as much as the marketing model name.
 

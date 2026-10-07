@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the TurboGS DNA-Rendering cover animation from completed runs.
+"""Build the VK-FTGSPP DNA-Rendering cover animation from completed runs.
 
 The expensive rendering step remains explicit so it can be distributed across
 available Vulkan devices. Typical usage from the repository root is:

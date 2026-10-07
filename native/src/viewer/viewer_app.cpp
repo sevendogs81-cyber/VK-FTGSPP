@@ -33,7 +33,7 @@ ViewerApp::ViewerApp(const std::string &shaders, int device, int w, int h,
           "GLFW could not open a display. Use a desktop/X11 display, or ftgspp "
           "render for headless export.");
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-    window = glfwCreateWindow(w, h, "TurboGS Viewer", nullptr, nullptr);
+    window = glfwCreateWindow(w, h, "VK-FTGSPP Viewer", nullptr, nullptr);
     if (window)
       glfwSetWindowSizeLimits(window, 640, 360, GLFW_DONT_CARE, GLFW_DONT_CARE);
     if (!window)
@@ -326,7 +326,7 @@ void ViewerApp::draw_ui(ViewerEvents &ev) {
   if (ImGui::Button(panel ? "Hide panel" : " > "))
     panel = !panel;
   if (panel) {
-    ImGui::TextUnformatted("TurboGS Viewer");
+    ImGui::TextUnformatted("VK-FTGSPP Viewer");
     ImGui::Separator();
     static char source[1024] = "";
     ImGui::SetNextItemWidth(-1);
