@@ -95,7 +95,7 @@ the same generation and views.
 ### Batch size four
 
 Ordinary single-device foreground training supports batch size four (B4). See
-[configuration requirements](usage.md#batch-size).
+[configuration requirements](configuration.md#batch-size).
 
 A compile-time specialization of the shared parameter backward accumulates
 the first three complete gradients with weight 0.25 directly into the existing
@@ -215,3 +215,26 @@ Examples stay in the git checkout and sdist; they are not installed by the
 wheel. The default wheel is headless and includes offscreen rendering plus the
 browser asset; `FTGSPP_BUILD_VIEWER=ON` additionally compiles the X11
 GLFW / Dear ImGui module.
+
+## Viewer rendering
+
+Here, `F` is the accumulated foreground color and `T` is transmittance. The
+local window reads the resident `float4(F.rgb, T)` buffer directly; the remote
+mode reads back, encodes and sends frames to the browser. The model stays on one
+server GPU. Headless export remains available without either UI.
+
+### Remote rendering and timing
+
+Frames keep FP32 F/T on the GPU. A Vulkan compute shader composes display
+options and packs RGBA8; packing and device-to-host (D2H) transfer share one
+submission and completion wait. Readback writes a reusable uint8 NumPy buffer
+for JPEG/PNG encoding (4 bytes/pixel plus a 4-byte non-finite status, instead of 16
+bytes/pixel). Unchanged render inputs reuse GPU F/T;
+exposure/background/mode changes only pack, read back and encode;
+identical image requests reuse the encoded bytes. The browser sends state
+deltas, waits for image decode before requesting the next frame, and stops its
+animation loop while paused. The server keeps only the latest pending view.
+The status bar reports host-observed total/forward/pack+readback time, cache reuse,
+renderer buffer allocation and encoded size. The frame protocol reports
+`rgba8_ms`, `readback_bytes` and `encode_ms`; composition and D2H have a combined
+host timing, not separate GPU timestamps. These are not end-to-end latency or FPS.

@@ -1,15 +1,6 @@
 # Installation
 
-The usual path is one script from a clone:
-
-```bash
-git clone https://github.com/sevendogs81-cyber/VK-FTGSPP.git
-cd VK-FTGSPP
-bash scripts/setup.sh
-source .venv/bin/activate
-```
-
-Before running it, the host needs Linux x86_64 with glibc 2.28 or newer
+Before running setup, you need Linux x86_64 with glibc 2.28 or newer
 (2.31 or newer with `--with-tensorboard`),
 `apt-get` and root/sudo access (or all packages already present with
 `--skip-apt`), and network access to fetch uv, Python, Slang, and locked Python
@@ -18,6 +9,19 @@ driver with a Vulkan ICD and a GPU in the [runnable range](hardware.md); the
 script does not install or replace the driver. A local desktop viewer needs an
 X11/XWayland display backed by the selected GPU. Raw-RGB initialization and
 LPIPS fetch their model weights on first use unless cached.
+
+The script installs Python 3.12, pinned uv/Slang and the selected dependencies;
+you do not need to activate a Conda environment or install those tools manually.
+Choose the feature flags in the table below before the first install.
+
+Run from a clone (the following is the core-only profile):
+
+```bash
+git clone https://github.com/sevendogs81-cyber/VK-FTGSPP.git
+cd VK-FTGSPP
+bash scripts/setup.sh
+source .venv/bin/activate
+```
 
 Building the wheel compiles C++ and every shader. That step does **not** need
 a GPU. `ftgspp doctor`, `train`, and `eval` do. CUDA ordinals and Vulkan
@@ -66,8 +70,18 @@ combined with each other and with initialization or LPIPS flags.
 | Add the SSH browser viewer | Add `--with-remote` to the same setup command |
 | Add TensorBoard tools | Add `--with-tensorboard` to the same setup command |
 
-Each setup run synchronizes the selected profile. Use `--with-init` or pass
-both component flags in the same command when both must remain installed.
+**Rerunning setup replaces the selected profile; it does not append features.**
+Always repeat all required flags, including `--with-viewer` for a desktop build.
+For example, to add the browser viewer to an initialization environment:
+
+```bash
+bash scripts/setup.sh --with-init --with-remote
+source .venv/bin/activate
+```
+
+Running only `--with-remote` would remove the initialization dependencies, and
+omitting `--with-viewer` rebuilds without the desktop module. Stop processes
+using `.venv` before any setup or `uv sync`.
 To install every public optional component in one pass, use:
 
 ```bash
@@ -80,6 +94,36 @@ stack; model weights are fetched when their feature first runs.
 
 Release wheels are not published to PyPI. YAML examples live in the **clone**;
 the wheel only provides the `ftgspp` command.
+
+## Verify installation
+
+```bash
+source .venv/bin/activate
+ftgspp --help
+ftgspp doctor --devices 0
+```
+
+Select the intended NVIDIA GPU from the printed Vulkan list. It must be
+`VIABLE`; a successful wheel build alone is insufficient. Setup treats doctor
+failure as a warning to allow CPU-only build hosts. On a training host, fix that
+failure before continuing. Then run the [tiny end-to-end check](../README.md#check-the-complete-workflow).
+
+## Shared servers and offline use
+
+`--skip-apt` skips installation of system packages, not their requirements.
+On a shared server without sudo, ask the administrator to provide the listed
+compiler, Vulkan headers/loader and FFmpeg packages, then use `--skip-apt`
+alongside your feature flags. This script does not bootstrap missing system
+headers into a user-local directory.
+
+Installing a wheel builds native code and may fetch toolchains/dependencies;
+`--skip-apt` is not an offline switch. For offline inference, install the selected
+environment and cache weights beforehand. Set `init.da3.model_path` for local
+DA3 weights; BiRefNet and LPIPS also need their respective cached weights.
+The core tiny fixture requires no inference-model download.
+
+<details>
+<summary>Dependency and build reference</summary>
 
 ## What the script does
 
@@ -127,20 +171,13 @@ copy is older.
 | Local desktop viewer | GLFW 3.4, Dear ImGui v1.91.9b and X11 development headers | With `--with-viewer`; archives are fetched by CMake using pinned SHA-256 values |
 | TensorBoard | TensorBoard | With `--with-tensorboard` |
 
-The pinned BiRefNet-HR repository publishes a broad
-[training/application requirements file](https://huggingface.co/ZhengPeng7/BiRefNet_HR/blob/a7a562f6fd16021180f2f4348f4de003a2d3d1e1/requirements.txt)
-that includes `numpy<2`. This project does not install that file. Its
-`birefnet` extra declares the direct imports used by the pinned inference
-module (`torchvision`, timm, Kornia, and einops) while retaining the project's
-tested NumPy 2/OpenCV 4.12 core.
+The optional inference dependency pins and the DA3 metadata override are
+explained in the [maintainer notes](../CONTRIBUTING.md#optional-inference-dependencies).
 
-The audited upstream `depth-anything-3==0.1.1` distribution declares its full
-demo/server/training environment as hard dependencies, including `numpy<2`.
-FTGSPP uses only the inference API and is tested with NumPy 2/OpenCV 4.12. The
-uv lock therefore supplies reviewed static metadata for that exact DA3 version
-and explicitly declares the smaller inference dependency set in the `da3`
-extra. This avoids unrelated Open3D, web-server, pre-commit, and
-duplicate OpenCV packages while keeping DA3 itself version-pinned.
+</details>
+
+<details>
+<summary>Manual installation (advanced)</summary>
 
 ## Manual install
 
@@ -193,6 +230,8 @@ environment should be synchronized from the clone so uv applies the locked DA3
 metadata correction; installing a standalone wheel extra cannot carry
 project-level uv resolver metadata.
 
+</details>
+
 ## Troubleshooting
 
 The selected device from `doctor` must be an NVIDIA GPU classified as `VIABLE`,
@@ -209,29 +248,10 @@ If `slangc: not found`, Python/CMake cannot find 3.12, or Vulkan headers are
 missing, stop and fix that step. Do not pass `--devices` with two ids: the
 first release trains on one GPU.
 
-Optional extras (`[remote]`, `[lpips]`, `[birefnet]`, `[da3]`, and
-`[tensorboard]`) install into the same venv. `scripts/setup.sh --with-init` is a
-convenience profile that selects both `[birefnet]` and `[da3]` without
-duplicating their dependency declarations. The locked `[da3]` extra includes
-the pinned upstream package and reviewed inference dependencies.
-
-```bash
-uv sync --locked --no-dev --no-editable --extra da3
-```
-
-LPIPS alone can be added to the core environment with:
-
-```bash
-uv sync --locked --no-dev --no-editable --extra lpips
-```
-
-Keep every required extra in the same exact sync command. For raw-RGB
-initialization plus final-test LPIPS, use:
-
-```bash
-uv sync --locked --no-dev --no-editable \
-  --extra birefnet --extra da3 --extra lpips
-```
+Use the setup flags above to select optional components. Advanced `uv sync`
+commands must likewise repeat every required `--extra` and the desktop CMake
+setting. Do not copy a single-extra sync command into an environment whose
+other capabilities you want to retain.
 
 The first scored LPIPS batch downloads the roughly 528 MiB TorchVision VGG16
 weights when they are absent from the Torch cache (normally

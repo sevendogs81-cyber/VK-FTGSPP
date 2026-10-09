@@ -1,3 +1,5 @@
+# Starter template, not a quality-reproduction recipe.
+# Set capture FPS, frame range, camera split and paths before use.
 # DA3 points filtered by calibrated silhouettes, then IBR recolored.
 # Prepare the versioned PLY set before training:
 #   ftgspp prepare points --method point_filtering \
@@ -6,6 +8,7 @@
 pipeline:
   mode: foreground
 data:
+  fps: 60.0  # Replace with the actual capture rate; not inferred from images.
   name: my_foreground_point_filtering
   root: ../data/my_scene
   frames: {start: 0, stop: 300}

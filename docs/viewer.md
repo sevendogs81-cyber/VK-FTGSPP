@@ -2,14 +2,16 @@
 
 The viewer supports a local GLFW / Dear ImGui window and a display-free browser
 mode for an SSH server. Both use the same native Vulkan 4DGS forward renderer.
-Here, `F` is the accumulated foreground color and `T` is transmittance. The
-local window reads the resident `float4(F.rgb, T)` buffer directly; the remote
-mode reads back, encodes and sends frames to the browser. The model stays on one
-server GPU. Headless export remains available without either UI.
+Choose the browser mode for an SSH server, the desktop mode for a Linux display,
+or headless export for unattended rendering. All three need a supported GPU on
+the machine rendering the model.
 
 ## SSH browser viewer (no server display)
 
-On the GPU server, install the small remote extra and start the server:
+On the GPU server, install the small remote extra if needed, then start the
+server. The command below is for a core + remote environment. **Repeat your
+other setup flags** (for example `--with-init --with-remote`) to keep those
+components; setup replaces the selected profile. Stop existing jobs before setup:
 
 ```bash
 bash scripts/setup.sh --with-remote
@@ -21,7 +23,7 @@ On your own computer, create an SSH tunnel, then open the **exact tokenized URL*
 printed by `ftgspp viewer` in a browser:
 
 ```bash
-ssh -L 8765:127.0.0.1:8765 USER@SERVER
+ssh -N -L 8765:127.0.0.1:8765 USER@SERVER
 # Browser on your computer: http://127.0.0.1:8765/?token=...  (use the printed token)
 ```
 
@@ -81,27 +83,14 @@ Pixel dimensions are rounded to whole pixels. The model's SH degree and dynamic
 threshold are preserved in both quality modes. Interactive frames use JPEG
 quality 88; PNG output is lossless.
 
-### Remote rendering and timing
-
-Frames keep FP32 F/T on the GPU. A Vulkan compute shader composes display
-options and packs RGBA8; packing and device-to-host (D2H) transfer share one
-submission and completion wait. Readback writes a reusable uint8 NumPy buffer
-for JPEG/PNG encoding (4 bytes/pixel plus a 4-byte non-finite status, instead of 16
-bytes/pixel). Unchanged render inputs reuse GPU F/T;
-exposure/background/mode changes only pack, read back and encode;
-identical image requests reuse the encoded bytes. The browser sends state
-deltas, waits for image decode before requesting the next frame, and stops its
-animation loop while paused. The server keeps only the latest pending view.
-The status bar reports host-observed total/forward/pack+readback time, cache reuse,
-renderer buffer allocation and encoded size. The frame protocol reports
-`rgba8_ms`, `readback_bytes` and `encode_ms`; composition and D2H have a combined
-host timing, not separate GPU timestamps. These are not end-to-end latency or FPS.
-
 Remote access is protected by a random per-process URL token and a same-origin
 WebSocket check. Keep the printed URL private. The server rejects non-loopback
 binds; SSH forwarding is the intended network transport.
 
 ## Local desktop installation
+
+If adding the desktop viewer to an existing environment, repeat its other
+setup flags alongside `--with-viewer` to retain those components.
 
 Linux x86_64, Python 3.12, a supported NVIDIA Vulkan GPU, and an X11 desktop
 (or XWayland providing Vulkan presentation) are required for the window.
@@ -289,9 +278,6 @@ EasyMocap path import/export is not included.
 ## Headless export
 
 Works with the default headless installation; no GLFW or display is needed.
-The headless export path also uses GPU RGBA8 packing and reuses its output array.
-The native window continues to display F/T directly; its existing FP32 screenshot
-interface and the Python CPU compositor remain available as reference paths.
 
 ```bash
 # Single calibrated view at a specified scene time.
@@ -319,47 +305,19 @@ lossless PNGs. Video is lossy, pads odd dimensions to even, and does not support
 transparent alpha. PNG export has no FFmpeg dependency. Failed or interrupted
 exports retain the completed frames; choose a new directory to rerun.
 
-## Verification and current limits
+## Troubleshooting
 
-The reproducible checks are:
+| Symptom | What to check |
+|---|---|
+| Missing `websockets` | Rerun setup with **all** required flags plus `--with-remote` |
+| Browser cannot connect | Keep the server and SSH tunnel running; use matching ports and the exact printed URL |
+| Invalid token or forbidden request | Use the current process's URL; restarting changes the token; do not replace localhost with the server IP |
+| Viewer already connected | Close the other tab/client; only one client is supported |
+| Missing display / desktop module | Use `--remote` on an SSH server; desktop needs a viewer build and X11/XWayland |
+| Black or cropped view | Select a calibrated camera, fit/reset, choose a recorded timestamp, and check exposure/background |
+| Motion looks soft | Pause and take a faithful PNG before judging training quality; interactive motion and JPEG/video can reduce detail |
+| Cannot export to an existing folder | Choose a fresh output directory; keep completed exports |
+| Missing/stale viewer metadata | See [assets](#assets); keep the native model and matching manifest together |
 
-```bash
-PYTHONPATH=src .venv/bin/python -m pytest dev/tests/test_viewer.py dev/tests/test_remote_viewer.py -q
-node --test dev/tests/viewer_browser.test.cjs
-.venv/bin/python dev/tests/gpu/check_viewer.py --device 0
-.venv/bin/python dev/tests/gpu/check_remote_viewer.py \
-  --model build/viewer/acceptance/gaussians.npz --device 0
-# On an accessible NVIDIA Vulkan desktop:
-.venv/bin/python dev/tests/gpu/check_viewer.py --device 0 --desktop \
-  --output build/viewer/desktop-acceptance
-
-# With FTGSPP_BUILD_VIEWER=ON and BUILD_TESTING=ON:
-build/viewer/viewer_display_test build/viewer/shaders 0
-build/viewer/viewer_pack_test build/viewer/shaders 0
-.venv/bin/python dev/tests/gpu/check_viewer_rgba8.py --model /path/to/run \
-  --device 0 --output build/viewer/rgba8/my-scene-quality
-
-# Run directory recovers calibration; use a bare NPZ for an inferred free view.
-.venv/bin/python dev/tests/gpu/benchmark_viewer.py --model /path/to/run \
-  --camera 0 --time 1 --time-step 0.033333333 --device 0 \
-  --output build/viewer/performance/my_scene.json
-```
-
-The GPU script checks all four SH levels at three timestamps against the native
-evaluation renderer, forced tile-overflow replay, repeat upload, resizing and an
-empty model. Its `--desktop` branch additionally checks idle reuse, window
-resizing, reload, playback and capture equivalence. The display executable uses
-the **production graphics pipeline** with a test-only offscreen color attachment
-to check orientation, 1:1 / bilinear sampling, backgrounds, exposure and Alpha/T
-without a display server.
-
-The contracts cover manifest validation, image composition, browser protocol,
-authorization, caching, resizing, path/session persistence and export failure
-handling. GPU acceptance compares all four SH levels and multiple timestamps
-with the training renderer, exercises tile-overflow replay and validates display
-and RGBA8 packing. A real desktop session is still required to verify WSI and
-human interaction on each target driver/window-system combination. Throughput
-depends on scene density, view, resolution, encoding and the SSH link; the
-reported per-stage timings are diagnostic rather than an FPS guarantee.
-Training preview, GT/depth diagnostics and multi-GPU presentation remain outside
-this version.
+For implementation and profiling details see [architecture](architecture.md#viewer-rendering).
+Maintainer acceptance commands are in [dev](../dev/README.md#viewer-verification).

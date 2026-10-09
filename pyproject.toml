@@ -64,9 +64,9 @@ sdist.include = [
     "dev/tests/**/*.py", "dev/tests/*.cjs", "dev/README.md",
     "docs/README.md", "docs/architecture.md", "docs/hardware.md", "docs/install.md",
     "docs/migration.md", "docs/performance.md", "docs/usage.md",
-    "docs/viewer.md",
+    "docs/viewer.md", "docs/data.md", "docs/configuration.md",
     "scripts/setup.sh", "scripts/README.md",
-    "examples/*.yaml", "examples/*.json",
+    "examples/*.yaml", "examples/*.json", "examples/*.py",
     "LICENSE", "LICENSES/*", "THIRD_PARTY.md",
     "CONTRIBUTING.md", "uv.lock",
 ]

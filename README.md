@@ -1,172 +1,114 @@
-# VK-FTGSPP（FastGS）
+# VK-FTGSPP (FastGS)
 
 ![VK-FTGSPP DNA-Rendering dynamic scene showcase](docs/assets/vk-ftgspp_dna_teaser.gif)
 
-**VK-FTGSPP accelerates explicit-velocity 4D Gaussian training with a native
-Vulkan pipeline.** On six SelfCap clips measured on an RTX 4090, the reported
-train-only timings show a **2.22× aggregate speedup** over the original
-CUDA + gsplat implementation, with individual-scene throughput ratios up to
-**3.14×**. Evaluation and hard separation are excluded; relocation is timed
-differently by the two implementations. See the
-[timing definitions and results](docs/performance.md).
+Train and view dynamic 3D scenes from multi-view image sequences with a native
+Vulkan 4D Gaussian renderer. Reconstruct the full scene, or use masks to
+reconstruct a foreground subject.
 
-The Linux/NVIDIA runtime uses Python 3.12 and keeps ordinary training Torch-free.
-Clone the repository, run one setup script, then use the `ftgspp` CLI. YAML
-examples live in the clone; the wheel provides the command rather than a public
-import library.
+- **Platform:** Linux x86_64, a supported NVIDIA GPU, and one GPU per run.
+- **Inputs:** synchronized multi-view images; existing camera calibration and
+  point clouds, or optional Depth Anything 3 (DA3) initialization. Foreground
+  reconstruction also needs masks, supplied by you or generated with BiRefNet.
+- **Outputs:** a native dynamic model, evaluation results, an optional browser
+  or desktop viewer, and PNG/MP4 rendering.
+- **License:** non-commercial research and educational use only. This is not
+  an OSI-approved or commercially permissive license. See [LICENSE](LICENSE)
+  and [third-party notices](THIRD_PARTY.md).
 
-**Training uses one GPU.** By default, one view produces one optimizer update.
-Foreground runs can opt into `train.batch_size: 4`: four sequential views share
-one FP32 mean gradient and one Adam update. See [training configuration](docs/usage.md).
-Two-device synchronous training is **in development**: the pair code,
-`dev/tests/gpu/` scripts, and the controlled GPU workflow stay in the tree for
-engineering, but they are not a supported user path.
+## Install
 
-**License:** non-commercial research and educational use only, not an
-OSI-approved or commercially permissive open-source license. Read [LICENSE](LICENSE)
-and [third-party notices](THIRD_PARTY.md) before use or redistribution.
+You need Linux x86_64 with glibc 2.28+, an installed NVIDIA driver with Vulkan
+support, and network access. The installer provides Python 3.12, uv, Slang and
+build dependencies; missing system packages require apt-get and root/sudo.
+Check [GPU compatibility](docs/hardware.md) before installing.
 
-## Requirements
-
-- Linux x86_64 with glibc 2.28+ and a supported NVIDIA Vulkan GPU; this does
-  not include every NVIDIA model
-- **Python 3.12.x** (3.11 and 3.13 will fail the native build)
-- `build-essential` with a C++17 compiler, `git`, `curl`, CA certificates,
-  `libvulkan-dev`, and FFmpeg
-  with `ffprobe` and `libx264` (installed or checked by `scripts/setup.sh`)
-- Slang **2026.10** with `slangc` on `PATH` (the setup script pins this)
-- [uv](https://docs.astral.sh/uv/) **0.11.29**
-
-The compatibility decision is capability-based. A supported device must be a
-physical NVIDIA GPU that `ftgspp doctor` reports as **`VIABLE`**;
-`POSSIBLY VIABLE` is not sufficient for the supported training path. Native
-training requires the compiled subgroup, workgroup, shared-memory, push-constant,
-Int16/Int64, and float32 buffer atomic-add limits. See the complete
-[hardware compatibility, runnable-model estimate, and validation matrix](docs/hardware.md).
-
-## Installation
+Choose your optional components **before running setup**. The following installs
+the lightweight, Torch-free core and the SSH browser viewer:
 
 ```bash
 git clone https://github.com/sevendogs81-cyber/VK-FTGSPP.git
 cd VK-FTGSPP
-bash scripts/setup.sh
-source .venv/bin/activate
-```
-
-The default is the lightweight, Torch-free Vulkan training runtime for users
-with prepared masks and PLYs. Starting from raw RGB instead uses:
-
-```bash
-bash scripts/setup.sh --with-init
-```
-
-That adds BiRefNet-HR and DA3. `--with-birefnet` and `--with-da3` install only
-one preparation capability. `--with-lpips` adds the optional locked final-test
-metric without enabling it during training. Full component requirements are in
-[docs/install.md](docs/install.md).
-
-## First training run
-
-Work from the clone. Index an existing rectangular multi-view grid (pixels
-stay in place):
-
-```text
-data/my_capture/images/<camera_id>/<numeric-frame>.(png|jpg|...)
-```
-
-```bash
-ftgspp prepare dataset --images data/my_capture/images --fps 30 --eval-cameras 3
-```
-
-`prepare` writes a starter YAML and prints initialization instructions. Replace
-`3` with a hold-out camera that already exists under `images/`, or omit
-`--eval-cameras`. Training uses the Vulkan device ID reported by
-`ftgspp doctor`, which may differ from the `nvidia-smi` index.
-
-With camera calibration, scene-mode `init.backend: auto` uses a complete
-keyframe RGB PLY set under `data/my_capture/points_stride10/`, or generates
-points with DA3. Uncalibrated captures require DA3 to estimate cameras as well.
-Install DA3 with `--with-da3` or `--with-init` and make its weights available
-locally or through the network when needed. See [usage](docs/usage.md) for data
-requirements, resume, evaluation, export and foreground reconstruction.
-
-Once calibration and PLYs are ready, or DA3 is available:
-
-```bash
-ftgspp train --config data/my_capture/ftgspp.yaml --devices 0
-```
-
-## View and render results
-
-Headless PNG and optional FFmpeg video export work with the default install:
-
-```bash
-ftgspp render --run /path/to/run --camera 0 --time 1.25 \
-  --device 0 --output frames/still
-```
-
-For a local GLFW / Dear ImGui window, build the desktop option and open a run:
-
-```bash
-bash scripts/setup.sh --with-viewer
-ftgspp viewer --run /path/to/run --device 0
-```
-
-On an SSH GPU server without a display session, install the browser server and
-forward its loopback port:
-
-```bash
 bash scripts/setup.sh --with-remote
-ftgspp viewer --remote --run /path/to/run --device 0
+source .venv/bin/activate
+ftgspp doctor --devices 0
 ```
 
-Run the tunnel command on your local computer:
+Use a NVIDIA device reported as `VIABLE`. Vulkan IDs may differ from
+`nvidia-smi`; replace `0` in subsequent commands with the selected Vulkan ID.
+The browser computer does not need a GPU; rendering runs on the server.
+
+| Your initialization inputs | Setup flags, including browser access |
+|---|---|
+| Calibration and prepared point clouds; masks if using foreground mode | `--with-remote` |
+| Masks are ready; generate points or estimate carving bounds with DA3 | `--with-da3 --with-remote` |
+| Generate both foreground masks and geometry from RGB | `--with-init --with-remote` |
+
+**Setup reruns replace the selected optional components.** Repeat every flag
+you want to keep; running only `--with-remote` after `--with-init` removes the
+initialization extras. Stop jobs using `.venv` before changing it.
+See [installation](docs/install.md) for desktop, offline, manual and no-sudo options.
+
+## Check the complete workflow
+
+This small generated fixture requires no data or model download. It checks that
+training and rendering work; it is **not a reconstruction-quality benchmark**.
+Use a new output directory:
 
 ```bash
-ssh -L 8765:127.0.0.1:8765 USER@SERVER
+python examples/make_tiny_scene.py --output /tmp/ftgspp-tiny
+ftgspp train --config /tmp/ftgspp-tiny/ftgspp.yaml --devices 0
+ftgspp eval --run /tmp/ftgspp-tiny/run --device 0
+ftgspp render --run /tmp/ftgspp-tiny/run --camera 0 --time 0 \
+  --device 0 --output /tmp/ftgspp-tiny/render
 ```
 
-Open the exact tokenized URL printed by the server. Both viewers use the native
-Vulkan 4DGS renderer and support capture/free cameras, playback, screenshots,
-camera paths and export. See [viewer setup, controls and limits](docs/viewer.md).
+Success produces `run/gaussians.npz`, `run/config.resolved.yaml`,
+`run/viewer_manifest.json`, and `render/000000.png`. The image is deliberately
+a tiny synthetic colored target; a successful exit does not establish real-scene
+quality. The fixture uses 32×32 images, two frames and 64 Gaussians.
 
-## Next
-
-- [Hardware compatibility, estimated runnable models, and validated GPUs](docs/hardware.md)
-- [Foreground, DA3, SelfCap, research YAML](docs/usage.md)
-- [Local, SSH browser and headless viewers](docs/viewer.md)
-- [SelfCap timing and B1/B4 throughput](docs/performance.md)
-- [Architecture](docs/architecture.md)
-- [Migration from older FTGSPP layouts](docs/migration.md)
-- [Maintainer notes](CONTRIBUTING.md)
-
-## Repository layout
-
-```text
-VK-FTGSPP/
-├── src/ftgspp/         # installed Python CLI and orchestration
-├── native/            # Vulkan C++ runtime and Slang shaders
-├── examples/          # public YAML and manifest templates
-├── scripts/           # supported one-command installer
-├── docs/              # hardware, install, usage, viewer and architecture
-├── dev/               # tests and unsupported research tools
-├── .github/workflows/  # CPU, artifact and controlled GPU checks
-├── pyproject.toml      # package, dependency and build definition
-└── uv.lock             # reproducible Python dependency lock
-```
-
-## Development
+To inspect it interactively, on the GPU server run:
 
 ```bash
-uv sync --locked --python 3.12 --extra dev --no-install-project
-uv run --no-sync pytest
+ftgspp viewer --remote --run /tmp/ftgspp-tiny/run --device 0
 ```
 
-Use this only when changing code. It rewrites `.venv` from the lockfile and
-does **not** install the wheel; CPU tests skip `_ftgspp_vk` when it is
-missing. Use the environment created by `scripts/setup.sh` to run `ftgspp`.
-Shader or C++ changes need `slangc` on `PATH`. Rebuild and install with
-`uv pip install --python .venv/bin/python --reinstall --no-deps .`;
-`uv build --python 3.12` only creates an artifact and does not install it.
-CPU contract tests and native GPU numerical tests are engineering-correctness
-gates, not evidence of reconstruction quality.
+On your computer, keep this tunnel open and visit the exact tokenized URL
+printed by the viewer:
+
+```bash
+ssh -N -L 8765:127.0.0.1:8765 USER@SERVER
+```
+
+On the same machine, open the printed URL directly. Only one browser client
+can connect at a time. See [viewer controls and export](docs/viewer.md).
+
+## Train your own capture
+
+Follow [the training guide](docs/usage.md) from start to finish. Choose
+**scene** for full-frame RGB, or **foreground** for a masked subject. The guide
+keeps the same generated config through preparation, training and viewing.
+
+| Task | Guide |
+|---|---|
+| Arrange images, masks, calibration and timestamps | [Data requirements](docs/data.md) |
+| Understand defaults and change training settings | [Configuration](docs/configuration.md) |
+| Resume, evaluate and inspect output quality | [Usage and troubleshooting](docs/usage.md) |
+| View, capture or export a trained model | [Viewer](docs/viewer.md) |
+| Understand measured speed and its limits | [Performance](docs/performance.md) |
+| Develop or rebuild native code | [Maintainer notes](CONTRIBUTING.md) |
+
+The YAML files in `examples/` are starter templates, not recipes that reproduce
+the showcase. They require your capture's FPS, frame range and camera split.
+A downloadable real-scene quality reproduction bundle is not included in this
+release; the showcase and timing tables are not acceptance targets for arbitrary
+captures. See [how to review reconstruction quality](docs/usage.md#check-results).
+
+Historical SelfCap timings report a 2.22× aggregate train-only speedup over the
+original CUDA + gsplat implementation, with different relocation accounting.
+See [definitions and results](docs/performance.md) before comparing performance.
+
+Source code lives in `src/ftgspp/` and `native/`; user examples in `examples/`;
+engineering tests and unsupported tools in `dev/`. Two-device training remains
+an engineering path outside the supported user workflow.

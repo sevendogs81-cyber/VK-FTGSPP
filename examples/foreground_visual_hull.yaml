@@ -1,3 +1,5 @@
+# Starter template, not a quality-reproduction recipe.
+# Set capture FPS, frame range, camera split and paths before use.
 # Calibrated visual-hull + IBR, the default foreground geometry path.
 # Prepare the PLY set first. DA3 supplies automatic training-only bounds:
 #   ftgspp prepare points --method carving \
@@ -9,6 +11,7 @@
 pipeline:
   mode: foreground
 data:
+  fps: 60.0  # Replace with the actual capture rate; not inferred from images.
   name: my_foreground_visual_hull
   root: ../data/my_scene
   frames: {start: 0, stop: 300}

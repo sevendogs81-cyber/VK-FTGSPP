@@ -1,382 +1,231 @@
-# Usage
+# Train a capture
 
-Work from the clone with the environment created by `scripts/setup.sh` activated
-(`source .venv/bin/activate`). Paths inside a YAML file are relative to that
-file; CLI paths are relative to the current directory. Without `--output`, the
-run directory follows `run.output_path`, whose default is `runs/<name>` beside
-the YAML. Paths supplied through `--set` are relative to the current directory.
+First complete [installation](install.md) and the [tiny workflow check](../README.md#check-the-complete-workflow).
+Run commands from the clone with `.venv` activated. Review the
+[data requirements](data.md) before preparing your own images.
 
-## First training run (scene, one GPU)
+## 1. Choose a mode and initialization route
 
-Bring an existing rectangular multi-view grid; pixels are indexed in place,
-not copied:
-
-```text
-data/my_capture/images/<camera_id>/<numeric-frame>.(png|jpg|...)
-```
-
-A flat `c<camera>-f<six-digit-frame>.*` directory is also accepted. Camera
-calibration is optional: an EasyMocap `intri.yml` / `extri.yml` pair at the
-scene root is used when present.
-
-`--eval-cameras` must be camera IDs that already exist in the grid (the
-directory names under `images/`). Replace `3` below with your hold-out
-camera, or omit the flag to train on every camera with no hold-out.
-
-```bash
-ftgspp prepare dataset --images data/my_capture/images --fps 30 --eval-cameras 3
-```
-
-That writes `data/my_capture/manifests/dataset.json` and
-`data/my_capture/ftgspp.yaml`, then prints the required initialization step.
-The starter YAML pins `init.seed: 0` so later `train.seed` sweeps reuse one
-geometry cache. Default `pipeline.mode` is `scene` (mask-free
-`scene_rgb_v1`).
-
-**Choose an initialization source before the first `train`.** With camera
-calibration, `init.backend: auto` looks for a complete keyframe RGB PLY set at
-`${data.root}/points_stride${init.keyframe_stride}/` (starter stride 10 →
-`data/my_capture/points_stride10/`). Files are `f<six-digit-frame>.ply` for
-each keyframe (`f000000.ply`, `f000010.ply`, …) and the last selected frame.
-If that set is incomplete, training invokes Depth Anything 3 (DA3) during
-initialization. Uncalibrated captures also require DA3 to estimate cameras.
-Put PLYs elsewhere with `init.points_path`. The default lightweight install
-expects calibration and a complete PLY set. Run
-`bash scripts/setup.sh --with-da3` (or `--with-init`) when DA3 is needed.
-
-```bash
-ftgspp train --config data/my_capture/ftgspp.yaml --devices 0
-```
-
-`examples/scene.yaml` is the same field template if you prefer to copy it
-into the clone rather than use the generated file.
-
-For arbitrary filenames, author an `ftgspp-dataset-v1` JSON with `frame`,
-`camera_id`, `rgb_path`, and optional per-view `timestamp`, then run
-`ftgspp prepare dataset --manifest views.json`. Timestamps must cover all
-selected views or none; optional `rgb_sha256` values are verified. SelfCap
-layouts use `ftgspp prepare selfcap --scene-root ...`.
-
-Repeated `--set key=value` applies validated overrides. Resume loads the
-saved effective plan and rejects `--output`, `--devices`, `--pipeline`, and
-`--set`:
-
-```bash
-ftgspp train --resume data/my_capture/runs/my_capture
-ftgspp eval --run data/my_capture/runs/my_capture --device 0
-```
-
-Hard separation (HS) is optional. When it is enabled in the initial
-configuration, ordinary training first selects its best hold-out snapshot and
-HS starts from that snapshot. A run originally completed without HS can add it
-later without retraining the ordinary phase:
-
-```bash
-ftgspp train --resume data/my_capture/runs/my_capture --hard-separation
-```
-
-This requires `model.marginal_gating: true` and `train.batch_size: 1` in the
-original run. The ordinary selection is retained as `ckpt/main_selected.npz`;
-an HS run additionally retains `ckpt/hard_final.npz`. These phase checkpoints
-contain the model, its matching color correction and the run identity needed for the phase
-handoff. Numbered checkpoints and `latest.json` remain exact Adam resume state.
-The default HS schedule is 3000 optimizer steps with one group-local relocation
-at local step 1500. It can be adjusted without changing the main schedule:
-
-```yaml
-train:
-  hard_separation_steps: 3000
-  hard_relocation_steps: [1500]  # [] disables HS relocation
-```
-
-HS relocation always scores donors from opacity and accumulated image gradient;
-the main phase may still use `train.relocation.score_mode: gate_included`.
-
-A finished run already contains `gaussians.npz` and `gaussians_4dgs.ply`.
-For a main-only scene run this is the best hold-out joint full-frame PSNR+SSIM
-snapshot. Foreground runs use joint `foreground_psnr`+`foreground_ssim` over
-the reference mask interior. This selection is disabled when `train.export_best`
-is false; an HS run exports the terminal HS model.
-Standalone `ftgspp eval` streams the model SHA-256 check
-and loads only this selected model; it does not restore an optimizer checkpoint.
-`ftgspp export` only writes another PLY path:
-
-```bash
-ftgspp export --model data/my_capture/runs/my_capture/gaussians.npz \
-  --output model.ply
-```
-
-Default checkpoints remain V6; local batch four uses V7. Resume preserves
-the saved batch size and algorithm identity and rejects an
-incompatible configuration. Hold-out eval shares `train.checkpoint_interval`
-with optional optimizer snapshots (`train.save_checkpoints`).
-The `scene` profile enables color correction, marginal gating,
-gate-included relocation scoring, and hard separation by default. The
-`foreground` profile enables marginal gating and gate-included relocation
-scoring while leaving color correction and hard separation off. Explicit YAML
-settings override these profile defaults. When HS is enabled, it binarizes
-persistent/transient gates, preserves and refines velocity independently,
-restricts relocation to the same gate group, and exports the terminal hard-phase
-model.
-
-Leave DA3 sizing knobs unset. The total experiment budget remains
-`init.num_gaussians`; initialization dynamically resolves DA3 work from that
-budget, `init.keyframe_stride`, `data.frames`, native image size, camera count,
-and foreground-mask coverage. It then reallocates the total across keyframes
-from candidate count, spatial extent, shape complexity, and inter-frame motion.
-`init.da3.quality: auto` (default) derives resolution, fusion cameras, and
-the dense-cache cap. Set `quality: fast|balanced|high` or explicit sizing
-only for a frozen recipe.
-
-## Foreground reconstruction
-
-For a masked subject capture, `pipeline.mode: foreground` derives
-`composite_v1`, requires masks, defaults to calibrated visual-hull carving,
-trains with random solid backgrounds, and ranks checkpoints by the joint
-foreground PSNR and foreground SSIM score over valid mask-interior windows.
-`ftgspp train --config ... --pipeline foreground` is the equivalent CLI
-override. Resume always reuses the saved mode.
-
-### Batch size
-
-Single-device foreground training supports `train.batch_size: 4` (default: 1).
-These modes are called B4 and B1, respectively.
-Four sequential views are rendered at the same parameters, their complete
-gradients (including regularization) are averaged on the GPU in FP32, and Adam
-updates once. This requires `distributed.mode: off`,
-`distributed.sampling_policy: flat_epoch`,
-`distributed.world_size_lr_scaling: none`, `train.color_correction: false`, and
-`train.hard_separation: false`.
-Learning rates, Adam betas and epsilon are not automatically scaled.
-
-`train.iterations`, LR decay, relocation, logging and checkpoint intervals count
-**optimizer updates**. `views_seen` and SH activation count image exposures.
-For equal exposure to a 200,000-update B1 run, use 50,000 updates at B4 and divide
-update-based interval/boundary settings by four, retaining the LR endpoint ratios.
-This matches the exposure schedule, not the number of Adam updates or convergence.
-The flat-epoch view order and random backgrounds match the corresponding B1
-exposure slots. Overflow replays all four views before committing any update.
-Only a complete batch may be checkpointed. Backward accumulates directly into
-the existing Adam gradient buffers, with no separate mean buffer or copy-back.
-The fourth view's parameter backward, final averaging and Adam share the B1
-fused shader at commit. Non-logging batches queue the first three views and
-validate completion and overflow for the whole batch before updating. Logged
-batches retain per-view loss readback. This requires no additional setting.
-For `N` Gaussians, expect approximately `260 * N` extra bytes over fused B1 for
-FP32 gradients, plus padding and relocation backup buffers. The B1 fused update
-is unchanged.
-
-### Masks and geometry preparation
-
-The mask location depends on `data.masks.source`:
-
-- `data.masks.source: alpha` — RGBA images; the soft mask is the alpha
-  channel (RGB stays straight/unpremultiplied).
-- `data.masks.source: external` — a mask file per view. If you do not set
-  `data.masks.manifest_path` / `data.masks.root`, the profile fills
-  `${data.root}/manifests/masks.json`.
-
-```bash
-ftgspp prepare dataset --images data/my_scene/images --fps 30 \
-  --pipeline foreground --mask-source alpha --eval-cameras 3
-```
-
-BiRefNet-HR is an optional preparation component. For the complete raw-RGB
-foreground workflow, install it together with DA3 before generating masks:
-
-```bash
-bash scripts/setup.sh --with-init
-ftgspp prepare masks --images data/my_scene/images \
-  --output data/my_scene/masks/birefnet_hr
-```
-
-Use `--with-birefnet` alone when a point-cloud set or explicit carving bounds
-already exists and only mask generation is needed.
-
-The pipeline pins `ZhengPeng7/BiRefNet_HR` model code and weights to an audited
-revision and uses its 2048-square inference size. CUDA uses float16 weights and
-autocast and starts with a batch of two; an
-out-of-memory batch is retried at a smaller size. Use `--precision float32` for
-a numerical control, `--batch-size 1` for a fixed low-memory run, or select a
-specific model revision with `--model-revision`. The resolved model,
-revision, resolution, precision, effective batch sizes and throughput are
-recorded in the manifest. Image decode/hash is prefetched on CPU while the
-current batch runs; restored masks, optional raw arrays and QA overlays are
-encoded by bounded output workers. Shape-compatible masks are restored as a
-batch, and each input/output file is hashed from the bytes already being read
-or written.
-
-That command writes `data/my_scene/manifests/masks.json` when `--output`
-is `<scene>/masks/<name>`. The default geometry path is `carving`. It first
-generates or reuses the configured foreground DA3 cloud, derives robust
-training-only world bounds from it, and carves the mask-supported surface:
-
-```bash
-ftgspp prepare points --method carving \
-  --config examples/foreground_scene.yaml \
-  --output data/my_scene/points_vhull_ibr_stride10 \
-  --resolution 192 --coarse-resolution 48
-ftgspp train --config examples/foreground_scene.yaml --devices 0
-```
-
-Carving uses CUDA automatically when Torch and a CUDA device are available,
-otherwise it uses NumPy on CPU. Projection is chunked and a CUDA OOM retries
-with a smaller chunk. With `--coarse-resolution`, the fine pass enumerates only
-cells covered by the dilated coarse hull. CUDA computes support and keep votes
-on-device and transfers only retained indices and diagnostics. The same
-`--device` setting covers point filtering and IBR coloring. In `auto` mode,
-all implemented projection, sparse z-buffer, robust color, unprojection,
-consistency, and voxel-fusion accelerators use CUDA whenever it is available.
-`--device cpu` forces the deterministic CPU path. An explicit `--bounds ...`
-skips DA3-based bound estimation; `--input-points` derives bounds from an
-existing DA3/user PLY set.
-
-The second method directly filters the generated/reused DA3 PLYs before IBR
-recoloring:
-
-```bash
-ftgspp prepare points --method point_filtering \
-  --config examples/foreground_scene.yaml \
-  --output data/my_scene/points_vhull_filtered_stride10
-```
-
-Train that filtered set with the matching explicit backend:
-
-```bash
-ftgspp train --config examples/foreground_scene.yaml --devices 0 \
-  --set init.backend=point_filtering \
-  --set init.points_path=data/my_scene/points_vhull_filtered_stride10
-```
-
-Each generated manifest records the selected method. The `carving` and
-`point_filtering` backends accept only a complete, integrity-checked manifest
-for that exact method. `--input-points` remains available to reuse an existing
-DA3/user PLY directory.
-
-| Method | Geometry source | Practical tradeoff |
+| Goal | Mode | Inputs for the route below |
 |---|---|---|
-| `carving` (default) | Mask-supported surface band inside DA3/user-derived bounds | Stronger silhouette control and less dependence on DA3 point placement; voxel projection costs more time and memory |
-| `point_filtering` | DA3/user surface points retained by multi-view masks | Usually faster because it skips the voxel grid; it inherits missing surfaces, depth noise, and sampling bias from the source cloud |
+| Reconstruct the complete RGB image | `scene` | Images plus calibration and existing points, or DA3 |
+| Reconstruct only a masked subject | `foreground` | Calibrated images, masks, and carving initialization |
 
-Both methods produce surface candidates before the shared Gaussian initializer.
-Carving's voxel volume is an intermediate occupancy representation; the default
-`surface_band` output does not fill the object interior. Shared IBR coloring
-projects and aggregates points in vectorized arrays, and its robust fusion is
-chunked to bound temporary memory.
+For uncalibrated foreground captures, use the [direct DA3 route](#other-initialization-routes).
+The modes have different losses, backgrounds and defaults; see
+[configuration](configuration.md#mode-defaults). Foreground mode is not an installation extra.
 
-### Evaluation
+## 2. Index the images
 
-The foreground evaluator reports black/white-background PSNR/SSIM, foreground
-PSNR and foreground SSIM, silhouette IoU, boundary F-score, background opacity
-leakage, foreground holes and mask consistency. An optional validity map
-separately marks pixels to exclude from loss and evaluation.
-
-## DA3 point generation
-
-`bash scripts/setup.sh --with-da3` and the `[da3]` extra install the pinned
-Depth Anything 3 0.1.1 inference stack. `--with-init` installs it together
-with BiRefNet-HR. The lock replaces the upstream package's broad
-demo/server/training metadata with the direct inference dependencies used here;
-the runtime has been tested with this project's NumPy 2/OpenCV 4.12 stack. The upstream
-[Depth Anything 3](https://github.com/ByteDance-Seed/depth-anything-3)
-weights can be selected with `init.da3.model_path` for offline use. With
-`model_path` unset, the default
-`init.da3.model_name` (`depth-anything/DA3-BASE`) may try a network download.
+Set these values for your capture. `FPS=30` and camera `3` are examples, not
+inferred metadata. `CAPTURE` must contain your images; `RUN` must be a new output
+path. Keep these variables for all subsequent commands in this guide.
 
 ```bash
-uv sync --locked --no-dev --no-editable --extra da3
+CAPTURE=/absolute/path/to/my_capture
+CONFIG="$CAPTURE/ftgspp.yaml"
+RUN=/absolute/path/to/runs/my_capture
+FPS=30
+EVAL_CAMERA=3
+DEVICE=0  # Vulkan ID verified with ftgspp doctor
 ```
 
-DA3 uses CUDA when available and otherwise falls back to CPU
-(`init.da3.device`). Its unprojection, cross-view depth consistency, and voxel
-winner selection follow the resolved model device; masks, cache I/O, and
-control flow remain on CPU. The manifest records the postprocessing device and
-the L2 cache identity includes the CUDA-capable implementation version. That
-ordinal can differ from the Vulkan `--devices` ID used for training.
-`init.backend: da3` uses its cloud directly; uncalibrated captures must use DA3
-because visual-hull projection requires a camera rig.
+Choose **one** indexing command. It writes a dataset manifest and `CONFIG`;
+it does not copy the images or complete initialization.
+
+For a full scene:
 
 ```bash
-ftgspp train --config examples/foreground_scene.yaml --devices 0 \
-  --set init.backend=da3
+ftgspp prepare dataset --images "$CAPTURE/images" --fps "$FPS" \
+  --eval-cameras "$EVAL_CAMERA" --config "$CONFIG" --pipeline scene
 ```
 
-## Research controls
-
-- [examples/foreground_fixed_black.yaml](../examples/foreground_fixed_black.yaml)
-  keeps `composite_v1` but fixes the solid background to black.
-- [examples/foreground_visual_hull.yaml](../examples/foreground_visual_hull.yaml)
-  spells out the default calibrated visual-hull + IBR path.
-- [examples/foreground_point_filtering.yaml](../examples/foreground_point_filtering.yaml)
-  exposes the DA3-cloud filtering route with `init.backend: point_filtering`.
-
-For the visual-hull example:
+For foreground with existing external masks:
 
 ```bash
-ftgspp prepare points --method carving \
-  --config examples/foreground_visual_hull.yaml \
-  --output data/my_scene/points_vhull_ibr_stride10 \
-  --resolution 192 --sampling surface_band
-ftgspp train --config examples/foreground_visual_hull.yaml --devices 0
+ftgspp prepare dataset --images "$CAPTURE/images" --fps "$FPS" \
+  --eval-cameras "$EVAL_CAMERA" --config "$CONFIG" \
+  --pipeline foreground --mask-root "$CAPTURE/fmasks"
 ```
 
-## Locked final-test evaluation
-
-A locked final test set is evaluated without entering checkpoint selection.
-Create an independent `ftgspp-final-test-v2` manifest using the
-[template](../examples/final_test_manifest.example.json), then validate it
-against a completed run with `export_selection.json`:
+For foreground with RGBA images, replace `--mask-root ...` with
+`--mask-source alpha`. For RGB that needs new masks, omit both flags and
+then run:
 
 ```bash
-ftgspp prepare final-test --run runs/my_foreground_scene \
-  --manifest data/my_scene/manifests/final_test.json
-ftgspp eval --run runs/my_foreground_scene --device 0 \
-  --test-manifest data/my_scene/manifests/final_test.json
+ftgspp prepare masks --images "$CAPTURE/images" \
+  --output "$CAPTURE/masks/birefnet_hr"
 ```
 
-LPIPS is an optional metric on this locked final-test command only. It never
-loads during training, checkpoint selection, or the training-end full
-validation. Install the `[lpips]` extra, then add `--lpips`:
+Mask generation requires BiRefNet (`--with-init` or `--with-birefnet` at setup).
+Skip it when using existing masks or alpha, even if the indexing command prints
+a generic mask-generation suggestion. Do not switch to an `examples/*.yaml`
+after indexing: that would discard your generated FPS, frame range and split.
+
+## 3. Prepare initialization
+
+**Scene:** with calibration, `init.backend: auto` consumes a complete keyframe
+RGB PLY set in `points_stride10/`; otherwise it uses DA3. For an uncalibrated
+scene, DA3 estimates cameras too. Install `--with-da3` before training when
+needed. Check [point-cloud naming](data.md#existing-point-clouds).
+
+**Foreground:** inspect `CONFIG` and use its exact `init.points_path` as
+`POINTS` below. For at least ten frames, the generated path is normally
+`points_vhull_ibr_stride10`; shorter captures use a smaller stride.
 
 ```bash
-bash scripts/setup.sh --with-lpips
-ftgspp eval --run runs/my_foreground_scene --device 0 \
-  --test-manifest data/my_scene/manifests/final_test.json --lpips
+POINTS="$CAPTURE/points_vhull_ibr_stride10"
+ftgspp prepare points --method carving --config "$CONFIG" \
+  --output "$POINTS" --resolution 192 --coarse-resolution 48
 ```
 
-Use `bash scripts/setup.sh --with-init --with-lpips` when the same environment
-must retain both raw-RGB initialization components as well.
+This command uses the configured masks and training cameras. By default it uses
+DA3 to estimate bounds, so the DA3 extra and weights are required. If you know
+the subject's world-space bounds, append `--bounds xmin ymin zmin xmax ymax zmax`
+with six numeric values instead; this skips DA3 bound estimation. Explicit
+bounds plus `--device cpu` allow preparation in the Torch-free core environment.
+[Bounds must match your calibration](data.md#camera-calibration).
 
-For scene mode it scores each complete RGB frame. For foreground mode it
-scores a black-composited ROI determined only by the reference mask. Equal
-image shapes are batched and consumed while rendering, so memory does not grow
-with the number of test views. `--lpips-device`, `--lpips-batch-size`, and
-`--lpips-min-size` control the optional worker. The default `auto` device
-matches the Vulkan GPU to CUDA when possible, reduces the batch after CUDA OOM,
-and can fall back to CPU. Results and per-view skip reasons are written only to
-`final_test_metrics.jsonl`.
+Before training, inspect the masks and generated PLYs for coverage, alignment and
+color. A successful preparation command alone does not establish correct geometry.
 
-Validation rejects any camera/frame, path, or RGB hash already used by
-training or checkpoint selection. Official evaluation is `ftgspp eval`.
-Scripts under `dev/tools/` are unsupported research helpers.
+## 4. Train and resume
 
-See [installation options](install.md) for optional components. The native
-model-flow renderer remains diagnostic only.
+Review FPS, frame range, train/eval cameras, image scale and initialization path
+in `CONFIG`. The [configuration guide](configuration.md) explains inherited
+settings and starter budgets. Then run:
 
-## SelfCap video preparation
+```bash
+ftgspp train --config "$CONFIG" --output "$RUN" --devices "$DEVICE"
+```
 
-The default setup installs `ffmpeg` and `ffprobe` for video extraction. If you
-used `--skip-apt` or a manual installation, both commands must be on `PATH`.
+On success the run contains the selected model, resolved config and viewer
+metadata. Defaults use 30,000 main optimizer updates; scene mode additionally
+enables a 3,000-step hard-separation phase. Foreground leaves that phase off.
+Actual time and memory depend on your scene and hardware.
+
+Resume an interrupted run from its saved plan:
+
+```bash
+ftgspp train --resume "$RUN"
+```
+
+Resume rejects new `--config`, `--output`, `--devices`, `--pipeline` and `--set`
+overrides. Editing the original YAML does not alter a resumed run. Use a fresh
+output directory for a changed experiment. See [optional hard separation](configuration.md#hard-separation)
+for adding that phase to a completed compatible run.
+
+## Check results
+
+```bash
+ftgspp eval --run "$RUN" --device "$DEVICE"
+ftgspp render --run "$RUN" --camera 0 --time 0 \
+  --device "$DEVICE" --output "$RUN/preview"
+ftgspp viewer --remote --run "$RUN" --device "$DEVICE"
+```
+
+Choose a scene time within the recorded range; `0` suits a zero-based capture.
+`--camera` is the viewer's camera-list index, unlike the dataset camera IDs used
+for splitting. The render output directory must be new. Follow the
+[SSH viewer instructions](viewer.md#ssh-browser-viewer-no-server-display) when
+viewing from another computer.
+
+| Run artifact | Purpose |
+|---|---|
+| `config.resolved.yaml` | Effective settings, including profile defaults and resolved paths |
+| `run.log`, `train_metrics.jsonl` | Training progress and optimization diagnostics |
+| `gaussians.npz`, `viewer_manifest.json` | Native model and matching camera/time metadata for viewing |
+| `export_selection.json` | Which model was exported and how it was selected |
+| `metrics.jsonl` | Sampled checkpoint-selection/ordinary evaluation scores |
+| `full_validation_metrics.jsonl` | Foreground diagnostic validation written at training completion |
+| `ckpt/` | Saved checkpoints for resume and phase handoff |
+| `gaussians_4dgs.ply` | Compatibility export; omits dynamic gate state and cannot replace native NPZ viewing |
+| `performance_summary.json` | Optimizer timing, not total preparation-to-result wall time |
+
+On this version, ordinary `eval` uses the sampled selection evaluator. Do not
+interpret it as an independent final test or assume every frame was evaluated.
+Foreground training completion also writes the full diagnostic validation file.
+Hold-out cameras used to select a checkpoint are a **validation set**. An
+independent final test uses a separately locked manifest below.
+
+Inspect the beginning, middle, end and fast-motion portions from multiple
+held-out cameras. Compare GT and reconstruction at identical camera poses and
+scene timestamps. Use lossless PNGs for fine detail; viewer motion can use a
+reduced resolution and MP4 is lossy. Check masks, geometry and synchronization
+before changing iteration counts when you see missing limbs, blur or ghosting.
+
+The tiny fixture checks execution only. The generic templates are not tuned
+quality presets, and this release does not bundle a real-scene reproduction
+package with quality acceptance thresholds. Do not infer showcase quality from
+a passing smoke test or from the train-only speed tables.
+
+## Other initialization routes
+
+Use these only after choosing their inputs. Preserve the same `CONFIG` and
+write a new run for each experiment.
+
+- **Existing foreground PLYs:** set `init.backend: points` and `init.points_path`
+  in `CONFIG`. The PLYs must share the calibration's world coordinates.
+- **Direct DA3, including uncalibrated captures:** set `init.backend: da3` in
+  `CONFIG`; masks are still required for foreground. Skip the carving step.
+- **Point filtering:** set `init.backend: point_filtering` and a fresh
+  `init.points_path` in `CONFIG`, then run the following before training:
+
+```bash
+ftgspp prepare points --method point_filtering --config "$CONFIG" \
+  --output "$CAPTURE/points_filtered"
+```
+
+Set `init.points_path` to that exact output. Filtering uses DA3 points, or
+existing PLYs supplied with `--input-points`. Carving builds a mask-supported
+surface band; filtering inherits the supplied point cloud's coverage and noise.
+Both generated caches validate method, input identity and PLY hashes.
+
+For offline DA3, set `init.da3.model_path` to a local model. The default model is
+`depth-anything/DA3-BASE`; leave sizing knobs unset initially. The preparation
+`--device` and DA3 device refer to CPU/CUDA, not the training Vulkan ordinal.
+See [installation](install.md) and [configuration](configuration.md).
+
+SelfCap video layouts have a separate adapter (FFmpeg/ffprobe required):
 
 ```bash
 ftgspp prepare selfcap --scene-root /path/to/scene \
   --init-backend da3 --write-config scene.yaml
 ```
 
-## Two-device training (in development)
+Check `ftgspp prepare selfcap --help` for its layout and frame-selection options.
 
-Passing two `--devices` values is not a supported first-release workflow.
-The CLI still accepts it so engineering scripts keep working, and prints a
-warning. Pair transport, `dev/tests/gpu/check_pair_equivalence.py`,
-`dev/tests/gpu/smoke_sync_multi_gpu.py`, and `.github/workflows/gpu.yml` remain
-in the repository for that work.
+## Locked final-test evaluation
+
+Create an independent [final-test manifest](../examples/final_test_manifest.example.json)
+and validate it against the completed run. It must not reuse training or
+validation views, paths or RGB hashes.
+
+```bash
+ftgspp prepare final-test --run "$RUN" --manifest /path/to/final_test.json
+ftgspp eval --run "$RUN" --device "$DEVICE" \
+  --test-manifest /path/to/final_test.json
+```
+
+Results go to `final_test_metrics.jsonl` and do not influence model selection.
+To add VGG LPIPS, include `--with-lpips` alongside all your other setup flags,
+then add `--lpips` to this final-test command. It never runs during training or
+ordinary validation. On first use it may download roughly 528 MiB of VGG16
+weights. `--lpips-device`, `--lpips-batch-size` and `--lpips-min-size` control
+execution; see `ftgspp eval --help`. Scene mode scores full RGB frames;
+foreground mode scores a reference-mask ROI on black.
+
+## Troubleshooting
+
+| Symptom | First checks |
+|---|---|
+| Missing mask or point cache | Confirm `CONFIG` paths, prepare the required artifact, and keep its manifest with it |
+| Unexpected DA3 download | `auto` falls back to DA3 when the PLY set is incomplete; check keyframes and the last frame |
+| Out of GPU memory | Check device choice and other jobs, then reduce `data.scale` or `init.num_gaussians` in a new run |
+| Mask/geometry misalignment | Check camera names, source image dimensions, intrinsics, world units and mask correspondence |
+| Blur, ghosting or missing surfaces | Compare GT at matching times; check FPS/synchronization and initialization coverage before tuning |
+| Output directory already exists | Resume a training run, or choose a fresh output for a new experiment/render; do not delete a valuable run |
+| Viewer unavailable | Check [viewer troubleshooting](viewer.md#troubleshooting), the remote extra, tunnel and printed token |
+
+When reporting a problem, include the command, resolved config, doctor output,
+commit and relevant log excerpt, with private paths and viewer tokens removed.

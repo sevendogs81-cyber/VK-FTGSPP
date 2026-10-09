@@ -1,20 +1,18 @@
 # Documentation
 
-Start at the repository [README](../README.md). Use this folder when the
-landing page is not enough.
+New users: [install](install.md), run the [tiny check](../README.md#check-the-complete-workflow),
+then follow [usage](usage.md) with your own capture. Keep the same generated YAML
+throughout preparation and training.
 
-| Doc | Audience |
+| Guide | Question it answers |
 |---|---|
-| [hardware.md](hardware.md) | Capability gates, estimated runnable GPU families, validated hardware, and `doctor` interpretation |
-| [install.md](install.md) | Manual install, pins, and troubleshooting |
-| [usage.md](usage.md) | Prepare / train / eval, foreground, DA3, research YAML |
-| [viewer.md](viewer.md) | Local and SSH browser viewers, cameras, playback, screenshots and headless export |
-| [performance.md](performance.md) | SelfCap timing definitions and B1/B4 image-throughput benchmarks |
-| [architecture.md](architecture.md) | CLI, native, and config boundaries |
-| [migration.md](migration.md) | Breaking changes from older FTGSPP layouts |
+| [Installation](install.md) | What do I need and which components should I install? |
+| [Usage](usage.md) | How do I prepare, train, resume and check one capture? |
+| [Data](data.md) | How should images, masks, cameras and timestamps be represented? |
+| [Configuration](configuration.md) | What do the defaults mean and what should I change? |
+| [Viewer](viewer.md) | How do I view, capture and export results? |
 
-Local design notes (`foreground_reconstruction_plan.md`,
-`initialization_pipeline_improvement_plan.md`, `validation.md`, and the local
-viewer plan/performance reports and raw benchmark JSON) are gitignored and are
-not part of the published snapshot. Tests and research helpers live under
-[dev/](../dev/README.md), not here.
+Advanced references: [hardware](hardware.md), [performance](performance.md),
+[architecture](architecture.md), [migration](migration.md).
+Maintainers: [contributing](../CONTRIBUTING.md) and [dev](../dev/README.md).
+Local design/QA notes are gitignored and are not part of the public documentation.
