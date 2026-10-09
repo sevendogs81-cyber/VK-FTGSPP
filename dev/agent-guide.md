@@ -57,8 +57,9 @@ Read the smallest relevant set before changing behavior:
 - `docs/usage.md`: public CLI, data, training, foreground, evaluation, and
   optional-component behavior.
 - `docs/viewer.md`: desktop, SSH browser, and headless viewer contracts.
-- `dev/docs/benchmarks.md`: benchmark definitions; do not compare incompatible
-  timing intervals.
+- `docs/performance.md`: user-facing experimental results and comparison timing definitions.
+- `dev/docs/benchmarks.md`: internal profiling and benchmark reproduction.
+  Keep results that demonstrate user benefits in public docs, with their measurement conditions.
 - `dev/docs/migration-history.md`: intentionally removed behavior and rejected legacy keys.
 - `src/ftgspp/config/defaults.yaml`, `schema.py`, and `validate.py`: authoritative
   configuration defaults, types, derived fields, and hard validation.

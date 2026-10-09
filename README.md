@@ -6,6 +6,18 @@ Reconstruct and explore moving subjects and scenes from synchronized multi-view
 images. VK-FTGSPP trains dynamic 3D Gaussians with Vulkan and includes a browser
 viewer for playback, free-view navigation and video export.
 
+## Performance
+
+SelfCap, RTX 4090, 60 frames, 500k Gaussians and 30k main training steps:
+
+| Scene RGB, six-capture mean | FTGSPP (CUDA) | VK-FTGSPP (Vulkan) | Ratio |
+|---|---:|---:|---:|
+| Reported training-step rate | 49.2 steps/s | **114.5 steps/s** | **2.33×** |
+
+These reported intervals exclude evaluation and hard separation; the original
+includes relocation while VK-FTGSPP excludes it, so this is not an end-to-end
+speedup. See the [full comparison and timing definitions](docs/performance.md).
+
 ## Install
 
 You need **Linux x86_64 and a supported NVIDIA GPU**. The installer sets up
@@ -62,7 +74,7 @@ See [viewer controls and export](docs/viewer.md) for screenshots and videos.
 
 - [Resume, evaluate and troubleshoot](docs/usage.md)
 - [Data formats](docs/data.md) · [Training settings](docs/arguments.md)
-- [Performance measurements](docs/performance.md) · [Development](dev/README.md)
+- [FTGSPP comparison](docs/performance.md) · [Development](dev/README.md)
 
 The showcase illustrates a real reconstruction; a downloadable reproduction
 bundle is not currently included. A small [installation check](docs/install.md#check-the-installation)

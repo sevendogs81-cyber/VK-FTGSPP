@@ -11,6 +11,6 @@ When you need more detail:
 - [Installation options](install.md) and [GPU requirements](hardware.md)
 - [Viewer exports and saved sessions](viewer-reference.md)
 
-[Performance](performance.md) · [Upgrading](migration.md)
+[Results and FTGSPP comparison](performance.md) · [Upgrading](migration.md)
 
 Development and maintenance documentation lives in [dev/](../dev/README.md).
