@@ -961,4 +961,3 @@ class Evaluator:
                 ), len(selected), metrics["eval_seconds"],
             )
         return metrics
-
