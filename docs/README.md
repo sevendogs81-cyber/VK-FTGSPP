@@ -7,6 +7,8 @@ landing page is not enough.
 |---|---|
 | [hardware.md](hardware.md) | Capability gates, estimated runnable GPU families, validated hardware, and `doctor` interpretation |
 | [install.md](install.md) | Manual install, pins, and troubleshooting |
+| [first-run.md](first-run.md) | Scene and foreground input routes: raw RGB, XYZ-only clouds and complete data |
+| [arguments.md](arguments.md) | Adaptive scene/foreground presets, point budgets, key arguments and agent tuning workflow |
 | [usage.md](usage.md) | Prepare / train / eval, foreground, DA3, research YAML |
 | [viewer.md](viewer.md) | Local and SSH browser viewers, cameras, playback, screenshots and headless export |
 | [performance.md](performance.md) | SelfCap timing definitions and B1/B4 image-throughput benchmarks |

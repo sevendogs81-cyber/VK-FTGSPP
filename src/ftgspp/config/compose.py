@@ -9,6 +9,9 @@ from typing import Any, get_args, get_type_hints
 from omegaconf import DictConfig, OmegaConf
 
 from ftgspp.config.schema import AppConfig
+from ftgspp.config.training_schedule import (
+    hard_relocation_steps, scene_keyframe_stride, training_iterations, training_step,
+)
 from ftgspp.config.validate import (
     apply_world_size_training_policy,
     compute_derived_fields,
@@ -20,6 +23,14 @@ RESOLVED_SCHEMA = "ftgspp-resolved-v1"
 
 
 def _register_resolvers() -> None:
+    for name, resolver in (
+        ("ftgspp_training_iterations", training_iterations),
+        ("ftgspp_training_step", training_step),
+        ("ftgspp_hard_relocation", hard_relocation_steps),
+        ("ftgspp_scene_stride", scene_keyframe_stride),
+    ):
+        if not OmegaConf.has_resolver(name):
+            OmegaConf.register_new_resolver(name, resolver)
     if not OmegaConf.has_resolver("ftgspp_min"):
         OmegaConf.register_new_resolver(
             "ftgspp_min",
@@ -73,13 +84,37 @@ def _pipeline_profile_defaults(config: DictConfig) -> DictConfig:
     """
 
     mode = str(OmegaConf.select(config, "pipeline.mode", default="scene"))
+    user_points = OmegaConf.select(config, "init.backend", default=None) == "points"
     if mode == "scene":
         return OmegaConf.create({
             "model": {"marginal_gating": True},
+            "init": {
+                "keyframe_stride": (
+                    "${ftgspp_scene_stride:${data.frames.start},"
+                    "${data.frames.stop},${data.fps}}"
+                ),
+                **({"num_gaussians": None} if user_points else {}),
+            },
             "train": {
+                "preset": "balanced",
+                "iterations": (
+                    "${ftgspp_training_iterations:scene,${train.preset},"
+                    "${data.frames.start},${data.frames.stop}}"
+                ),
+                "checkpoint_interval": "${ftgspp_training_step:scene,interval,${train.iterations}}",
+                "log_interval": "${ftgspp_training_step:scene,interval,${train.iterations}}",
                 "color_correction": True,
+                "color_correction_start": "${ftgspp_training_step:scene,warmup,${train.iterations}}",
                 "hard_separation": True,
-                "relocation": {"score_mode": "gate_included"},
+                "hard_separation_steps": "${ftgspp_training_step:scene,hard_steps,${train.iterations}}",
+                "hard_relocation_steps": "${ftgspp_hard_relocation:${train.hard_separation_steps}}",
+                "relocation": {
+                    "start": "${ftgspp_training_step:scene,start,${train.iterations}}",
+                    "stop": "${ftgspp_training_step:scene,stop,${train.iterations}}",
+                    "every": "${ftgspp_training_step:scene,every,${train.iterations}}",
+                    "score_mode": "gate_included",
+                    "score_mode_start": "${ftgspp_training_step:scene,warmup,${train.iterations}}",
+                },
             },
         })
     if mode != "foreground":
@@ -98,6 +133,9 @@ def _pipeline_profile_defaults(config: DictConfig) -> DictConfig:
         masks["manifest_path"] = "${data.root}/manifests/masks.json"
     init_profile: dict[str, object] = {
         "backend": "carving",
+        "keyframe_stride": 1,
+        "num_velocity_nns": 3,
+        "seed": 0,
         "points_path": (
             "${data.root}/points_vhull_ibr_stride"
             "${init.keyframe_stride}"
@@ -111,17 +149,39 @@ def _pipeline_profile_defaults(config: DictConfig) -> DictConfig:
             "min_consistent_views": None,
         },
     }
+    if user_points:
+        # Generated carving/DA3 clouds keep the 2M cap. An explicit numeric
+        # user budget still overrides this source-population default.
+        init_profile["num_gaussians"] = None
     profile: dict[str, object] = {
         "model": {"marginal_gating": True},
-        "data": {"masks": masks},
+        "data": {"masks": masks, "scale": 1.0},
         # Carving consumes only a provenance-checked visual-hull point set.
         "init": init_profile,
         "train": {
+            # Conservative common recipe from the DNA v3 / 4DAnyone studies.
+            # Keep explicitly saved run plans unchanged.
+            "preset": "balanced",
+            "iterations": (
+                "${ftgspp_training_iterations:foreground,${train.preset},"
+                "${data.frames.start},${data.frames.stop}}"
+            ),
+            "checkpoint_interval": "${ftgspp_training_step:foreground,interval,${train.iterations}}",
+            "log_interval": "${ftgspp_training_step:foreground,interval,${train.iterations}}",
             "background": {"mode": "random_solid"},
-            "relocation": {"score_mode": "gate_included"},
+            "relocation": {
+                "start": "${ftgspp_training_step:foreground,start,${train.iterations}}",
+                "stop": "${ftgspp_training_step:foreground,stop,${train.iterations}}",
+                "every": "${ftgspp_training_step:foreground,every,${train.iterations}}",
+                "score_mode": "default",
+            },
+            "lrs": {"durations": 0.001, "marginal_gates": 0.0005},
+            "lr_schedules": {"means": 0.03, "velocity_model": 0.03},
         },
         "eval": {
             "selector": "foreground_psnr",
+            "frame_interval": 1,
+            "candidate_max_views": 128,
         },
     }
     return OmegaConf.create(profile)
@@ -146,6 +206,13 @@ def resolve_config(
     _register_resolvers()
     raw = OmegaConf.to_container(config, resolve=False)
     if isinstance(raw, dict):
+        # Null clears a copied fixed horizon for a new run in either mode.
+        # Effective artifacts must never rerun input-only budget selection.
+        train_node = raw.get("train", {})
+        if "iterations" in train_node and train_node["iterations"] is None:
+            if effective:
+                raise ValueError("null train.iterations is only valid for a new run")
+            train_node.pop("iterations")
         raw_batch = raw.get("train", {}).get("batch_size", 1)
         if isinstance(raw_batch, bool) or not isinstance(raw_batch, int):
             raise ValueError("train.batch_size must be an integer, not a coerced scalar")
@@ -168,8 +235,37 @@ def resolve_config(
             if result.distributed.mode == "sync" else 1,
         )
     validate_static_config(result)
+    if result.init.num_gaussians is None:
+        if effective:
+            raise ValueError("saved run plans require a resolved init.num_gaussians")
+        _resolve_point_budget(result)
     node = _yaml_safe(OmegaConf.to_container(OmegaConf.structured(result), resolve=True))
     return ResolvedRunPlan(OmegaConf.to_yaml(OmegaConf.create(node)))
+
+
+def _resolve_point_budget(config: AppConfig) -> None:
+    """Freeze the selected user-cloud population before saving a run plan."""
+    from ftgspp.io.ply import read_point_ply
+
+    root = config.init.points_path
+    if root is None or not root.is_dir():
+        raise ValueError(
+            "automatic point budget requires init.points_path to be a directory "
+            "of RGB fXXXXXX.ply keyframe files"
+        )
+    frames = list(config.data.frames.into_range())
+    selected = frames[::config.init.keyframe_stride]
+    if selected[-1] != frames[-1]:
+        selected.append(frames[-1])
+    total = 0
+    for frame in selected:
+        path = root / f"f{frame:06d}.ply"
+        xyz, _rgb = read_point_ply(path, allow_missing_color=True)
+        if len(xyz) == 0:
+            raise ValueError(f"automatic point budget requires nonempty PLYs: {path}")
+        total += len(xyz)
+    config.init.num_gaussians = total
+
 
 def _yaml_safe(value):
     if isinstance(value, Path):

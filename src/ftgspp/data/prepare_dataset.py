@@ -12,6 +12,7 @@ import hashlib
 import json
 import math
 import os
+import shlex
 import re
 from pathlib import Path
 from typing import Sequence
@@ -178,6 +179,8 @@ def _write_config(
     eval_cameras: Sequence[int],
     fps: float,
     overwrite: bool,
+    points: Path | None = None,
+    keyframe_stride: int | None = None,
 ) -> None:
     if output.exists() and not overwrite:
         raise FileExistsError(f"refusing to overwrite starter config: {output}")
@@ -207,11 +210,15 @@ def _write_config(
         if mask_root is not None:
             masks["root"] = rel(mask_root)
         data["masks"] = masks
-    keyframe_stride = min(10, len(frames))
+    # Scene defaults follow FPS at resolution time; do not freeze them in the
+    # generated input YAML. An explicit stride defines a supplied PLY layout.
+    if keyframe_stride is None and pipeline == "foreground":
+        keyframe_stride = 1
     init: dict[str, object] = {
         "seed": 0,
-        "keyframe_stride": keyframe_stride,
     }
+    if keyframe_stride is not None:
+        init["keyframe_stride"] = keyframe_stride
     if pipeline == "foreground":
         init.update({
             "backend": "carving",
@@ -219,6 +226,9 @@ def _write_config(
                 root / f"points_vhull_ibr_stride{keyframe_stride}"
             ),
         })
+    if points is not None:
+        init.update({"backend": "points", "points_path": rel(points)})
+        init["num_gaussians"] = None
     node = {
         "pipeline": {"mode": pipeline},
         "data": data,
@@ -244,6 +254,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--stop", type=int)
     parser.add_argument("--pipeline", choices=("scene", "foreground"), default="scene")
     parser.add_argument("--calibration", type=Path)
+    parser.add_argument("--points", type=Path, help="existing per-keyframe PLY directory; skip geometry generation")
+    parser.add_argument("--keyframe-stride", type=int, help="must match the supplied/generated PLY keyframes")
     parser.add_argument("--train-cameras", type=int, nargs="+")
     parser.add_argument(
         "--eval-cameras", type=int, nargs="*",
@@ -258,6 +270,10 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args(argv)
 
+    if args.keyframe_stride is not None and args.keyframe_stride <= 0:
+        parser.error("--keyframe-stride must be positive")
+    if args.points is not None and not args.points.expanduser().is_dir():
+        parser.error("--points must be an existing PLY directory")
     if args.fps is not None and (
         not math.isfinite(float(args.fps)) or not float(args.fps) > 0.0
     ):
@@ -345,27 +361,52 @@ def main(argv: list[str] | None = None) -> None:
         eval_cameras=eval_cameras,
         fps=fps,
         overwrite=bool(args.overwrite),
+        points=None if args.points is None else args.points.expanduser().resolve(),
+        keyframe_stride=args.keyframe_stride,
     )
     print(f"dataset manifest: {manifest}")
     print(f"starter config: {config}")
     if args.pipeline == "foreground":
-        stride = min(10, len(frames))
-        point_output = root / f"points_vhull_ibr_stride{stride}"
-        if args.mask_source == "external":
-            print(
-                "masks: ftgspp prepare masks "
-                f"--images {images} --output {root / 'masks' / 'birefnet_hr'}"
-            )
-        print(
-            "points: ftgspp prepare points --method carving "
-            f"--config {config} --output {point_output}"
-        )
+        starter = OmegaConf.load(config)
+        point_output = root / f"points_vhull_ibr_stride{starter.init.keyframe_stride}"
+        if args.mask_source == "external" and args.mask_manifest is None and args.mask_root is None:
+            print("masks: " + shlex.join([
+                "ftgspp", "prepare", "masks", "--images", str(images),
+                "--view-manifest", str(manifest),
+                "--output", str(root / "masks" / "birefnet_hr"),
+            ]))
+        if args.points is None:
+            print("points: " + shlex.join([
+                "ftgspp", "prepare", "points", "--method", "carving",
+                "--config", str(config), "--output", str(point_output),
+            ]))
+        else:
+            print("points: reusing supplied PLYs; XYZ-only files need optional image coloring or gray conversion:")
+            print(shlex.join([
+                "ftgspp", "prepare", "points", "--method", "point_filtering",
+                "--config", str(config), "--input-points", str(args.points.expanduser().resolve()),
+                "--output", str(root / "points_colored"),
+            ]))
+            print("point_filtering filters foreground geometry and applies image colors; point count may decrease.")
+            print("To keep every point and skip image coloring, replace --method point_filtering with --method colorize --color-mode gray.")
+            print("Use the preparation command's printed train command afterwards.")
     else:
-        print(
-            "initialize: provide points_stride*/fXXXXXX.ply or configure the "
-            "DA3 route"
-        )
-    print(f"train after initialization: ftgspp train --config {config}")
+        from ftgspp.config.training_schedule import scene_keyframe_stride
+
+        stride = args.keyframe_stride or scene_keyframe_stride(frames[0], frames[-1] + 1, fps)
+        if args.points is None:
+            print(f"initialize: calibrated RGB PLYs in {root / f'points_stride{stride}'} "
+                  "or optional DA3; raw RGB needs --with-da3, no masks required.")
+        else:
+            print(f"points: selected supplied PLY population; keyframe stride {stride}, including the last frame.")
+            print("For XYZ-only inputs, choose image colors (or append --color-mode gray):")
+            print(shlex.join([
+                "ftgspp", "prepare", "points", "--method", "colorize",
+                "--config", str(config), "--input-points", str(args.points.expanduser().resolve()),
+                "--output", str(root / "points_colored"),
+            ]))
+            print("Use the preparation command's printed train command afterwards; scene mode needs matching calibration, not foreground masks.")
+    print("train after initialization: " + shlex.join(["ftgspp", "train", "--config", str(config)]))
 
 
 if __name__ == "__main__":

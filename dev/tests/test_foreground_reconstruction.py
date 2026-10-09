@@ -994,7 +994,7 @@ def test_carving_bounds_are_derived_robustly_from_da3_clouds():
     assert diagnostics["source_points"] == len(points)
 
 
-def test_default_carving_reuses_da3_for_automatic_bounds(tmp_path, monkeypatch):
+def test_explicit_da3_carving_bounds_reuses_full_clouds(tmp_path, monkeypatch):
     cloud_root = tmp_path / "da3"
     cloud_root.mkdir()
     xyz = np.asarray([
@@ -1059,6 +1059,7 @@ def test_default_carving_reuses_da3_for_automatic_bounds(tmp_path, monkeypatch):
 
     manifest_path = visual_hull.prepare_visual_hull_points(
         tmp_path / "config.yaml", tmp_path / "prepared", None,
+        bounds_method="da3",
     )
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert manifest["method"] == "carving"
@@ -1068,13 +1069,15 @@ def test_default_carving_reuses_da3_for_automatic_bounds(tmp_path, monkeypatch):
 
 
 def test_visual_hull_cli_makes_both_geometry_methods_explicit(
-    tmp_path, monkeypatch,
+    tmp_path, monkeypatch, capsys,
 ):
     calls = []
 
     def prepare(config, output, bounds, **kwargs):
         calls.append((config, output, bounds, kwargs))
-        return tmp_path / "manifest.json"
+        path = tmp_path / "manifest.json"
+        path.write_text(json.dumps({"preparation_plan": {"gaussian_budget": 321}}))
+        return path
 
     monkeypatch.setattr(visual_hull, "prepare_visual_hull_points", prepare)
     visual_hull.main([
@@ -1084,6 +1087,11 @@ def test_visual_hull_cli_makes_both_geometry_methods_explicit(
     assert calls[-1][3]["method"] == "carving"
     assert calls[-1][3]["device"] == "auto"
     assert calls[-1][2] is None
+    printed = capsys.readouterr().out
+    assert "init.backend=carving" in printed
+    assert f"init.points_path={tmp_path / 'carved'}" in printed
+    assert "init.num_gaussians=null" not in printed
+    assert "init.num_gaussians=321" in printed
 
     visual_hull.main([
         "--config", str(tmp_path / "scene.yaml"),
@@ -1093,6 +1101,11 @@ def test_visual_hull_cli_makes_both_geometry_methods_explicit(
     assert calls[-1][2] is None
     assert calls[-1][3]["method"] == "point_filtering"
     assert calls[-1][3]["input_points"] is None
+    printed = capsys.readouterr().out
+    assert "init.backend=point_filtering" in printed
+    assert f"init.points_path={tmp_path / 'filtered'}" in printed
+    assert "init.num_gaussians=null" not in printed
+    assert "init.num_gaussians=321" in printed
 
     with pytest.raises(SystemExit):
         visual_hull.main([

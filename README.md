@@ -15,6 +15,17 @@ Clone the repository, run one setup script, then use the `ftgspp` CLI. YAML
 examples live in the clone; the wheel provides the command rather than a public
 import library.
 
+For a masked subject, `pipeline.mode: foreground` selects a quality-oriented
+starter: every-frame geometry, velocity initialization and a frame-adaptive
+training budget (70,000 single-view updates at 121 frames; 174,000 at 300 frames),
+with hold-out checkpoint selection. See the
+[foreground defaults](docs/usage.md#defaults-for-a-first-foreground-run) and
+[parameter guide, presets and agent tuning workflow](docs/arguments.md).
+Full-scene `pipeline.mode: scene` has its own adaptive recipe: 30k main + 3k
+hard-separation steps at 60 frames, or 150k + 15k at 300 frames, with geometry
+spacing derived from FPS. Both modes offer `preview`, `balanced` and `extended`
+budgets; inspect the effective plan with `ftgspp train --config your.yaml --print-config`.
+
 **Training uses one GPU.** By default, one view produces one optimizer update.
 Foreground runs can opt into `train.batch_size: 4`: four sequential views share
 one FP32 mean gradient and one Adam update. See [training configuration](docs/usage.md).
@@ -65,7 +76,15 @@ one preparation capability. `--with-lpips` adds the optional locked final-test
 metric without enabling it during training. Full component requirements are in
 [docs/install.md](docs/install.md).
 
+Setup remembers enabled components in `.venv`. For example, adding
+`--with-remote` later preserves an earlier `--with-init` or `--with-viewer`
+installation. Use `--reset-profile` to replace the saved selection. Environments
+created before profile tracking need their desired flags specified once.
+
 ## First training run
+
+For a foreground subject, follow the [three input routes](docs/first-run.md):
+RGB frames only, XYZ point clouds needing optional colors, or fully prepared data.
 
 Work from the clone. Index an existing rectangular multi-view grid (pixels
 stay in place):

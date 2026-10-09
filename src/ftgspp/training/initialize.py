@@ -36,6 +36,9 @@ PREPARED_POINT_BACKENDS = frozenset({
 PREPARED_POINT_SCHEMAS = frozenset({
     "ftgspp-visual-hull-ibr-v2",
     "ftgspp-visual-hull-ibr-v3",
+    "ftgspp-visual-hull-ibr-v4",
+    "ftgspp-point-color-v1",
+    "ftgspp-point-color-v2",
 })
 
 

@@ -10,6 +10,8 @@
 /runs/
 /reports/
 /dist/
+# Local captures, calibration, point clouds and preparation caches.
+/data/
 .pytest_cache/
 .ruff_cache/
 __pycache__/

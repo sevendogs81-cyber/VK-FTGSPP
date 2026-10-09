@@ -2,6 +2,7 @@ import math
 from pathlib import Path
 
 from ftgspp.config.schema import AppConfig, DEFAULT_FPS
+from ftgspp.config.training_schedule import TRAINING_PRESETS
 
 
 RELOCATION_MODES = {"partial_copy", "exact_copy", "3d_mcmc"}
@@ -123,6 +124,9 @@ def validate_static_config(config: AppConfig) -> None:
                 "color_correction=false, hard_separation=false and no automatic LR scaling"
             )
     pipeline_mode = str(config.pipeline.mode)
+    if config.train.preset is not None:
+        if config.train.preset not in TRAINING_PRESETS.get(pipeline_mode, {}):
+            raise ValueError("train.preset must be preview, balanced, or extended")
     if pipeline_mode not in PIPELINE_MODES:
         raise ValueError(
             f"unsupported pipeline.mode: {pipeline_mode} "
@@ -373,7 +377,10 @@ def validate_static_config(config: AppConfig) -> None:
         raise ValueError("init.da3.input_cameras must be 'train' or 'all'")
     if config.init.keyframe_stride <= 0:
         raise ValueError("init.keyframe_stride must be greater than zero")
-    if config.init.num_gaussians <= 0:
+    if config.init.num_gaussians is None:
+        if config.init.backend != "points":
+            raise ValueError("init.num_gaussians: null requires init.backend=points")
+    elif config.init.num_gaussians <= 0:
         raise ValueError("init.num_gaussians must be greater than zero")
     init_seed = getattr(config.init, "seed", None)
     if init_seed is not None:

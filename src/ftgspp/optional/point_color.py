@@ -9,6 +9,7 @@ import numpy as np
 
 from ftgspp.data.scene import View
 from ftgspp.optional.torch_compute import resolve_torch_device
+from ftgspp.optional.preparation_views import prefetch_rgb
 
 
 @dataclass(frozen=True)
@@ -20,7 +21,7 @@ class PointColorResult:
     device: str = "cpu"
 
 
-IBR_COLOR_VERSION = "ftgspp-ibr-color-v4-cuda"
+IBR_COLOR_VERSION = "ftgspp-ibr-color-v5-query-subset"
 
 
 def _nearest_legal_pixels(
@@ -111,6 +112,7 @@ def _color_points_ibr_cuda(
     source_search_radius: int,
     normals: np.ndarray | None,
     angle_weight_power: float,
+    query_indices: np.ndarray,
 ) -> PointColorResult:
     """CUDA implementation of projection, z-buffering and robust IBR."""
 
@@ -125,7 +127,9 @@ def _color_points_ibr_cuda(
                 normal_values, dim=1, keepdim=True,
             ).clamp_min(1e-12)
         view_count = len(views)
-        point_count = len(points)
+        point_count = len(query_indices)
+        query_map = torch.full((len(points),), -1, dtype=torch.int64, device=device)
+        query_map[torch.as_tensor(query_indices, device=device)] = torch.arange(point_count, device=device)
         colors = torch.zeros(
             (view_count, point_count, 3), dtype=torch.uint8, device=device,
         )
@@ -139,9 +143,9 @@ def _color_points_ibr_cuda(
         available = torch.zeros(
             (view_count, point_count), dtype=torch.bool, device=device,
         )
-        for view_index, view in enumerate(views):
+        for view_index, view, decoded in prefetch_rgb(views):
             image = torch.as_tensor(
-                np.ascontiguousarray(view.load_rgb()[..., :3]), device=device,
+                np.ascontiguousarray(decoded[..., :3]), device=device,
             )
             mask = torch.as_tensor(
                 np.ascontiguousarray(view.load_mask()),
@@ -173,6 +177,8 @@ def _color_points_ibr_cuda(
             source_y = y[ids].clone()
             found = legal[source_y, source_x].clone()
             for distance in range(1, int(source_search_radius) + 1):
+                if bool(torch.all(found)):
+                    break
                 offsets = []
                 for dy in range(-distance, distance + 1):
                     for dx in range(-distance, distance + 1):
@@ -206,6 +212,12 @@ def _color_points_ibr_cuda(
                 0, pixel, z[ids], reduce="amin", include_self=True,
             )
             depth_buffer = depth_buffer.reshape(height, width)
+            # Full geometry remains the occlusion reference. Only queries
+            # enter the expensive multi-view color aggregation.
+            queried = query_map[ids] >= 0
+            ids, source_x, source_y = ids[queried], source_x[queried], source_y[queried]
+            if ids.numel() == 0:
+                continue
             if int(z_buffer_radius) > 0:
                 radius = int(z_buffer_radius)
                 nearest = torch.full(
@@ -259,14 +271,15 @@ def _color_points_ibr_cuda(
                 source_y = source_y[front]
                 squared_distance = squared_distance[front]
                 angle_weight = cosine[front] ** float(angle_weight_power)
-            colors[view_index, ids] = image[source_y, source_x, :3]
-            depths[view_index, ids] = z[ids]
-            weights[view_index, ids] = (
+            output_ids = query_map[ids]
+            colors[view_index, output_ids] = image[source_y, source_x, :3]
+            depths[view_index, output_ids] = z[ids]
+            weights[view_index, output_ids] = (
                 torch.ones_like(squared_distance)
                 if mode == "depth_rank_top3" else
                 mask[source_y, source_x] * angle_weight / squared_distance
             )
-            available[view_index, ids] = True
+            available[view_index, output_ids] = True
 
         rgb = torch.zeros((point_count, 3), dtype=torch.uint8, device=device)
         count = torch.zeros(point_count, dtype=torch.int32, device=device)
@@ -354,12 +367,26 @@ def color_points_ibr(
     normals: np.ndarray | None = None,
     angle_weight_power: float = 0.0,
     device: str = "auto",
+    query_indices: np.ndarray | None = None,
 ) -> PointColorResult:
-    """Color points from strict foreground pixels with a per-view z-buffer."""
+    """Color queries using all points as the per-view occlusion reference.
+
+    Results follow ``query_indices`` order, or input order when omitted.
+    Sampling queries never removes occluders from the depth buffer.
+    """
 
     xyz = np.asarray(points, np.float32)
     if xyz.ndim != 2 or xyz.shape[1] != 3 or not np.isfinite(xyz).all():
         raise ValueError("points must be a finite Nx3 array")
+    if query_indices is None:
+        query_indices = np.arange(len(xyz), dtype=np.int64)
+    else:
+        query_indices = np.asarray(query_indices)
+        if (query_indices.ndim != 1 or query_indices.dtype.kind not in "iu"
+                or np.any(query_indices < 0) or np.any(query_indices >= len(xyz))
+                or len(np.unique(query_indices)) != len(query_indices)):
+            raise ValueError("IBR query_indices must be unique valid integer indices")
+        query_indices = query_indices.astype(np.int64, copy=False)
     if not views:
         raise ValueError("IBR coloring requires at least one view")
     if not 0.0 <= float(mask_threshold) <= 1.0:
@@ -397,15 +424,18 @@ def color_points_ibr(
             source_search_radius=int(source_search_radius),
             normals=normal_values,
             angle_weight_power=float(angle_weight_power),
+            query_indices=query_indices,
         )
     view_count = len(views)
-    point_count = len(xyz)
+    point_count = len(query_indices)
+    query_map = np.full(len(xyz), -1, np.int64)
+    query_map[query_indices] = np.arange(point_count)
     colors = np.zeros((view_count, point_count, 3), np.uint8)
     weights = np.zeros((view_count, point_count), np.float64)
     depths = np.full((view_count, point_count), np.inf, np.float64)
     available = np.zeros((view_count, point_count), bool)
-    for view_index, view in enumerate(views):
-        image = view.load_rgb()[..., :3]
+    for view_index, view, decoded in prefetch_rgb(views):
+        image = decoded[..., :3]
         mask = view.load_mask()
         validity = view.load_validity() >= 0.5
         height, width = view.size
@@ -431,6 +461,10 @@ def color_points_ibr(
         # Build coverage at the original projected pixels. A minimum filter
         # then makes sparse point samples conservative over neighboring pixels.
         np.minimum.at(depth_buffer, (y[ids], x[ids]), z[ids])
+        queried = query_map[ids] >= 0
+        ids, selected_x, selected_y = ids[queried], selected_x[queried], selected_y[queried]
+        if not len(ids):
+            continue
         if int(z_buffer_radius) > 0:
             from scipy import ndimage
             depth_buffer = ndimage.minimum_filter(
@@ -464,13 +498,14 @@ def color_points_ibr(
             selected_y = selected_y[front]
             squared_distance = squared_distance[front]
             angle_weight = cosine[front] ** float(angle_weight_power)
-        colors[view_index, ids] = image[selected_y, selected_x, :3]
-        depths[view_index, ids] = z[ids]
-        weights[view_index, ids] = (
+        output_ids = query_map[ids]
+        colors[view_index, output_ids] = image[selected_y, selected_x, :3]
+        depths[view_index, output_ids] = z[ids]
+        weights[view_index, output_ids] = (
             1.0 if mode == "depth_rank_top3" else
             mask[selected_y, selected_x] * angle_weight / squared_distance
         )
-        available[view_index, ids] = True
+        available[view_index, output_ids] = True
 
     rgb = np.zeros((point_count, 3), np.uint8)
     count = np.zeros(point_count, np.int32)

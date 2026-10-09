@@ -149,3 +149,8 @@ passes.
 Optional Torch components have a separate device boundary. BiRefNet-HR, DA3,
 CUDA point filtering, and LPIPS may use CUDA and its ordinal mapping; their
 availability does not change whether the core Vulkan device is compatible.
+The locked Torch 2.6 / CUDA 12.4 stack is tested on RTX 4090. The estimated
+Blackwell support in the table above applies to Vulkan, not this older CUDA
+wheel: newer GPU architectures need a separately validated Torch build or CPU
+preparation (`--device cpu`, and `init.da3.device: cpu`). Driver version alone
+does not establish CUDA wheel architecture support.

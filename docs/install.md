@@ -43,6 +43,15 @@ The two initialization components can also be installed independently:
 point generation and CUDA-accelerated carving. The foreground pipeline mode is
 a data/training choice; it is not an installation profile.
 
+The optional Torch stack pins the tested PyTorch 2.6.0 / TorchVision 0.21.0
+pair, whose Linux wheels use CUDA 12.4. It no longer silently upgrades to CUDA
+13. The CUDA 12.4 [release driver](https://docs.nvidia.com/cuda/archive/12.4.0/cuda-toolkit-release-notes/index.html)
+is 550.54.14 on Linux; use that version or newer for this tested route. The
+optional stack is validated separately from Vulkan. A successful `doctor` check
+alone does not validate CUDA. The installer does not upgrade drivers. Core
+training with prepared inputs remains independent of Torch/CUDA. Allow several
+GiB for optional dependency downloads, plus model weights on first use.
+
 `--with-lpips` adds the optional locked final-test metric. It is composable with
 every initialization profile, for example `bash scripts/setup.sh --with-init
 --with-lpips`, and never enables LPIPS during training.
@@ -59,15 +68,21 @@ combined with each other and with initialization or LPIPS flags.
 |---|---|
 | Required masks and point-cloud set are already prepared | `bash scripts/setup.sh` |
 | Point clouds are ready; masks must be generated | `bash scripts/setup.sh --with-birefnet` |
-| Masks are ready; DA3 points or automatic carving bounds are needed | `bash scripts/setup.sh --with-da3` |
+| Masks are ready; missing camera calibration, scene depth, or carving depth fallback is needed | `bash scripts/setup.sh --with-da3` |
+| Calibrated enclosing rig and masks, no point cloud | Core install supports CPU carving/IBR; `--with-da3` also provides CUDA acceleration and depth fallback |
 | Start from raw RGB | `bash scripts/setup.sh --with-init` |
 | Add LPIPS to any profile | Add `--with-lpips` to the same setup command |
 | Add the local desktop viewer | Add `--with-viewer` to the same setup command |
 | Add the SSH browser viewer | Add `--with-remote` to the same setup command |
 | Add TensorBoard tools | Add `--with-tensorboard` to the same setup command |
 
-Each setup run synchronizes the selected profile. Use `--with-init` or pass
-both component flags in the same command when both must remain installed.
+Each successful setup saves its selected components in
+`.venv/ftgspp-install-profile`. Later runs merge new options with this selection,
+including the desktop build flag. To deliberately remove components, use
+`--reset-profile` plus only the flags you want to keep (no flags means core).
+Existing environments created before profile tracking must specify their desired
+flags once. Direct `uv sync` commands still require all desired extras explicitly;
+they do not read the setup profile.
 To install every public optional component in one pass, use:
 
 ```bash
@@ -101,7 +116,9 @@ the wheel only provides the `ftgspp` command.
    optional components selected on the command line, then rebuilds the wheel
    with the selected desktop-viewer setting.
 5. Imports every selected component and rejects dependencies resolved from a
-   foreign `.pth`/`PYTHONPATH` location outside `.venv`.
+   foreign `.pth`/`PYTHONPATH` location outside `.venv`. It imports the native
+   extension (and desktop module when selected), and executes a small Torch CUDA
+   kernel when CUDA is available. Successful installs save the optional profile.
 6. Runs `ftgspp doctor --devices 0` unless `--skip-doctor`.
 
 `.venv` is gitignored. Keep it activated for every later `ftgspp` and
@@ -141,6 +158,14 @@ uv lock therefore supplies reviewed static metadata for that exact DA3 version
 and explicitly declares the smaller inference dependency set in the `da3`
 extra. This avoids unrelated Open3D, web-server, pre-commit, and
 duplicate OpenCV packages while keeping DA3 itself version-pinned.
+
+DA3 may print an upstream warning about missing `gsplat` during import. Its depth
+inference path does not require that optional upstream Gaussian renderer.
+
+If downloads fail with `tunnel error` / `Connection refused`, check your configured
+HTTP(S) proxy first. Retrying after fixing that proxy, or using a permitted direct
+connection, can reuse uv's downloaded packages. The installer honors your network
+environment and does not change proxy settings automatically.
 
 ## Manual install
 

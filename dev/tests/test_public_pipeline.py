@@ -102,7 +102,7 @@ def test_step_scaling_round_trip(tmp_path):
     plan = resolve_config(node(mode="sync", device_ids=[0, 2], world_size_lr_scaling="steps_div_p"))
     saved = tmp_path / "resolved.yaml"
     save_resolved_config(plan.config, saved)
-    assert load_config(saved).train.iterations == plan.config.train.iterations == 15000
+    assert load_config(saved).train.iterations == plan.config.train.iterations == 75000
 
 
 def test_one_view_per_rank_has_no_accumulation_api():

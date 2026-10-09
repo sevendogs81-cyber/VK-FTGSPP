@@ -22,13 +22,13 @@ PLY_TYPES = {
 
 @overload
 def read_point_ply(
-    path: Path, *, return_sha256: Literal[False] = False,
+    path: Path, *, return_sha256: Literal[False] = False, allow_missing_color: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]: ...
 
 
 @overload
 def read_point_ply(
-    path: Path, *, return_sha256: Literal[True],
+    path: Path, *, return_sha256: Literal[True], allow_missing_color: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, str]: ...
 
 
@@ -36,8 +36,9 @@ def read_point_ply(
     path: Path,
     *,
     return_sha256: bool = False,
+    allow_missing_color: bool = False,
 ) -> tuple[np.ndarray, np.ndarray] | tuple[np.ndarray, np.ndarray, str]:
-    """Read an RGB PLY, optionally hashing the same bytes in the same pass."""
+    """Read RGB PLY; preparation may explicitly fill absent RGB with neutral gray."""
 
     digest = hashlib.sha256() if return_sha256 else None
     with path.open("rb") as stream:
@@ -72,9 +73,18 @@ def read_point_ply(
                 properties.append((parts[2], parts[1]))
         if fmt is None or count is None:
             raise ValueError(f"incomplete PLY header: {path}")
-        required = {"x", "y", "z", "red", "green", "blue"}
-        if missing := required - {name for name, _ in properties}:
-            raise ValueError(f"PLY {path} is missing {sorted(missing)}")
+        names = {name for name, _ in properties}
+        colors = {"red", "green", "blue"}
+        has_color = colors <= names
+        required = {"x", "y", "z"}
+        if not allow_missing_color or names & colors:
+            required |= colors
+        if missing := required - names:
+            raise ValueError(
+                f"PLY {path} is missing {sorted(missing)}; for XYZ-only input use "
+                "ftgspp prepare points --method colorize --input-points DIR "
+                "(--color-mode gray skips image coloring)"
+            )
         payload = None
         if digest is not None:
             payload = stream.read()
@@ -101,7 +111,12 @@ def read_point_ply(
         else:
             raise ValueError(f"unsupported PLY format: {fmt}")
     xyz = np.stack([values[axis] for axis in "xyz"], axis=1).astype(np.float32)
-    rgb = np.stack([values[name] for name in ("red", "green", "blue")], axis=1).astype(np.uint8)
+    if len(xyz) != count or not np.isfinite(xyz).all():
+        raise ValueError(f"PLY {path} has incomplete or non-finite vertices")
+    rgb = (
+        np.stack([values[name] for name in ("red", "green", "blue")], axis=1).astype(np.uint8)
+        if has_color else np.full((len(xyz), 3), 128, np.uint8)
+    )
     if digest is not None:
         return xyz, rgb, digest.hexdigest()
     return xyz, rgb

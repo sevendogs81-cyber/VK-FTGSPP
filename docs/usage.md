@@ -35,9 +35,9 @@ geometry cache. Default `pipeline.mode` is `scene` (mask-free
 
 **Choose an initialization source before the first `train`.** With camera
 calibration, `init.backend: auto` looks for a complete keyframe RGB PLY set at
-`${data.root}/points_stride${init.keyframe_stride}/` (starter stride 10 →
-`data/my_capture/points_stride10/`). Files are `f<six-digit-frame>.ply` for
-each keyframe (`f000000.ply`, `f000010.ply`, …) and the last selected frame.
+`${data.root}/points_stride${init.keyframe_stride}/` (automatic spacing is
+roughly 1/6 second: 30 FPS → stride 5 → `data/my_capture/points_stride5/`). Files are `f<six-digit-frame>.ply` for
+each keyframe (`f000000.ply`, `f000005.ply`, … at stride 5) and the last selected frame.
 If that set is incomplete, training invokes Depth Anything 3 (DA3) during
 initialization. Uncalibrated captures also require DA3 to estimate cameras.
 Put PLYs elsewhere with `init.points_path`. The default lightweight install
@@ -80,8 +80,9 @@ original run. The ordinary selection is retained as `ckpt/main_selected.npz`;
 an HS run additionally retains `ckpt/hard_final.npz`. These phase checkpoints
 contain the model, its matching color correction and the run identity needed for the phase
 handoff. Numbered checkpoints and `latest.json` remain exact Adam resume state.
-The default HS schedule is 3000 optimizer steps with one group-local relocation
-at local step 1500. It can be adjusted without changing the main schedule:
+Scene HS defaults to 10% of the effective main horizon, with one group-local
+relocation halfway through HS. At 30k main steps this is 3000 HS steps and
+relocation at local step 1500. It can be overridden independently:
 
 ```yaml
 train:
@@ -112,21 +113,64 @@ incompatible configuration. Hold-out eval shares `train.checkpoint_interval`
 with optional optimizer snapshots (`train.save_checkpoints`).
 The `scene` profile enables color correction, marginal gating,
 gate-included relocation scoring, and hard separation by default. The
-`foreground` profile enables marginal gating and gate-included relocation
-scoring while leaving color correction and hard separation off. Explicit YAML
+`foreground` profile enables marginal gating and uses opacity/gradient-based
+relocation scoring (`default`), with color correction and hard separation off. Explicit YAML
 settings override these profile defaults. When HS is enabled, it binarizes
 persistent/transient gates, preserves and refines velocity independently,
 restricts relocation to the same gate group, and exports the terminal hard-phase
 model.
 
-Leave DA3 sizing knobs unset. The total experiment budget remains
-`init.num_gaussians`; initialization dynamically resolves DA3 work from that
+Leave DA3 sizing knobs unset. Generated geometry uses the total experiment
+budget `init.num_gaussians` (2 million by default); initialization resolves DA3 work from that
 budget, `init.keyframe_stride`, `data.frames`, native image size, camera count,
 and foreground-mask coverage. It then reallocates the total across keyframes
 from candidate count, spatial extent, shape complexity, and inter-frame motion.
 `init.da3.quality: auto` (default) derives resolution, fusion cameras, and
 the dense-cache cap. Set `quality: fast|balanced|high` or explicit sizing
 only for a frozen recipe.
+
+Point preparation has a separate `--quality fast|balanced|high|full` option.
+The default `balanced` caps generated color candidates at
+`4 × ceil(init.num_gaussians / selected keyframes)` before IBR aggregation,
+retaining all geometry for occlusion. User clouds remain uncapped. Calibrated
+foreground carving first tries per-frame mask-frustum bounds, so a surrounding
+rig can avoid depth inference. Automatic bounds that cannot be safely resolved
+fall back to DA3. Stage timings and the resolved plan are saved in the point
+manifest. See [preparation arguments](arguments.md#max_points-per-keyframe-versus-the-total-model).
+Scene geometry still uses DA3: foreground silhouette bounds do not reconstruct
+background/concave scene structure. Scene DA3 retains its budget/FPS-aware
+schedule and now prefetches input images; scene XYZ coloring shares the bounded
+IBR decoder and remains geometry-preserving by default.
+
+## Adaptive scene defaults
+
+New scene runs also accept `train.preset: preview|balanced|extended` (balanced
+by default). The scene reference uses 30k main steps at 60 frames; the balanced
+rule is `ceil_1000(30000 × max(0.5, frames / 60))`. A 300-frame default run now
+uses **150k main + 15k HS updates**. Color-correction warm-up, gate-score warm-up,
+main relocation and validation clocks follow the main horizon; HS relocation
+uses the independent HS clock. Explicit numeric overrides and saved plans keep
+their values. `train.iterations: null` restores the automatic main budget for a
+new run; remove copied clock overrides to restore those defaults too.
+
+Scene retains its mask-free full-frame objective, half-resolution starter,
+fixed background, CC, marginal gating and HS. Its automatic keyframe stride is
+`min(frame_count, max(1, round(fps / 6)))`, keeping roughly 1/6-second spacing.
+For fast motion choose a smaller explicit stride and regenerate matching points.
+For supplied PLYs always specify their actual stride. `prepare dataset --points`
+selects the user-cloud route and its actual selected population; generic `auto`
+keeps a 2M budget while choosing between existing PLYs and DA3.
+
+```bash
+ftgspp train --config data/my_capture/ftgspp.yaml --print-config
+ftgspp train --config data/my_capture/ftgspp.yaml --set train.preset=preview
+```
+
+See [scene input routes](first-run.md#scene-mode-input-routes), the
+[scene preview example](../examples/scene_preview.yaml) and
+[full scene formulas / tuning guide](arguments.md#scene-adaptation).
+These rules keep approximate temporal training exposure; they do not establish
+matching quality across sequence lengths or compensate for fixed model capacity.
 
 ## Foreground reconstruction
 
@@ -136,6 +180,112 @@ trains with random solid backgrounds, and ranks checkpoints by the joint
 foreground PSNR and foreground SSIM score over valid mask-interior windows.
 `ftgspp train --config ... --pipeline foreground` is the equivalent CLI
 override. Resume always reuses the saved mode.
+
+### Defaults for a first foreground run
+
+Selecting `pipeline.mode: foreground` applies the following starting recipe.
+`prepare dataset --pipeline foreground` and the foreground examples use the
+same defaults. Choose `train.preset: preview|balanced|extended` for the automatic
+training budget. Explicit step counts win; `train.iterations: null` restores
+automatic sizing for a new foreground run. Use `train --print-config` to inspect
+the concrete settings before training. See [arguments.md](arguments.md) for exact
+formulas, limits, and the distinction between per-keyframe point caps and the
+total Gaussian budget. It targets quality on a 24 GB GPU; image size, projected overlap
+and initialization can still change memory use substantially.
+
+| Setting | Default | Reason |
+|---|---|---|
+| `data.scale` | `1.0` | Preserve input detail and mask boundaries |
+| `init.keyframe_stride` | `1` | Initialize each captured frame rather than interpolate sparse geometry |
+| `init.num_gaussians` | `2000000` for generated geometry | User-supplied points default to their selected population; see below |
+| `init.seed`, `init.num_velocity_nns` | `0`, `3` | Repeatable geometry with local velocity initialization |
+| `init.duration` | `null` → `1 / data.fps` | Derive temporal support from the actual capture rate |
+| `train.preset`, `train.batch_size` | `balanced`, `1` | 70k updates at 121 frames; frame-adaptive thereafter |
+| `train.iterations` | Automatic unless explicitly set | `ceil_1000(70000 × max(0.5, frames / 121))`; 174k at 300 frames |
+| Relocation start / stop / interval | Proportional to the resolved horizon | At 70k: `2000` / `35000` / `500`; second half for refinement |
+| `train.checkpoint_interval` | About 1/35 of the horizon | Bound hold-out evaluation and optimizer snapshot count |
+| `train.relocation.score_mode` | `default` | Opacity/gradient scoring used by DNA v3 and 4DAnyone v8 |
+| Duration / marginal-gate learning rates | `0.001` / `0.0005` | Gentler temporal updates than the earlier foreground defaults |
+| Position / velocity final LR ratios | `0.03` / `0.03` | Ratios over the configured training length, not absolute learning rates |
+| `eval.frame_interval`, `eval.candidate_max_views` | `1`, `128` | Denser temporal validation with bounded candidate scoring |
+
+Random solid training backgrounds, marginal gating, SH degree 3, and
+`train.export_best: true` remain enabled. Color correction and hard separation
+remain off. Reserve at least one calibrated camera with `--eval-cameras` for
+checkpoint selection; without a hold-out, the last model is exported.
+
+This is a conservative starting recipe informed by existing experiments, not
+a measured optimum for arbitrary captures. DNA v3's ten scenes selected
+checkpoints between steps 58,000 and 69,999. In 4DAnyone v8, the 200k terminal
+models improved boundary F-score on 10 of 12 scenes, but all 12 had lower
+foreground SSIM than their selected checkpoints. Long refinement therefore
+has a boundary/detail tradeoff rather than a universal quality benefit.
+Those studies used scene-specific budgets and filtered point clouds; their
+scores do not establish the quality of a new capture's carved initialization.
+
+Keep the general recipe's trainable gate (`model.gate_init_logit: -1.0`). The
+4DAnyone experiments also explored a softer gate (`-0.23`) and a gate learning
+rate of `0.0001` or zero. These are explicit alternatives to test against a
+hold-out for uncertain masks; freezing gates has not been validated as a
+universal replacement on DNA. Do not copy v8's tiny final LR ratios into a
+shorter run: they were adjusted for its 200,000-step schedule.
+
+Every-frame preparation and full-resolution training cost more than the old
+stride-10, half-resolution starter. For a smaller GPU, begin with
+`data.scale: 0.5` and `init.num_gaussians: 1000000`, then increase them after a
+successful run. Increasing `init.keyframe_stride` trades temporal initialization
+detail for preparation time; regenerate matching point caches after changing
+it. Keep `data.fps` equal to the actual indexed frame rate. Optimizer snapshots
+can consume substantial disk space; `train.save_checkpoints: false` disables
+periodic exact-resume snapshots while preserving selected-model export.
+
+Explicit YAML values always win. Existing `config.resolved.yaml` files and
+resumes retain their original settings; old editable YAML files retain any
+values they explicitly specify.
+
+### Bring your own initial point clouds
+
+For step-by-step commands covering raw RGB, XYZ-only PLYs and complete inputs,
+see [First foreground run](first-run.md). `prepare dataset --points DIR` writes
+a starter that consumes your own geometry. For XYZ-only files, the recommended
+`prepare points --method point_filtering` route filters foreground points and
+assigns image colors. Use `--method colorize` to retain all geometry, optionally
+adding `--color-mode gray` to skip image coloring. All produce RGB PLYs suitable
+for the initializer.
+
+For an existing calibrated RGB PLY set, select `init.backend: points` and set
+`init.points_path` to its directory. Omit `init.num_gaussians` to use the sum
+of the selected keyframe point counts as the foreground Gaussian budget:
+
+```yaml
+pipeline:
+  mode: foreground
+data:
+  root: /path/to/capture
+  fps: 30
+  frames: {start: 0, stop: 121}
+init:
+  backend: points
+  points_path: /path/to/my_points
+  keyframe_stride: 1
+  num_gaussians: null  # also clears a 2M value copied from another example
+```
+
+Supply `f000000.ply`, `f000001.ply`, … for this example. Each PLY needs
+`x/y/z` and `red/green/blue` vertex properties. Calibration and foreground
+masks are still required. Only keyframes in the configured frame interval
+count, including its last frame even when it is not aligned with the stride.
+A single static PLY is not automatically repeated across a dynamic sequence.
+Incomplete or empty selected clouds fail explicitly.
+
+The count is resolved to an integer before the run plan is saved; loading an
+existing run does not recount the source files. With this exact source
+population, initialization keeps all source points without filling up to 2M
+with replicas. Set a positive numeric `init.num_gaussians` to intentionally
+subsample or expand that total instead. `carving`, `da3`, and `point_filtering`
+keep the 2M default because they prepare new geometry; to use a prepared set's
+exact population, consume it through `backend: points`. Generated manifests
+are still validated on that path.
 
 ### Batch size
 
@@ -207,14 +357,15 @@ batch, and each input/output file is hashed from the bytes already being read
 or written.
 
 That command writes `data/my_scene/manifests/masks.json` when `--output`
-is `<scene>/masks/<name>`. The default geometry path is `carving`. It first
-generates or reuses the configured foreground DA3 cloud, derives robust
-training-only world bounds from it, and carves the mask-supported surface:
+is `<scene>/masks/<name>`. The default geometry path is `carving`. With a
+calibrated enclosing rig, it derives per-frame bounds from training-view masks
+and carves the surface without a DA3 point cloud. Otherwise it estimates the
+missing rig once and/or falls back to full-sequence DA3 bounds:
 
 ```bash
 ftgspp prepare points --method carving \
   --config examples/foreground_scene.yaml \
-  --output data/my_scene/points_vhull_ibr_stride10 \
+  --output data/my_scene/points_vhull_ibr_stride1 \
   --resolution 192 --coarse-resolution 48
 ftgspp train --config examples/foreground_scene.yaml --devices 0
 ```
@@ -237,7 +388,7 @@ recoloring:
 ```bash
 ftgspp prepare points --method point_filtering \
   --config examples/foreground_scene.yaml \
-  --output data/my_scene/points_vhull_filtered_stride10
+  --output data/my_scene/points_vhull_filtered_stride1
 ```
 
 Train that filtered set with the matching explicit backend:
@@ -245,7 +396,7 @@ Train that filtered set with the matching explicit backend:
 ```bash
 ftgspp train --config examples/foreground_scene.yaml --devices 0 \
   --set init.backend=point_filtering \
-  --set init.points_path=data/my_scene/points_vhull_filtered_stride10
+  --set init.points_path=data/my_scene/points_vhull_filtered_stride1
 ```
 
 Each generated manifest records the selected method. The `carving` and
@@ -255,7 +406,7 @@ DA3/user PLY directory.
 
 | Method | Geometry source | Practical tradeoff |
 |---|---|---|
-| `carving` (default) | Mask-supported surface band inside DA3/user-derived bounds | Stronger silhouette control and less dependence on DA3 point placement; voxel projection costs more time and memory |
+| `carving` (default) | Mask-supported surface band inside per-frame mask bounds or explicit/DA3/user-derived bounds | Stronger silhouette control and less dependence on DA3 point placement; voxel projection costs more time and memory |
 | `point_filtering` | DA3/user surface points retained by multi-view masks | Usually faster because it skips the voxel grid; it inherits missing surfaces, depth noise, and sampling bias from the source cloud |
 
 Both methods produce surface candidates before the shared Gaussian initializer.
@@ -293,8 +444,10 @@ winner selection follow the resolved model device; masks, cache I/O, and
 control flow remain on CPU. The manifest records the postprocessing device and
 the L2 cache identity includes the CUDA-capable implementation version. That
 ordinal can differ from the Vulkan `--devices` ID used for training.
-`init.backend: da3` uses its cloud directly; uncalibrated captures must use DA3
-because visual-hull projection requires a camera rig.
+`init.backend: da3` uses its cloud directly. On uncalibrated captures,
+`prepare points --method carving` can first estimate/cache a rig with DA3 and
+then carve it; training reloads that camera cache. Explicit user points or bounds
+require matching calibration because DA3 cannot infer their coordinate alignment.
 
 ```bash
 ftgspp train --config examples/foreground_scene.yaml --devices 0 \
@@ -315,7 +468,7 @@ For the visual-hull example:
 ```bash
 ftgspp prepare points --method carving \
   --config examples/foreground_visual_hull.yaml \
-  --output data/my_scene/points_vhull_ibr_stride10 \
+  --output data/my_scene/points_vhull_ibr_stride1 \
   --resolution 192 --sampling surface_band
 ftgspp train --config examples/foreground_visual_hull.yaml --devices 0
 ```

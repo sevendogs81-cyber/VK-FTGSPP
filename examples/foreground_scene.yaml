@@ -5,7 +5,7 @@ data:
   name: my_foreground_scene
   root: ../data/my_scene
   frames: {start: 0, stop: 300}
-  scale: 0.5
+  scale: 1.0
   train_cameras: [0, 1, 2]
   eval_cameras: [3]
   masks:
@@ -14,12 +14,13 @@ data:
 init:
   # Default foreground route: prepare this cache with --method carving.
   backend: carving
-  points_path: ../data/my_scene/points_vhull_ibr_stride10
+  points_path: ../data/my_scene/points_vhull_ibr_stride1
   # Keep geometry initialization stable across training-seed sweeps.
   seed: 0
   num_gaussians: 2000000
-  keyframe_stride: 10
+  keyframe_stride: 1
 train:
-  iterations: 30000
+  # Adaptive frame-count budget; explicit iterations override it.
+  preset: balanced
 run:
   output_path: ../runs/my_foreground_scene

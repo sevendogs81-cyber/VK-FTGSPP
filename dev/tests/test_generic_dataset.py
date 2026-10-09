@@ -24,7 +24,7 @@ def _write_grid(root: Path) -> None:
             )
 
 
-def test_prepare_dataset_creates_manifest_and_resolvable_starter_config(tmp_path):
+def test_prepare_dataset_creates_manifest_and_resolvable_starter_config(tmp_path, capsys):
     images = tmp_path / "images"
     _write_grid(images)
     prepare_dataset([
@@ -51,12 +51,17 @@ def test_prepare_dataset_creates_manifest_and_resolvable_starter_config(tmp_path
     starter = OmegaConf.load(config_path)
     assert starter.init.seed == 0
     assert starter.init.backend == "carving"
-    assert starter.init.points_path == "points_vhull_ibr_stride2"
+    assert starter.init.points_path == "points_vhull_ibr_stride1"
+    assert config.init.keyframe_stride == 1
+    assert config.init.num_velocity_nns == 3
+    assert config.train.iterations == 35000
+    assert config.data.scale == 1.0
     assert config.init.seed == 0
     assert config.init.backend == "carving"
     assert config.init.points_path == (
         tmp_path / f"points_vhull_ibr_stride{config.init.keyframe_stride}"
     )
+    assert f"--output {config.init.points_path}" in capsys.readouterr().out
 
 
 def test_manifest_only_supports_arbitrary_paths_and_explicit_timestamps(tmp_path):

@@ -136,19 +136,20 @@ def test_cache_switch_avoids_model_load_and_pins_provenance(tmp_path, monkeypatc
 
 
 @pytest.mark.parametrize("heldout", [False, True])
-def test_uncalibrated_cache_restores_rig_without_inference(tmp_path, monkeypatch, fake_torch, heldout):
+@pytest.mark.parametrize("positions", [[0], [0, 1]])
+def test_uncalibrated_cache_restores_rig_without_inference(tmp_path, monkeypatch, fake_torch, heldout, positions):
     config, scene = tiny_scene(tmp_path, calibrated=False, heldout=heldout)
     provisional = copy.deepcopy(scene)
     loader = Mock(side_effect=lambda *_args, **_kwargs: (TinyDA3(), "cpu"))
     monkeypatch.setattr(da3, "_load_model", loader)
-    first = da3.generate_da3_points(config, scene, [0, 1])
+    first = da3.generate_da3_points(config, scene, positions)
     # Includes the waiting-process case: its Scene predates camera publication.
-    second = da3.generate_da3_points(config, provisional, [0, 1])
+    second = da3.generate_da3_points(config, provisional, positions)
     assert not second.generated
     assert provisional.calibration_available
     reloaded = Scene.from_config(config)
     assert reloaded.calibration_available
-    third = da3.generate_da3_points(config, reloaded, [0, 1])
+    third = da3.generate_da3_points(config, reloaded, positions)
     assert first.cache_root == second.cache_root == third.cache_root
     assert loader.call_count == 1
     for camera in scene.cameras:
@@ -157,21 +158,23 @@ def test_uncalibrated_cache_restores_rig_without_inference(tmp_path, monkeypatch
 
 
 @pytest.mark.parametrize("change", ["scale", "image", "model"])
-def test_stale_camera_inputs_are_rejected(tmp_path, monkeypatch, fake_torch, change):
+@pytest.mark.parametrize("positions", [[0], [0, 1]])
+def test_stale_camera_inputs_are_rejected(tmp_path, monkeypatch, fake_torch, change, positions):
     config, scene = tiny_scene(tmp_path, calibrated=False)
     monkeypatch.setattr(da3, "_load_model", lambda *_args, **_kwargs: (TinyDA3(), "cpu"))
-    old = da3.generate_da3_points(config, scene, [0, 1])
+    old = da3.generate_da3_points(config, scene, positions)
     if change == "scale":
         config.data.scale = .5
     elif change == "image":
-        assert cv2.imwrite(str(scene.view(0, 0).path), np.full((4, 4, 3), 120, np.uint8))
+        # Even a first-frame rig must be invalidated when another frame changes.
+        assert cv2.imwrite(str(scene.view(1, 0).path), np.full((4, 4, 3), 120, np.uint8))
     else:
         config.init.da3.model_name = "different-weights"
     requested = Scene.from_config(config)
     assert not requested.calibration_available
     assert requested.view(0, 0).size == ((2, 2) if change == "scale" else (4, 4))
-    assert not _valid_da3_cache(config, requested, old.cache_root, [0, 1], [0, 1])
-    new = da3.generate_da3_points(config, requested, [0, 1])
+    assert not _valid_da3_cache(config, requested, old.cache_root, positions, positions)
+    new = da3.generate_da3_points(config, requested, positions)
     assert new.generated and new.cache_root != old.cache_root
     assert Scene.from_config(config).calibration_available
 
