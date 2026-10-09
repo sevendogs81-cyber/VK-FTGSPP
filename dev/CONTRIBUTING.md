@@ -1,7 +1,9 @@
 # Maintainer notes
 
+Run commands from the repository root.
+
 This repository is maintained by a single author. Code contributions are not
-solicited for this release. Read LICENSE before using or redistributing, and
+solicited for this release. Read [LICENSE](../LICENSE) before using or redistributing, and
 keep third-party attribution and the research-only licensing boundary.
 
 Users should install with `bash scripts/setup.sh` from a clone. Maintainers
@@ -16,17 +18,14 @@ Shader layout changes must update the C++ push constants/descriptors and
 behavior tests together.
 
 The supported surface is the installed CLI plus the YAML keys documented in
-`docs/first-run.md`, `docs/arguments.md`, and `docs/architecture.md`, on **one GPU**. Two-device
+`docs/first-run.md`, `docs/arguments.md`, and `dev/docs/architecture.md`, on **one GPU**. Two-device
 pair code, `dev/tests/gpu/` scripts, and `.github/workflows/gpu.yml` stay in the
 tree for engineering; they are in development and not a user-facing
 first-release path. `dev/tools/` scripts are unsupported research helpers and
 may change without notice.
 
-Do not commit generated SPIR-V, extension binaries, datasets, weights, runs, or
-the local-only notes `docs/foreground_reconstruction_plan.md`,
-`docs/initialization_pipeline_improvement_plan.md`, `docs/validation.md`,
-`docs/viewer_plan.md`, `docs/viewer_performance.md`, `docs/viewer_rgba8.md`, or
-the raw `docs/viewer*_benchmark_*.json` measurements.
+Do not commit generated SPIR-V, extension binaries, datasets, weights, runs,
+or private design/QA notes under `dev/local/`.
 Keep optional Torch imports out of the ordinary CLI/training path.
 
 Report issues with the command/config, doctor output, package/build versions and

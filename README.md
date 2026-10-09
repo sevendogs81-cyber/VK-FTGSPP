@@ -62,7 +62,7 @@ See [viewer controls and export](docs/viewer.md) for screenshots and videos.
 
 - [Resume, evaluate and troubleshoot](docs/usage.md)
 - [Data formats](docs/data.md) · [Training settings](docs/arguments.md)
-- [Performance measurements](docs/performance.md) · [Development](CONTRIBUTING.md)
+- [Performance measurements](docs/performance.md) · [Development](dev/README.md)
 
 The showcase illustrates a real reconstruction; a downloadable reproduction
 bundle is not currently included. A small [installation check](docs/install.md#check-the-installation)

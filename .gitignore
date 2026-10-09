@@ -24,7 +24,9 @@ __pycache__/
 
 native/shaders/**/checksum.json
 
-# Local design/QA notes. Not part of the public snapshot.
+# Local design/QA notes.
+/dev/local/
+# Legacy paths remain ignored to protect existing checkouts. Not part of the public snapshot.
 /docs/foreground_reconstruction_plan.md
 /docs/initialization_pipeline_improvement_plan.md
 /docs/validation.md

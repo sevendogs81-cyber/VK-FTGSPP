@@ -63,11 +63,6 @@ ftgspp render --run /path/to/run --camera-path /path/to/viewer_path.json \
 Choose a new output directory. `--video` keeps the PNG frames and adds an MP4.
 For a single frame, use the [still-render command](viewer.md#save-images-and-video).
 
-Camera paths use JSON schema `ftgspp-camera-path-v1`, with a `keyframes` array.
-Each entry has `path_time` and a `camera` containing `width`, `height`, `K[3][3]`,
-`w2c[4][4]` and `timestamp`. Times must strictly increase; camera poses use
-OpenCV conventions. Saving a path in the viewer provides a working example.
-
 ## Open older models
 
 Current runs include `viewer_manifest.json`. For an older run, recover metadata

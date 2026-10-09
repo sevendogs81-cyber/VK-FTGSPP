@@ -104,7 +104,7 @@ values, including the counted user-cloud budget; loading them never reselects a
 budget from the preset label. `train --print-config` prints the same effective
 configuration without importing the runner or creating a run. DA3 geometry
 scheduling still resolves later against the actual scene and writes its cache
-metadata. See [arguments.md](arguments.md).
+metadata. See [arguments.md](../../docs/arguments.md).
 
 Point preparation v4 (colorize v2) reuses frame-scoped masks/validity between
 bounds, coarse/fine carving and IBR; coarse/fine projections share prepared device
@@ -130,7 +130,7 @@ the same generation and views.
 ### Batch size four
 
 Ordinary single-device foreground training supports batch size four (B4). See
-[configuration requirements](arguments.md#batch-size).
+[configuration requirements](../../docs/arguments.md#batch-size).
 
 A compile-time specialization of the shared parameter backward accumulates
 the first three complete gradients with weight 0.25 directly into the existing
@@ -274,3 +274,10 @@ The status bar reports host-observed total/forward/pack+readback time, cache reu
 renderer buffer allocation and encoded size. The frame protocol reports
 `rgba8_ms`, `readback_bytes` and `encode_ms`; composition and D2H have a combined
 host timing, not separate GPU timestamps. These are not end-to-end latency or FPS.
+
+## Viewer camera-path format
+
+Camera paths use JSON schema `ftgspp-camera-path-v1`, with a `keyframes` array.
+Each entry has `path_time` and a `camera` containing `width`, `height`, `K[3][3]`,
+`w2c[4][4]` and `timestamp`. Times must strictly increase; camera poses use
+OpenCV conventions. Saving a path in the viewer provides a working example.

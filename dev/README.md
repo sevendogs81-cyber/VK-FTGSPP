@@ -1,12 +1,18 @@
-# Maintainer tree
+# Development and maintenance
 
-This directory is **not** part of the user path (`scripts/setup.sh`,
-`ftgspp`, and `examples/`). Keep it for CI, agents, and local research.
-Unsupported `tools/` are omitted from release source distributions.
+User installation and usage guides are in [docs/](../docs/README.md).
+Run development commands from the repository root.
 
-- `tests/` — CPU contracts and GPU engineering scripts. Official evaluation
-  is still `ftgspp eval`.
-- `tools/` — unsupported research helpers; they may change without notice.
+- [Maintainer notes](CONTRIBUTING.md): builds, dependencies and release conventions.
+- [Architecture](docs/architecture.md): initialization, training, checkpoints and viewer internals.
+- [Benchmarks](docs/benchmarks.md): measurements, profiling and reproduction commands.
+- [Hardware validation](docs/hardware-validation.md): Vulkan capability gates.
+- [Migration history](docs/migration-history.md) and [source history](docs/source-history.md).
+- [Agent guide](agent-guide.md): repository-wide development instructions.
+- `tests/`: CPU contracts and GPU verification scripts.
+- `tools/`: unsupported research helpers, omitted from source distributions; official evaluation is `ftgspp eval`.
+- `records/`: historical showcase-generation metadata; media remains in `docs/assets/`.
+- `local/`: ignored private plans and QA records, excluded from releases.
 
 ## Viewer verification
 

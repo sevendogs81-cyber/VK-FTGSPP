@@ -71,4 +71,4 @@ colored target. This checks execution, not real-scene reconstruction quality.
 | No `VIABLE` GPU | Check the driver and [supported hardware](hardware.md) |
 | Missing optional package | Add its setup flag and reactivate `.venv` |
 
-For manual builds and dependency pins, see [maintainer notes](../CONTRIBUTING.md).
+For manual builds and dependency pins, see [maintainer notes](../dev/CONTRIBUTING.md).

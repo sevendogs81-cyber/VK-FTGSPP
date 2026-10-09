@@ -11,5 +11,6 @@ When you need more detail:
 - [Installation options](install.md) and [GPU requirements](hardware.md)
 - [Viewer exports and saved sessions](viewer-reference.md)
 
-For developers: [contributing](../CONTRIBUTING.md), [architecture](architecture.md),
-[benchmarks](performance.md) and [migration notes](migration.md).
+[Performance](performance.md) · [Upgrading](migration.md)
+
+Development and maintenance documentation lives in [dev/](../dev/README.md).

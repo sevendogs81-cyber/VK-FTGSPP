@@ -12,7 +12,7 @@ requires all of the following:
 - Linux x86_64 with glibc 2.28 or newer (2.31 or newer when installing the
   optional TensorBoard tools);
 - one physical NVIDIA GPU selected by its Vulkan device ID;
-- a driver exposing Vulkan 1.2 and the native capabilities below;
+- a driver exposing Vulkan 1.2 and the features checked by `doctor`;
 - a device reported as **`VIABLE`** by `ftgspp doctor`; and
 - enough device memory for the selected Gaussian count, image resolution,
   optimizer state, and rasterizer workspace.
@@ -23,40 +23,12 @@ implementations such as `llvmpipe`, non-NVIDIA GPUs, Windows, non-x86_64 Linux,
 and a user-facing multi-GPU training configuration are outside the first-release
 support boundary.
 
-## Native capability gates
-
-The current native build prints its exact compiled requirements before listing
-devices. With the shipped 16×16 tile configuration, the full gate is:
-
-| Capability | Current requirement | Why it is needed |
-|---|---:|---|
-| Vulkan API | 1.2 or newer | The native instance and device feature chain use Vulkan 1.2 |
-| Compute queue | Compute plus timestamp queries | Submission and GPU timing |
-| Subgroup width | At least 32; shipped shaders use 32 lanes | Rasterization, scans, optimizer, and relocation kernels |
-| Workgroup counts | At least `[786432, 256, 1]` | Worst-case dispatch ranges in the current renderer |
-| Workgroup sizes | At least `[1024, 16, 1]` | Compiled compute local sizes |
-| Compute shared memory | At least 21,712 bytes | Raster backward, SSIM, and radix-sort kernels |
-| Push constants | At least 224 bytes | Largest native shader uniform block |
-| `shaderInt16` | Required | Native shader arithmetic and storage paths |
-| `shaderInt64` | Required | Exact integer construction and training kernels |
-| `shaderBufferFloat32AtomicAdd` | Required | FTGSPP loss, gradient, and optimizer kernels |
-
-Timeline semaphores improve the submission path but are not a hard compatibility
-gate; the runtime has a fence fallback. The local desktop viewer additionally
-needs one queue family that supports compute, graphics, timestamp queries, and
-presentation to the active display, plus swapchain and
-`shaderDrawParameters` support. The SSH browser viewer and `ftgspp render` do
-not require a server display.
-
-These are execution requirements, not a performance recommendation. A device
-can pass every feature check and still be impractical for a large scene.
-
 ## Model-level runnable estimate
 
 The following model families are part of the documented runnable range even
 though most have not been exercised in the maintained acceptance machine. Here,
 **runnable (estimated)** means that the architecture and NVIDIA Linux driver are
-expected to satisfy the native gate above. A listed GPU counts as runnable when
+expected to satisfy the native capability checks. A listed GPU counts as runnable when
 it has at least 4 GB of VRAM, the proprietary driver exposes it as a Vulkan
 physical device, and `ftgspp doctor` reports it as `VIABLE`.
 
@@ -96,11 +68,8 @@ runnable range even if a particular machine happens to initialize.
 ## Validated hardware
 
 GPU acceptance has been exercised on NVIDIA GeForce RTX 4090 24 GB devices.
-Single-device training, evaluation, rendering,
-headless and browser viewers, numerical checks, overflow replay, checkpoints,
-and pipeline acceptance have been exercised on this hardware. The two-device
-tests are engineering checks for code that remains outside the supported user
-workflow.
+Training, evaluation, rendering and browser viewing have been exercised on
+this hardware.
 
 The estimated families above are accepted as runnable hardware, while
 "validated" means that the repository's GPU acceptance suite has actually run
@@ -121,14 +90,6 @@ Use the Vulkan ID printed in the device list. It can differ from the CUDA or
 1. The selected device name is the intended NVIDIA GPU, rather than
    `llvmpipe` or another adapter.
 2. Its classification is `VIABLE`.
-3. `I16`, `I64`, and `F32Atomic` are all present.
-4. The reported subgroup, group counts, group sizes, shared memory, and push
-   constant limits meet the requirement line printed above the device list.
-
-For example, the maintained RTX 4090 environment reports a 32-lane subgroup,
-`[2147483647, 65535, 65535]` group counts,
-`[1024, 1024, 64]` group sizes, 49,152 bytes of compute shared memory, and all
-three required shader features.
 
 Passing `doctor` does not reserve the memory required by a real run. Peak memory
 depends on the model budget, input resolution, projected tile load, training
