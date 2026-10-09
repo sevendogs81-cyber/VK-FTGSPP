@@ -4,7 +4,7 @@
 # Prepare the versioned PLY set before training:
 #   ftgspp prepare points --method point_filtering \
 #     --config examples/foreground_point_filtering.yaml \
-#     --output data/my_scene/points_vhull_filtered_stride10
+#     --output data/my_scene/points_vhull_filtered_stride1
 pipeline:
   mode: foreground
 data:
@@ -12,7 +12,7 @@ data:
   name: my_foreground_point_filtering
   root: ../data/my_scene
   frames: {start: 0, stop: 300}
-  scale: 0.5
+  scale: 1.0
   train_cameras: [0, 1, 2]
   eval_cameras: [3]
   masks:
@@ -20,11 +20,12 @@ data:
     manifest_path: ../data/my_scene/manifests/masks.json
 init:
   backend: point_filtering
-  points_path: ../data/my_scene/points_vhull_filtered_stride10
+  points_path: ../data/my_scene/points_vhull_filtered_stride1
   seed: 0
   num_gaussians: 2000000
-  keyframe_stride: 10
+  keyframe_stride: 1
 train:
-  iterations: 30000
+  # Adaptive frame-count budget; explicit iterations override it.
+  preset: balanced
 run:
   output_path: ../runs/my_foreground_point_filtering

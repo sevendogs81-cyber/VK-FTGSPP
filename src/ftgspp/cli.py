@@ -20,7 +20,7 @@ _PREPARE_SUBCOMMANDS = {
     "viewer": "publish portable viewer camera/time metadata from an existing run",
     "dataset": "index a rectangular image grid or validate a view manifest",
     "masks": "generate a BiRefNet mask cache (optional extra)",
-    "points": "carve masks or hull-filter existing points, then apply IBR color",
+    "points": "carve masks, filter points, or color user XYZ from images",
     "selfcap": "SelfCap layout adapter",
     "final-test": "validate a locked final-test manifest against a run",
 }
@@ -129,6 +129,10 @@ def main(argv: list[str] | None = None) -> None:
         ),
     )
     train.add_argument("--set", action="append", default=[], metavar="KEY=VALUE")
+    train.add_argument(
+        "--print-config", action="store_true",
+        help="print the effective YAML and exit without training or creating a run",
+    )
     evaluate = commands.add_parser("eval", help="evaluate a completed run")
     evaluate.add_argument("--run", type=Path, required=True)
     evaluate.add_argument("--device", type=int, default=0)
@@ -175,7 +179,6 @@ def main(argv: list[str] | None = None) -> None:
             finally:
                 backend.close()
         return
-    from ftgspp.training.runner import NativeRunner
     if args.command == "train":
         if args.resume:
             if args.output or args.devices or args.pipeline or args.set:
@@ -238,8 +241,13 @@ def main(argv: list[str] | None = None) -> None:
                 if value is not None:
                     OmegaConf.update(overrides, key, str(Path(value).expanduser().resolve()))
             config = resolve_config(OmegaConf.merge(node, overrides), base_dir=path.parent).config
+        if args.print_config:
+            print(resolve_config(OmegaConf.structured(config), effective=True).yaml, end="")
+            return
+        from ftgspp.training.runner import NativeRunner
         NativeRunner(config).run()
         return
+    from ftgspp.training.runner import NativeRunner
     from ftgspp.training.backend import NativeVulkanBackend, camera_extent
     from ftgspp.data.scene import load_final_test_scene
     from ftgspp.io.checkpoint import load_model

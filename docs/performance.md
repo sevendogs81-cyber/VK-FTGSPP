@@ -104,7 +104,7 @@ cost rather than equivalent reconstruction quality.
 
 ## Local batch execution cost
 
-See [batch-size configuration](configuration.md#batch-size) for B4's supported scope.
+See [batch-size configuration](arguments.md#batch-size) for B4's supported scope.
 B1 keeps its fused backward/Adam update. B4 reuses the same parameter-backward
 and fused-commit shader sources: the first three views accumulate gradients
 with weight 0.25 into the existing FP32 Adam input buffers; the fourth finishes

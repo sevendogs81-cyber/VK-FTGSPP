@@ -60,5 +60,5 @@ def test_indexing_preserves_capture_settings_in_same_config(tmp_path, mask_kind)
     assert resolved.data.frames.stop == 2
     assert resolved.data.masks.source == mask_kind
     assert resolved.data.eval_cameras == [2]
-    assert resolved.init.points_path == capture / "points_vhull_ibr_stride2"
+    assert resolved.init.points_path == capture / "points_vhull_ibr_stride1"
     assert Scene.from_config(resolved).view(0, 0).load_mask().max() == 1

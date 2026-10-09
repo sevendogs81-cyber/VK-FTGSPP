@@ -17,6 +17,7 @@ data:
   extracted_path: ${data.root}/images
   # Optional ftgspp-dataset-v1 JSON for arbitrary image filenames/locations.
   view_manifest: null
+  # Scene preserves its half-resolution starter; foreground uses 1.0.
   scale: 0.5
   frames:
     start: 0
@@ -40,7 +41,11 @@ init:
   # native image size. Users do not need to set process_res / max_points.
   backend: auto
   points_path: ${data.root}/points_stride${init.keyframe_stride}
+  # Profile overrides: scene round(fps/6), bounded by clip length; foreground 1.
+  # Foreground also uses a fixed seed and 3-neighbor velocity init.
   keyframe_stride: 10
+  # Generated geometry uses this total. Explicit backend=points defaults
+  # to the selected PLY population; an explicit number always overrides it.
   num_gaussians: 2000000
   # Null preserves the historical train.seed-coupled initialization. Set a
   # fixed value to reuse one DA3/L3 cache across multiple training seeds.
@@ -90,7 +95,13 @@ init:
     target_bounds: null
     pixel_transform_convention: source_index_scale
 train:
+  # Both profiles select balanced; preview / extended change the automatic
+  # horizon. Explicit iterations win, and null restores auto on new runs.
+  preset: null
   batch_size: 1
+  # Profile overrides: ceil_1000(R * max(0.5, frames / Fref)); balanced
+  # R=30k/Fref=60 for scene, R=70k/Fref=121 for foreground. Clocks scale
+  # with the resolved horizon; the numbers below are reference values.
   iterations: 30000
   background:
     mode: fixed

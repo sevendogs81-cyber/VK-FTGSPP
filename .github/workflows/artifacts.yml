@@ -45,8 +45,11 @@ jobs:
                              for n in names)
               assert not any("/dev/tools/" in n or "/.github/workflows/" in n
                              for n in names)
+              assert not any(n.split("/", 2)[1] in {"data", "runs", "reports"}
+                             for n in names if "/" in n)
               for suffix in (
                   "src/ftgspp/training/background.py",
+                  "src/ftgspp/config/training_schedule.py",
                   "src/ftgspp/optional/birefnet.py",
                   "src/ftgspp/optional/visual_hull.py",
                   "src/ftgspp/io/viewer_manifest.py",
@@ -58,14 +61,20 @@ jobs:
                   "docs/migration.md",
                   "docs/install.md",
                   "docs/usage.md",
-                  "docs/data.md",
-                  "docs/configuration.md",
-                  "examples/make_tiny_scene.py",
+                  "docs/first-run.md",
+                  "docs/arguments.md",
                   "docs/viewer.md",
+                  "docs/viewer-reference.md",
+                  "docs/data.md",
                   "docs/performance.md",
                   "scripts/setup.sh",
+                  "scripts/setup_profile.sh",
+                  "scripts/verify_install.py",
                   "tests/test_gpu_foreground_numeric.py",
+                  "examples/make_tiny_scene.py",
                   "examples/foreground_scene.yaml",
+                  "examples/foreground_preview.yaml",
+                  "examples/scene_preview.yaml",
                   "examples/foreground_fixed_black.yaml",
                   "examples/foreground_point_filtering.yaml",
                   "examples/foreground_visual_hull.yaml",
@@ -93,3 +102,18 @@ jobs:
         with:
           name: linux-x86_64-python312-candidates
           path: dist/
+
+  installer:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Full optional setup (no GPU or model downloads)
+        run: bash scripts/setup.sh --with-init --with-viewer --with-remote --with-lpips --with-tensorboard --skip-doctor
+      - name: Additive setup retains the complete profile
+        run: |
+          bash scripts/setup.sh --with-remote --skip-apt --skip-doctor
+          .venv/bin/python -c 'import ftgspp._ftgspp_viewer, depth_anything_3.api, transformers, torchmetrics, tensorboard, websockets'
+      - name: Explicit reset returns to Torch-free headless core
+        run: |
+          bash scripts/setup.sh --reset-profile --skip-apt --skip-doctor
+          .venv/bin/python -c 'import importlib.util; from ftgspp import _ftgspp_vk; assert importlib.util.find_spec("torch") is None; assert importlib.util.find_spec("ftgspp._ftgspp_viewer") is None'

@@ -162,12 +162,16 @@ if(FTGSPP_BUILD_VIEWER)
         URL https://codeload.github.com/ocornut/imgui/tar.gz/refs/tags/v1.91.9b
         URL_HASH SHA256=8e1bbc76c71d74fef2fb85db7e7ca8eba13d6a86623c54992b60162db554ffdb)
     FetchContent_MakeAvailable(glfw imgui)
+    # GLFW uses POSIX APIs even when the parent project requests strict C99.
+    target_compile_definitions(glfw PRIVATE _POSIX_C_SOURCE=200809L)
     add_library(ftgspp_imgui STATIC
         ${imgui_SOURCE_DIR}/imgui.cpp ${imgui_SOURCE_DIR}/imgui_draw.cpp
         ${imgui_SOURCE_DIR}/imgui_tables.cpp ${imgui_SOURCE_DIR}/imgui_widgets.cpp
         ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
         ${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp)
     target_include_directories(ftgspp_imgui PUBLIC ${imgui_SOURCE_DIR})
+    # This viewer uses Vulkan; GLFW must not require OpenGL development headers.
+    target_compile_definitions(ftgspp_imgui PRIVATE GLFW_INCLUDE_NONE)
     target_link_libraries(ftgspp_imgui PUBLIC glfw Vulkan::Vulkan)
     pybind11_add_module(_ftgspp_viewer src/viewer/presenter.cpp src/viewer/viewer_app.cpp
         src/bindings/viewer_bindings.cpp)

@@ -1,12 +1,12 @@
 # Starter template, not a quality-reproduction recipe.
 # Set capture FPS, frame range, camera split and paths before use.
 # Calibrated visual-hull + IBR, the default foreground geometry path.
-# Prepare the PLY set first. DA3 supplies automatic training-only bounds:
+# Prepare PLYs first. Calibrated masks supply bounds; DA3 is the fallback:
 #   ftgspp prepare points --method carving \
 #     --config examples/foreground_visual_hull.yaml \
-#     --output data/my_scene/points_vhull_ibr_stride10 \
+#     --output data/my_scene/points_vhull_ibr_stride1 \
 #     --resolution 192 --coarse-resolution 48 --sampling surface_band \
-#     --surface-band-layers 2 --max-points 250000
+#     --surface-band-layers 2 --quality balanced
 # The same YAML then trains from that integrity-checked PLY/manifest directory.
 pipeline:
   mode: foreground
@@ -15,7 +15,7 @@ data:
   name: my_foreground_visual_hull
   root: ../data/my_scene
   frames: {start: 0, stop: 300}
-  scale: 0.5
+  scale: 1.0
   train_cameras: [0, 1, 2]
   eval_cameras: [3]
   masks:
@@ -23,12 +23,13 @@ data:
     manifest_path: ../data/my_scene/manifests/masks.json
 init:
   backend: carving
-  points_path: ../data/my_scene/points_vhull_ibr_stride10
+  points_path: ../data/my_scene/points_vhull_ibr_stride1
   # Keep geometry initialization stable across training-seed sweeps.
   seed: 0
   num_gaussians: 2000000
-  keyframe_stride: 10
+  keyframe_stride: 1
 train:
-  iterations: 30000
+  # Adaptive frame-count budget; explicit iterations override it.
+  preset: balanced
 run:
   output_path: ../runs/my_foreground_visual_hull

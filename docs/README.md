@@ -1,18 +1,15 @@
 # Documentation
 
-New users: [install](install.md), run the [tiny check](../README.md#check-the-complete-workflow),
-then follow [usage](usage.md) with your own capture. Keep the same generated YAML
-throughout preparation and training.
+Start with [installation](../README.md#install), then
+[train your first capture](first-run.md) and [open the result](viewer.md).
 
-| Guide | Question it answers |
-|---|---|
-| [Installation](install.md) | What do I need and which components should I install? |
-| [Usage](usage.md) | How do I prepare, train, resume and check one capture? |
-| [Data](data.md) | How should images, masks, cameras and timestamps be represented? |
-| [Configuration](configuration.md) | What do the defaults mean and what should I change? |
-| [Viewer](viewer.md) | How do I view, capture and export results? |
+When you need more detail:
 
-Advanced references: [hardware](hardware.md), [performance](performance.md),
-[architecture](architecture.md), [migration](migration.md).
-Maintainers: [contributing](../CONTRIBUTING.md) and [dev](../dev/README.md).
-Local design/QA notes are gitignored and are not part of the public documentation.
+- [Resume, evaluate and troubleshoot](usage.md)
+- [Data formats and existing point clouds](data.md)
+- [Training settings](arguments.md)
+- [Installation options](install.md) and [GPU requirements](hardware.md)
+- [Viewer exports and saved sessions](viewer-reference.md)
+
+For developers: [contributing](../CONTRIBUTING.md), [architecture](architecture.md),
+[benchmarks](performance.md) and [migration notes](migration.md).

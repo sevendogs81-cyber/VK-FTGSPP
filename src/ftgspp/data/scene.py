@@ -1773,9 +1773,20 @@ class Scene:
                 if not (cache_root / "camera_manifest.npz").is_file():
                     continue
                 try:
+                    # Carving may estimate only the first keyframe to recover
+                    # the static rig. Validate that exact DA3 request against
+                    # the complete provisional Scene (including all content
+                    # hashes), without requiring unused depth for later times.
+                    record = json.loads((cache_root / "manifest.json").read_text(encoding="utf-8"))
+                    bootstrap = (
+                        isinstance(record, dict)
+                        and record.get("keyframe_frames") == [int(frames[0])]
+                    )
+                    rig_positions = [0] if bootstrap else positions
+                    rig_frames = [int(frames[0])] if bootstrap else selected_frames
                     if not _valid_da3_cache(
-                        config, dataset, cache_root, expected_frames=selected_frames,
-                        frame_positions=positions,
+                        config, dataset, cache_root, expected_frames=rig_frames,
+                        frame_positions=rig_positions,
                     ):
                         continue
                     geometry = _load_da3_camera_manifest(config, camera_ids, cache_root=cache_root)

@@ -66,6 +66,7 @@ class InitializeSamplingTests(unittest.TestCase):
         for schema in (
             "ftgspp-visual-hull-ibr-v2",
             "ftgspp-visual-hull-ibr-v3",
+            "ftgspp-visual-hull-ibr-v4",
         ):
             with (
                 self.subTest(schema=schema),

@@ -67,11 +67,22 @@ XYZ/RGB. New DA3 cache directories use a readable configuration prefix
 identity. `init.seed` can pin this namespace independently of `train.seed`.
 `init.backend=points` remains an explicit, calibrated/user-cloud path.
 
+Explicit user-cloud budgets in both modes default to the selected PLY population and are
+frozen as integers in the effective plan. `prepare points --method colorize`
+converts XYZ-only input into RGB PLYs using the existing IBR implementation or
+explicit neutral gray. Its `ftgspp-point-color-v2` manifest records source/output
+hashes and data identity; the generic points initializer validates that manifest.
+This method preserves geometry unless an explicit point cap is requested.
+
 The foreground profile defaults to `init.backend=carving`. Both public geometry
 preparations can reuse or generate the foreground DA3 cache. Explicit
 `--input-points` supplies existing geometry; carving also accepts `--bounds`.
-Without explicit bounds, carving derives robust world bounds from the input
-cloud, then creates a mask-supported surface-band grid. Its coarse pass expands
+With `--input-points`, carving derives robust world bounds from those clouds.
+Otherwise calibrated enclosing rigs use support-aware per-frame silhouette-frustum
+bounds; unsuitable/clipped envelopes fall back to DA3. Uncalibrated captures first
+recover the static rig with one DA3 keyframe. Rig-only reload validates this
+first-frame request against the complete dataset identity and model inputs.
+Carving then creates a mask-supported surface-band grid. Its coarse pass expands
 to sparse fine-grid indices, so projection work is
 limited to surviving regions; the CUDA path keeps vote arrays on-device and
 returns only selected indices. Point filtering retains DA3 samples supported by
@@ -82,6 +93,30 @@ audit metadata and emits a warning when it differs from the current runtime.
 `init.backend=points` remains the explicit generic/user-cloud path, while
 `init.backend=da3` consumes the foreground-aware DA3 cloud without either
 visual-hull preparation.
+
+New scene and foreground plans resolve `train.preset` into task-specific
+frame-adaptive horizons and proportional relocation/evaluation clocks before
+validation. Scene additionally scales CC/gate-score warm-up and the separate
+HS budget, with phase-local HS relocation. Its default geometry stride follows
+FPS (roughly 1/6-second spacing); foreground remains every-frame. Explicit numeric
+values override these defaults. Versioned effective configs persist concrete
+values, including the counted user-cloud budget; loading them never reselects a
+budget from the preset label. `train --print-config` prints the same effective
+configuration without importing the runner or creating a run. DA3 geometry
+scheduling still resolves later against the actual scene and writes its cache
+metadata. See [arguments.md](arguments.md).
+
+Point preparation v4 (colorize v2) reuses frame-scoped masks/validity between
+bounds, coarse/fine carving and IBR; coarse/fine projections share prepared device
+masks too. RGB decode uses a bounded two-worker prefetch in IBR and DA3. Generated
+color queries default to 4× the average final Gaussian budget per keyframe, with
+2×/8×/uncapped alternatives. Dense geometry still builds the depth buffer, so
+query sampling does not expose previously occluded colors. Original user clouds
+are uncapped unless explicitly requested. Source/data/PLY hashes and completed
+markers remain mandatory for managed artifacts; old v2/v3 and colorize v1
+artifacts remain accepted. The manifest records the resolved preparation choices
+and wall-clock stages. These changes do not alter saved training clocks or L3.
+
 
 ## Optimizer updates
 
@@ -95,7 +130,7 @@ the same generation and views.
 ### Batch size four
 
 Ordinary single-device foreground training supports batch size four (B4). See
-[configuration requirements](configuration.md#batch-size).
+[configuration requirements](arguments.md#batch-size).
 
 A compile-time specialization of the shared parameter backward accumulates
 the first three complete gradients with weight 0.25 directly into the existing
@@ -144,8 +179,9 @@ document them as a user workflow.
 ## Phases and checkpoints
 
 Main training and the hard-separation phase share one optimizer-update
-implementation. Hard separation defaults to 3000 steps with one group-local
-relocation at local step 1500. It has its own local Adam step, seed, LR/freezes
+implementation. Scene hard separation defaults to 10% of the main horizon with
+one group-local relocation at its local midpoint (3000/1500 at 30k main steps).
+Foreground retains its explicit opt-in HS reference of 3000/1500. It has its own local Adam step, seed, LR/freezes
 and fresh moments. It binarizes persistence without zeroing motion, keeps gates
 fixed, continues low-rate velocity optimization, uses opacity-and-gradient donor
 scoring within each persistence group, and exports the terminal hard-phase state.

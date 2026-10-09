@@ -1,107 +1,104 @@
-# Prepare your data
+# Data formats
 
-Start with synchronized multi-view images. The easiest supported layout uses
-numeric camera directories and numeric frame filenames. The training guide
-uses a capture called `my_capture`; replace it with your own path.
+For the complete workflow, follow [Train your first capture](first-run.md).
+This page covers input formats and reusing masks, calibration or point clouds.
 
-## Required and optional inputs
+## Images and cameras
 
-| Input | Scene mode | Foreground mode |
-|---|---|---|
-| RGB images, capture FPS and camera split | Required | Required |
-| Camera calibration | Supply it, or estimate with DA3 | Required for carving; DA3 can estimate it on the direct DA3 route |
-| Foreground masks | Not used | Required: existing files, image alpha, or BiRefNet output |
-| Initialization geometry | Existing keyframe RGB PLYs, or DA3 | Prepared carving/filtering cache, existing points, or direct DA3 |
-
-Indexing images does not generate calibration, masks or points. It does not
-verify that the images describe a well-synchronized, calibrated capture.
-
-## Directory layout
+Use synchronized images from a fixed camera rig. Each camera must have every
+frame in the selected range, with numeric camera IDs and frame filenames:
 
 ```text
 my_capture/
-├── intri.yml                    # EasyMocap intrinsics, when available
-├── extri.yml                    # EasyMocap world-to-camera extrinsics
+├── intri.yml                 # optional EasyMocap calibration
+├── extri.yml
 ├── images/
 │   ├── 0/000000.jpg
 │   ├── 0/000001.jpg
 │   ├── 1/000000.jpg
-│   └── 1/000001.jpg              # every camera has every selected frame
-└── fmasks/                      # optional existing external masks
+│   └── 1/000001.jpg
+└── fmasks/                   # optional existing masks
     ├── 0/000000.png
     ├── 0/000001.png
     ├── 1/000000.png
     └── 1/000001.png
 ```
 
-Use unique camera/frame pairs and a contiguous, rectangular selected frame
-range. PNG and JPEG are convenient RGB formats. Use a lossless format for masks.
-A flat `c<camera>-f<six-digit-frame>.*` image directory is also supported.
-For other filenames, use a dataset manifest as described below.
+A flat directory with `c<camera>-f<six-digit-frame>.*` filenames also works.
+For arbitrary paths, use a [manifest](#custom-image-manifest).
+`--eval-cameras` takes camera IDs, not list positions; the remaining cameras
+train the model. Leave at least one training camera.
 
-`--eval-cameras` takes **camera IDs**, not list positions. The remaining cameras
-train the model unless an explicit `--train-cameras` list is supplied. Leave at
-least one training camera. Omit the eval flag only when you intentionally want
-no held-out camera evaluation; training views cannot establish novel-view quality.
+Set `--fps` to the actual indexed image rate. `--start` includes its frame and
+`--stop` excludes it. Without these flags, indexing uses the available span.
+For example, `--start 0 --stop 225` selects frames 0 through 224.
 
-## Frames, FPS and synchronization
+## Calibration and synchronization
 
-- Set `--fps` to the capture rate, not a preview video's encoding rate. Omitting
-  it on image indexing uses 60 FPS; the tool does not measure capture FPS.
-- `--start` is inclusive and `--stop` is exclusive. `0..225` selects frames
-  0 through 224. Without these flags, indexing selects the available frame span.
-- With no per-view timestamps or time-offset file, cameras are treated as
-  synchronized and scene time is `frame / fps` seconds.
-- A `timecode.json`, `t_offsets.json` or `time_offsets.json` in a searched data
-  root supplies camera-to-offset seconds, for example `{"0": 0.0, "1": 0.002}`.
-  The convention is `frame / fps - offset`. A supplied file must cover selected
-  cameras under the default strict policy. Do not add offsets merely to make a
-  validation error disappear; establish synchronization from the capture.
+Place EasyMocap/OpenCV FileStorage `intri.yml` and `extri.yml` beside `images/`,
+or pass `--calibration DIR` during indexing. Camera names must match the images.
+Intrinsics contain `names`, `K_<name>` and optionally distortion `D_<name>`
+(or `dist_<name>`), `H_<name>` and `W_<name>`. Extrinsics contain `T_<name>` and
+either `Rot_<name>` (matrix) or `R_<name>` (Rodrigues vector).
+The [tiny example generator](../examples/make_tiny_scene.py) writes a working pair.
 
-FPS also determines the default initial Gaussian duration:
-`init.keyframe_stride / data.fps`. Changing FPS changes motion semantics.
+Extrinsics map world points to OpenCV camera coordinates: +X right, +Y down,
++Z forward. Supply intrinsics for the original image resolution. Camera
+translations and point clouds must share one world frame and unit of distance.
+Without calibration, DA3 estimates the static rig during initialization/preparation.
 
-## Camera calibration
+Cameras are synchronized by default, with time `frame / fps`. To account for
+known offsets, put `timecode.json`, `t_offsets.json` or `time_offsets.json` in
+the capture root, e.g. `{"0": 0.0, "1": 0.002}`. Values are seconds, covering
+all selected cameras; scene time becomes `frame / fps - offset`.
 
-Use an EasyMocap/OpenCV FileStorage `intri.yml` and `extri.yml` pair. Both refer
-to the same camera names as the images. Intrinsics contain `names`, `K_<name>`
-and optionally `D_<name>` (or `dist_<name>`), `H_<name>` and `W_<name>`.
-Extrinsics contain `T_<name>` and either a `Rot_<name>` rotation matrix or an
-`R_<name>` Rodrigues vector. The tiny [example generator](../examples/make_tiny_scene.py)
-writes a minimal working pair.
+## Use existing masks
 
-Extrinsics map world points into OpenCV camera coordinates: +X right, +Y down,
-+Z forward. Supply intrinsics for the source image resolution. The loader
-handles its configured scaling and calibrated undistortion; keep RGB and masks
-aligned in the same source-image coordinates.
+Add `--mask-root /path/to/fmasks` when indexing foreground images, then skip
+BiRefNet. Use grayscale PNGs with the same dimensions, camera/frame names and
+pixel alignment as the images: 0 is background, 255 is foreground, and values
+between them represent soft edges. For RGBA images, use `--mask-source alpha`.
 
-Camera translations, input PLY positions and explicit carving bounds must use
-one world frame and consistent units. Bounds are six numbers in the order
-`xmin ymin zmin xmax ymax zmax` and must contain the subject throughout the
-selected sequence. Do not copy bounds from another capture.
+RGB is straight/unpremultiplied by default. If your files are premultiplied,
+set `data.masks.rgb_encoding: premultiplied`. For arbitrary mask paths,
+`--mask-manifest FILE` accepts JSON `views` entries with `frame`, `camera_id`
+and `mask_path`; paths resolve relative to that manifest.
 
-## Existing masks
+## Use existing point clouds
 
-For the directory above, index with `--pipeline foreground --mask-root
-/path/to/my_capture/fmasks`. This avoids BiRefNet entirely. For RGBA images use
-`--pipeline foreground --mask-source alpha` instead.
+Supply one RGB PLY per initialization keyframe, named `f000000.ply`, etc.,
+including the last selected frame. Points need world-space XYZ and RGB values.
+Use their actual frame spacing as `N` below:
 
-External masks are scalar images: 0 is background, 1 is foreground after
-normalization. Use grayscale uint8 PNG with values 0–255 (or uint16 with
-0–65535); intermediate values represent soft edges. Floating maps must be
-finite and in [0, 1]. RGB masks with disagreeing channels are rejected.
-Masks must match their RGB image's original dimensions and pixel alignment.
-RGB is straight/unpremultiplied by default; declare `rgb_encoding:
-premultiplied` explicitly if that is how your files were produced.
+```bash
+ftgspp prepare dataset --images "$CAPTURE/images" --fps "$FPS"   --pipeline foreground --eval-cameras "$EVAL_CAMERA" --config "$CONFIG"   --mask-root "$CAPTURE/fmasks" --points /path/to/rgb_points --keyframe-stride N
+```
 
-For nonstandard paths, set `data.masks.manifest_path` to a JSON file with
-`views` containing `frame`, `camera_id` and `mask_path` entries. Paths are
-relative to that manifest. Generated BiRefNet manifests additionally include
-hashes and completion markers; do not edit those caches manually.
+This selects `init.backend: points`; complete calibration and foreground masks
+let you train without BiRefNet or DA3. For scene mode, use `--pipeline scene`
+and omit `--mask-root`. The default model size follows the selected PLY point
+count; inspect it with `ftgspp train --config "$CONFIG" --print-config`.
+
+For **XYZ-only clouds**, first index the images and calibration as usual. Set
+`init.keyframe_stride` to the clouds' actual frame spacing, then add image colors:
+
+```bash
+ftgspp prepare points --method colorize --config "$CONFIG"   --input-points /path/to/xyz_points --output "$CAPTURE/points_rgb"
+```
+
+Use the training command printed on completion. Add `--color-mode gray` for
+neutral colors instead. To also filter a foreground cloud against its masks,
+use `--method point_filtering`. These commands preserve user point counts
+unless filtering removes points or you explicitly set `--max-points`.
+
+Generated carving/filtering directories include integrity manifests. Keep
+those files with their PLYs; arbitrary PLYs cannot substitute for a prepared
+cache. Choose scale, frames and camera split before preparation. If they change,
+regenerate matching geometry in a new directory.
 
 ## Custom image manifest
 
-A minimal `views.json` for one frame and two cameras is:
+For example, save this as `views.json`:
 
 ```json
 {
@@ -114,22 +111,6 @@ A minimal `views.json` for one frame and two cameras is:
 }
 ```
 
-Paths are relative to the manifest. Optional `timestamp` values, in seconds,
-must cover all selected views or none. Optional `rgb_sha256` values are checked.
-Run `ftgspp prepare dataset --manifest views.json --eval-cameras 1` to generate
-a starter config. See `ftgspp prepare dataset --help` for custom output paths.
-
-## Existing point clouds
-
-Scene initialization with `init.backend: auto` looks for a complete RGB PLY set
-at `points_stride10/f000000.ply`, `f000010.ply`, and so on, including the last
-selected frame. Adjust the directory and frame spacing to `init.keyframe_stride`.
-Each point needs world-space XYZ and RGB. An incomplete set can trigger DA3;
-use `init.backend: points` when existing points are an explicit requirement.
-
-Foreground `carving` and `point_filtering` caches additionally need the matching
-integrity manifest produced by `ftgspp prepare points`. Arbitrary PLY files are
-not interchangeable with these caches. Existing PLYs can instead use the explicit
-`points` backend or supply `--input-points` during geometry preparation.
-
-Continue with [training](usage.md).
+Paths are relative to the manifest. Optional `timestamp` values are seconds and
+must cover all selected views. Index it with
+`ftgspp prepare dataset --manifest views.json --eval-cameras 1`.

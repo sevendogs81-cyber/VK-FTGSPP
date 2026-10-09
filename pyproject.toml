@@ -22,18 +22,19 @@ tensorboard = ["tensorboard>=2.18"]
 # only its inference API, so the uv metadata override below replaces that list
 # with the imports exercised by the pinned inference adapter.
 da3 = [
-    "depth-anything-3==0.1.1", "torch>=2.5", "torchvision>=0.20",
+    "depth-anything-3==0.1.1", "torch==2.6.0", "torchvision==0.21.0",
     "addict>=2.4", "einops>=0.8", "evo>=1.33", "imageio>=2.37",
     "moviepy==1.0.3", "pillow>=10", "plyfile>=1.1", "trimesh>=4.4",
     "huggingface-hub>=0.35", "safetensors>=0.4",
 ]
 # Optional Torch dependencies for locked final-test LPIPS. TorchMetrics'
 # learned-perceptual implementation imports torchvision model definitions.
-lpips = ["torch>=2.5", "torchvision>=0.20", "torchmetrics>=1.6"]
+lpips = ["torch==2.6.0", "torchvision==0.21.0", "torchmetrics>=1.6"]
 birefnet = [
-    "torch>=2.5", "torchvision>=0.20", "transformers>=4.45",
+    "torch==2.6.0", "torchvision==0.21.0", "transformers>=4.45",
     "safetensors>=0.4", "timm>=1.0", "kornia>=0.7", "einops>=0.8",
 ]
+# Keep the tested CUDA 12.4 pair; unconstrained upgrades selected CUDA 13.
 [tool.uv]
 # depth-anything-3 0.1.1 imports a small inference subset but declares its
 # complete demo/server/training environment (and numpy<2) as hard runtime
@@ -63,9 +64,9 @@ sdist.include = [
     "src/ftgspp/viewer/*.html",
     "dev/tests/**/*.py", "dev/tests/*.cjs", "dev/README.md",
     "docs/README.md", "docs/architecture.md", "docs/hardware.md", "docs/install.md",
-    "docs/migration.md", "docs/performance.md", "docs/usage.md",
-    "docs/viewer.md", "docs/data.md", "docs/configuration.md",
-    "scripts/setup.sh", "scripts/README.md",
+    "docs/migration.md", "docs/performance.md", "docs/usage.md", "docs/first-run.md",
+    "docs/viewer.md", "docs/arguments.md", "docs/data.md", "docs/viewer-reference.md",
+    "scripts/setup.sh", "scripts/setup_profile.sh", "scripts/verify_install.py", "scripts/README.md",
     "examples/*.yaml", "examples/*.json", "examples/*.py",
     "LICENSE", "LICENSES/*", "THIRD_PARTY.md",
     "CONTRIBUTING.md", "uv.lock",
@@ -73,7 +74,7 @@ sdist.include = [
 sdist.exclude = [
     "**/__pycache__/**", "**/*.pyc", "**/*.pyo", ".pytest_cache/**",
     ".github/workflows/**", "build/**", "dev/tools/**", ".venv/**",
-    "runs/**", "**/*.spv", "**/*.so",
+    "runs/**", "data/**", "reports/**", "**/*.spv", "**/*.so",
     "src/ftgspp/shaders/**",
     "docs/foreground_reconstruction_plan.md",
     "docs/initialization_pipeline_improvement_plan.md",

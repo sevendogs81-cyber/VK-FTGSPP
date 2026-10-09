@@ -16,11 +16,13 @@ init:
   # Keep geometry initialization stable across training-seed sweeps.
   seed: 0
   num_gaussians: 2000000
-  keyframe_stride: 10
+  # Omit stride to use roughly 1/6-second spacing (60 FPS: 10, 30 FPS: 5).
+  # Set it explicitly when your existing PLYs have a fixed frame spacing.
   da3:
     # Set this cache path to persist DA3's generated RGB PLYs.
-    cache_path: ../data/my_scene/points_da3_stride10
+    cache_path: ${data.root}/points_da3_stride${init.keyframe_stride}
 train:
-  iterations: 30000
+  # Adaptive scene budget, including CC warm-up and the separate HS phase.
+  preset: balanced
 run:
   output_path: ../runs/my_scene

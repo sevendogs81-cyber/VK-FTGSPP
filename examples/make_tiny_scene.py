@@ -92,7 +92,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     config = make_scene(args.output)
     print(f"Created synthetic workflow fixture: {config}")
-    print("Use the README commands to train and render. This is not a quality benchmark.")
+    print("Use docs/install.md to train and render. This is not a quality benchmark.")
 
 
 if __name__ == "__main__":
