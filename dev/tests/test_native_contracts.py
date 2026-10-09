@@ -622,17 +622,17 @@ class NativeContractTests(unittest.TestCase):
         ]
         self.assertNotIn("_color_correction_enabled", components)
         self.assertIn("begin(int(view_index), bool(apply_color_correction))", components)
-        evaluation = runner[
-            runner.index("def _evaluate(") : runner.index("def _optimizer_update(")
-        ]
+        evaluation = (ROOT / "src" / "ftgspp" / "training" / "evaluation.py").read_text(
+            encoding="utf-8"
+        )
         self.assertIn("evaluate_holdout_view", evaluation)
         self.assertIn(
             "want_diagnostics = foreground_protocol and bool(full_validation)",
             evaluation,
         )
         self.assertIn("_foreground_roi_diagnostics(", evaluation)
-        self.assertIn("ssim_workspace.ssim", runner)
-        self.assertIn("class _EvalSsimWorkspace", runner)
+        self.assertIn("ssim_workspace.ssim", evaluation)
+        self.assertIn("class _EvalSsimWorkspace", evaluation)
         self.assertNotIn("full_validation_on_export", evaluation)
         self.assertLess(
             evaluation.index("want_diagnostics = foreground_protocol"),
@@ -1464,12 +1464,12 @@ class NativeContractTests(unittest.TestCase):
         runner = (ROOT / "src" / "ftgspp" / "training" / "runner.py").read_text(
             encoding="utf-8"
         )
-        evaluation = runner[
-            runner.index("def _evaluate(") : runner.index("def _optimizer_update(")
-        ]
+        evaluation = (ROOT / "src" / "ftgspp" / "training" / "evaluation.py").read_text(
+            encoding="utf-8"
+        )
         self.assertNotIn("lpips", runner.lower())
         self.assertIn("_foreground_roi_diagnostics(", evaluation)
-        self.assertIn("ssim_workspace.ssim(", runner)
+        self.assertIn("ssim_workspace.ssim(", evaluation)
         self.assertIn("want_diagnostics", evaluation)
 
         backend = (

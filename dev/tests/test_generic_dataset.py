@@ -125,3 +125,112 @@ def test_prepare_selfcap_starter_pins_init_seed(tmp_path):
     node = OmegaConf.load(path)
     assert node.init.seed == 0
     assert node.init.backend == "da3"
+
+
+def test_invalid_split_can_be_corrected_without_overwrite(tmp_path):
+    images = tmp_path / "images"
+    _write_grid(images)
+    with pytest.raises(ValueError, match="undiscovered"):
+        prepare_dataset(["--images", str(images), "--eval-cameras", "99"])
+    assert not (tmp_path / "manifests/dataset.json").exists()
+    assert not (tmp_path / "ftgspp.yaml").exists()
+    prepare_dataset(["--images", str(images), "--eval-cameras", "7"])
+    assert (tmp_path / "ftgspp.yaml").is_file()
+
+
+def test_existing_config_does_not_publish_or_overwrite_manifest(tmp_path):
+    images = tmp_path / "images"
+    _write_grid(images)
+    config = tmp_path / "ftgspp.yaml"
+    config.write_text("user content\n")
+    with pytest.raises(FileExistsError):
+        prepare_dataset(["--images", str(images)])
+    assert config.read_text() == "user content\n"
+    assert not (tmp_path / "manifests/dataset.json").exists()
+
+
+@pytest.mark.parametrize("option", ["--config", "--output-manifest"])
+@pytest.mark.parametrize("alias", ["direct", "symlink", "hardlink"])
+def test_outputs_cannot_overwrite_images(tmp_path, option, alias):
+    images = tmp_path / "images"
+    _write_grid(images)
+    image = images / "2/000003.png"
+    before = image.read_bytes()
+    target = image
+    if alias != "direct":
+        target = tmp_path / "alias"
+        if alias == "symlink":
+            target.symlink_to(image)
+        else:
+            target.hardlink_to(image)
+    with pytest.raises(SystemExit) as error:
+        prepare_dataset(["--images", str(images), option, str(target), "--overwrite"])
+    assert error.value.code == 2
+    assert image.read_bytes() == before
+    assert target.read_bytes() == before
+    assert not (tmp_path / "manifests").exists()
+
+
+def test_outputs_must_be_distinct(tmp_path):
+    images = tmp_path / "images"
+    _write_grid(images)
+    target = tmp_path / "same.json"
+    with pytest.raises(SystemExit):
+        prepare_dataset([
+            "--images", str(images), "--config", str(target),
+            "--output-manifest", str(target), "--overwrite",
+        ])
+    assert not target.exists()
+
+
+def test_manifest_input_cannot_be_replaced_by_config(tmp_path):
+    images = tmp_path / "images"
+    _write_grid(images)
+    prepare_dataset(["--images", str(images)])
+    manifest = tmp_path / "manifests/dataset.json"
+    before = manifest.read_bytes()
+    with pytest.raises(SystemExit):
+        prepare_dataset(["--manifest", str(manifest), "--config", str(manifest), "--overwrite"])
+    assert manifest.read_bytes() == before
+
+
+def test_invalid_config_parent_does_not_publish_manifest(tmp_path):
+    images = tmp_path / "images"
+    _write_grid(images)
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("existing file")
+    with pytest.raises(NotADirectoryError):
+        prepare_dataset(["--images", str(images), "--config", str(blocker / "config.yaml")])
+    assert not (tmp_path / "manifests").exists()
+    assert blocker.read_text() == "existing file"
+
+
+def test_output_files_cannot_be_each_others_parent(tmp_path):
+    images = tmp_path / "images"
+    _write_grid(images)
+    with pytest.raises(SystemExit):
+        prepare_dataset([
+            "--images", str(images), "--config", str(tmp_path / "out"),
+            "--output-manifest", str(tmp_path / "out/dataset.json"),
+        ])
+    assert not (tmp_path / "out").exists()
+
+
+def test_config_write_failure_preserves_old_config_and_cleans_temporary(tmp_path, monkeypatch):
+    from ftgspp.data.prepare_dataset import _write_config
+
+    target = tmp_path / "config.yaml"
+    target.write_text("previous config\n")
+    def fail(config, path):
+        path.write_text("partial YAML")
+        raise OSError("injected disk error")
+    monkeypatch.setattr(OmegaConf, "save", fail)
+    with pytest.raises(OSError, match="injected"):
+        _write_config(
+            target, name="scene", pipeline="scene", root=tmp_path,
+            images=tmp_path, manifest=tmp_path / "dataset.json", calibration=tmp_path,
+            mask_source="external", mask_manifest=None, mask_root=None,
+            frames=[0], train_cameras=[0], eval_cameras=[], fps=30, overwrite=True,
+        )
+    assert target.read_text() == "previous config\n"
+    assert list(tmp_path.iterdir()) == [target]

@@ -29,6 +29,10 @@ ftgspp prepare dataset --images data/my_capture/images --fps 30 --eval-cameras 3
 
 That writes `data/my_capture/manifests/dataset.json` and
 `data/my_capture/ftgspp.yaml`, then prints the required initialization step.
+Camera splits and output destinations are checked before either file is written.
+`--overwrite` permits replacing generated outputs, but never an input image or
+the source manifest. The YAML and manifest must have distinct paths; each file
+is published atomically after its contents have been written successfully.
 The starter YAML pins `init.seed: 0` so later `train.seed` sweeps reuse one
 geometry cache. Default `pipeline.mode` is `scene` (mask-free
 `scene_rgb_v1`).
@@ -99,12 +103,22 @@ the reference mask interior. This selection is disabled when `train.export_best`
 is false; an HS run exports the terminal HS model.
 Standalone `ftgspp eval` streams the model SHA-256 check
 and loads only this selected model; it does not restore an optimizer checkpoint.
+By default it evaluates every held-out view selected by `eval.frame_interval`
+and appends to `full_validation_metrics.jsonl`, including foreground diagnostics.
+For the smaller checkpoint-selection subset, explicitly pass `--quick`; its
+results append to `metrics.jsonl` and are marked `candidate_subset`. This follows
+`eval.candidate_max_views` and omits the full foreground diagnostic suite.
+`--quick` cannot be combined with a locked final-test manifest, including one
+saved in the run config. Final-test results remain in `final_test_metrics.jsonl`.
 `ftgspp export` only writes another PLY path:
 
 ```bash
 ftgspp export --model data/my_capture/runs/my_capture/gaussians.npz \
   --output model.ply
 ```
+
+PLY export publishes the completed file atomically. A failed write leaves an
+existing destination unchanged and removes its temporary file.
 
 Default checkpoints remain V6; local batch four uses V7. Resume preserves
 the saved batch size and algorithm identity and rejects an

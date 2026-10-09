@@ -33,6 +33,7 @@ jobs:
           installed/bin/ftgspp eval --help
           installed/bin/ftgspp viewer --help
           installed/bin/ftgspp render --help
+          installed/bin/python -c 'from ftgspp.training.evaluation import Evaluator; from ftgspp.io.atomic import atomic_output'
           installed/bin/python -c 'from ftgspp import _ftgspp_vk; from importlib.resources import files; import importlib.util; assert files("ftgspp").joinpath("shaders/manifest.json").is_file(); assert files("ftgspp.viewer").joinpath("remote.html").is_file(); assert importlib.util.find_spec("torch") is None'
       - name: Check distribution contents and notices
         run: |
@@ -47,6 +48,8 @@ jobs:
                              for n in names)
               for suffix in (
                   "src/ftgspp/training/background.py",
+                  "src/ftgspp/training/evaluation.py",
+                  "src/ftgspp/io/atomic.py",
                   "src/ftgspp/optional/birefnet.py",
                   "src/ftgspp/optional/visual_hull.py",
                   "src/ftgspp/io/viewer_manifest.py",
@@ -83,6 +86,8 @@ jobs:
                   assert not any(n.endswith(suffix) for n in names), suffix
           with zipfile.ZipFile(next(Path("dist").glob("*.whl"))) as archive:
               names = archive.namelist()
+              for module in ("ftgspp/training/evaluation.py", "ftgspp/io/atomic.py"):
+                  assert module in names, module
               for suffix in ("VKSPLAT-APACHE-2.0.txt", "GLM.txt", "PYBIND11-BSD-3-CLAUSE.txt", "GLFW-ZLIB.txt", "IMGUI-MIT.txt", "radix_sort/LICENSE"):
                   assert any(n.endswith(suffix) for n in names), suffix
           PY

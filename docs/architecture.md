@@ -179,6 +179,15 @@ Training also writes `run.export_filename` (default `gaussians_4dgs.ply`);
 
 ## Evaluation
 
+`training/evaluation.py` owns the shared evaluator. Training selection uses
+candidate scope, training-end and standalone validation use validation scope,
+and locked tests use final-test scope. Standalone `eval` does not instantiate
+the training runner or call its private preflight/evaluation methods.
+`eval --quick` explicitly requests candidate scope; locked tests reject it.
+All scopes honor `eval.frame_interval`, while only candidate scope applies
+`eval.candidate_max_views`. The metric formulas and checkpoint-selection rule
+are shared and unchanged.
+
 In-loop hold-out evaluation reduces the task PSNR and matching SSIM_2 on the
 GPU; foreground mode uses mask-interior `foreground_ssim` instead of full-frame
 SSIM and does not compute foreground
