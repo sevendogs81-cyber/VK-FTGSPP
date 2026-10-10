@@ -15,7 +15,9 @@ import pytest
 from ftgspp.viewer.app import catalog_runs, parser_for
 from ftgspp.viewer.asset import camera, fit_camera_extent
 from ftgspp.viewer.offline import compose
-from ftgspp.viewer.remote import RemoteViewer, VideoExportCancelled, wire
+from ftgspp.viewer.remote import (
+    RemoteViewer, VideoExportCancelled, wire, STREAM_PROTOCOL, STREAM_WINDOW,
+)
 from ftgspp.viewer.session import save_session
 
 
@@ -23,7 +25,8 @@ def test_browser_protocol():
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node is optional for browser protocol tests")
-    subprocess.run([node, "--test", str(Path(__file__).with_name("viewer_browser.test.cjs"))],
+    subprocess.run([node, "--test", str(Path(__file__).with_name("viewer_browser.test.cjs")),
+                    str(Path(__file__).with_name("viewer_stream.test.cjs"))],
                    check=True, capture_output=True, text=True, timeout=15)
 
 
@@ -87,6 +90,72 @@ def test_catalog_keeps_completed_4danyone_and_dna_runs(tmp_path):
 
 def test_default_exports_are_beside_the_model_and_have_an_obvious_name(viewer):
     assert viewer.output == viewer.asset.model_path.parent / "exports"
+
+
+def test_actual_samples_are_mandatory_even_for_legacy_sessions(viewer):
+    viewer.asset.metadata["sample_times"] = [0.0, .2, .5, 1.0]
+    assert RemoteViewer(viewer.args, viewer.asset).state["snap"] is True
+    viewer.args.no_session = False
+    save_session(viewer.session, viewer.asset, dict(viewer.state, snap=False))
+    restored = RemoteViewer(viewer.args, viewer.asset)
+    assert restored.state["snap"] is True
+    restored.apply_update(dict(state=dict(snap=False)))
+    assert restored.state["snap"] is True
+
+
+def test_remote_sample_alignment_matches_cache_and_cannot_be_disabled(viewer):
+    viewer.asset.metadata["sample_times"] = [0.0, .2, .5, 1.0]
+    state = dict(viewer.state, snap=True, time=.42)
+    a, _ = viewer.render_image(state, 48, 32, True)
+    b, _ = viewer.render_image(dict(state, time=.49), 48, 32, True)
+    assert a is b and viewer.renderer.times == [.5]
+    viewer.render_image(dict(state, snap=False), 48, 32, True)
+    assert viewer.renderer.times == [.5]
+    assert viewer.scene_time(state, -.1) == 0
+    assert viewer.scene_time(state, 2) == 1
+    assert viewer.scene_time(state, .1) == 0  # Ties choose the earlier sample.
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg is optional")
+def test_exports_use_actual_samples_and_recordings_hold_observed_time(viewer, monkeypatch):
+    viewer.asset.metadata.update(sample_times=[0.0, .2, .5, 1.0], time_start=0, time_end=1)
+    state = dict(viewer.state, snap=True)
+    plan = viewer.prepare_video_export(state, dict(
+        mode="view", fps=10, width=48, height=32, time_start=.1, time_end=.4,
+    ))
+    target = viewer.export_video(state, plan)
+    manifest = json.loads(target.with_suffix(".json").read_text())
+    assert viewer.renderer.times == pytest.approx([0, .2, .2])
+    assert [f["camera"]["timestamp"] for f in manifest["frames"]] == viewer.renderer.times
+    viewer.state.update(snap=True, time=.99)
+    viewer.start_interaction_recording(10.0)
+    viewer.state["time"] = .02  # Loop or manual seek, with network delivery jitter.
+    viewer.record_interaction_sample(10.2)
+    viewer.stop_interaction_recording(10.4)
+    plan = viewer.prepare_video_export(state, dict(mode="recording", fps=10, width=48, height=32))
+    viewer.renderer.times.clear()
+    viewer.export_video(dict(state, snap=False), plan)
+    assert viewer.renderer.times == [1, 1, 0, 0]
+    # PNG paths follow the same Snap setting and report the actual render times.
+    first, last = dict(state["camera"], timestamp=.1), dict(state["camera"], timestamp=.4)
+    viewer.args.fps = 10
+    target = viewer.export_path(dict(state, bookmarks=[first, last], path_times=[0, .3]), 48, 32)
+    manifest = json.loads((target / "render.json").read_text())
+    assert [f["camera"]["timestamp"] for f in manifest["frames"]] == pytest.approx([0, .2, .2])
+
+
+def test_recording_uses_client_clock_despite_network_jitter(viewer, monkeypatch):
+    monkeypatch.setattr("ftgspp.viewer.remote.time.monotonic", lambda: 100.0)
+    viewer.start_interaction_recording(10.0)
+    monkeypatch.setattr("ftgspp.viewer.remote.time.monotonic", lambda: 105.0)
+    viewer.record_interaction_sample(10.25)
+    with pytest.raises(ValueError, match="monotonic"):
+        viewer.record_interaction_sample(10.1)
+    viewer.stop_interaction_recording(10.5)
+    assert [k["path_time"] for k in viewer.recorded_path["keyframes"]] == [0, .25, .5]
+    for invalid in (float("nan"), float("inf"), -1, True, "12"):
+        with pytest.raises(ValueError, match="client time"):
+            viewer.start_interaction_recording(invalid)
 
 
 def test_explicit_export_directory_still_wins(viewer, tmp_path):
@@ -335,7 +404,8 @@ def test_remote_video_export_streams_frames_directly_to_mp4(viewer):
     )
     assert target.read_bytes()[4:8] == b"ftyp"
     manifest = json.loads(target.with_suffix(".json").read_text())
-    assert manifest["schema"] == "ftgspp-video-export-v1"
+    assert manifest["schema"] == "ftgspp-video-export-v2"
+    assert manifest["scene_timeline"]["sampling"] == "continuous"
     assert manifest["video"] == target.name
     assert (manifest["width"], manifest["height"]) == (48, 32)
     assert manifest["frame_count"] == 2
@@ -544,6 +614,141 @@ class Socket:
                 assert message["type"] != "error", message
 
 
+def test_stream_prefetch_is_bounded_and_acknowledgements_return_credits(viewer):
+    viewer.asset.metadata.update(time_start=0, time_end=1, fps=10,
+                                 sample_times=[i / 10 for i in range(11)])
+
+    async def exercise():
+        ws = Socket()
+        task = asyncio.create_task(viewer.serve_client(ws))
+        try:
+            hello = await ws.receive("hello")
+            assert hello["stream_protocol"] == STREAM_PROTOCOL
+            await ws.receive("image")
+            await ws.incoming.put(dict(type="stream", protocol="unknown", stream_id=1))
+            assert "protocol" in (await ws.receive("error"))["message"]
+            await ws.incoming.put(dict(type="stream", protocol=STREAM_PROTOCOL, stream_id=1, window=999))
+            assert "window" in (await ws.receive("error"))["message"]
+            await ws.incoming.put(dict(type="stream", protocol=STREAM_PROTOCOL, stream_id=1,
+                                       state=dict(time=.79, playing=True, loop=True, snap=False)))
+            times = []
+            for i in range(STREAM_WINDOW):
+                frame = await ws.receive("frame")
+                assert (frame["stream_id"], frame["frame_index"]) == (1, i)
+                times.append(frame["scene_time"])
+                await ws.receive("image")
+            assert times == pytest.approx([.8, .9, 1, 0, .1, .2, .3, .4])
+            # No acknowledgements: the GPU and network must stop at the window.
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(ws.outgoing.get(), .05)
+            await ws.incoming.put(dict(type="stream_ack", stream_id=1, frame_index=2))
+            for i in range(8, 11):
+                assert (await ws.receive("frame"))["frame_index"] == i
+                await ws.receive("image")
+            # A duplicate acknowledgement cannot inflate credits.
+            await ws.incoming.put(dict(type="stream_ack", stream_id=1, frame_index=2))
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(ws.outgoing.get(), .05)
+            await ws.incoming.put(dict(type="stream_ack", stream_id=1, frame_index=999))
+            assert "acknowledgement" in (await ws.receive("error"))["message"]
+            # Dragging bounds obsolete lookahead and continues the fractional clock.
+            await ws.incoming.put(dict(type="stream", protocol=STREAM_PROTOCOL, stream_id=2,
+                                       playback_time=.61, window=3, state=dict(time=.6, loop=True)))
+            for i in range(3):
+                frame = await ws.receive("frame")
+                assert frame["scene_time"] == pytest.approx(.6 + i / 10)
+                assert frame["next_time"] == pytest.approx(.71 + i / 10)
+                await ws.receive("image")
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(ws.outgoing.get(), .05)
+            # A new camera/time generation replaces the old one; stale acks do nothing.
+            await ws.incoming.put(dict(type="stream", protocol=STREAM_PROTOCOL, stream_id=3,
+                                       state=dict(time=.95, playing=True, loop=False)))
+            frame = await ws.receive("frame")
+            assert frame["stream_id"] == 3 and frame["scene_time"] == .9
+            await ws.receive("image")
+            frame = await ws.receive("frame")
+            assert frame["scene_time"] == 1 and frame["playing"] is False
+            await ws.receive("image")
+            await ws.incoming.put(dict(type="stream_ack", stream_id=1, frame_index=7))
+            await ws.incoming.put(dict(type="update", state=dict(time=.2, playing=False)))
+            frame = await ws.receive("frame")
+            assert "stream_id" not in frame
+            await ws.receive("image")
+        finally:
+            await ws.incoming.put(None)
+            await asyncio.wait_for(task, 3)
+
+    asyncio.run(exercise())
+
+
+def test_recording_tracks_presented_stream_frames_not_prefetch(viewer):
+    viewer.asset.metadata.update(time_start=0, time_end=1, fps=10,
+                                 sample_times=[i / 10 for i in range(11)])
+
+    async def exercise():
+        ws = Socket()
+        task = asyncio.create_task(viewer.serve_client(ws))
+        try:
+            await ws.receive("image")
+            await ws.incoming.put(dict(type="start_recording", client_time=10.0))
+            await ws.receive("recording_started")
+            await ws.incoming.put(dict(type="stream", protocol=STREAM_PROTOCOL, stream_id=1,
+                                       state=dict(time=.4, playing=True)))
+            for _ in range(STREAM_WINDOW):
+                await ws.receive("image")
+            assert len(viewer.recording_keys) == 1  # Prefetch is not observed motion.
+            await ws.incoming.put(dict(type="stream_ack", stream_id=1, frame_index=0, client_time=10.1))
+            await ws.receive("image")
+            await ws.incoming.put(dict(type="stop_recording", client_time=10.2))
+            await ws.receive("recording_stopped")
+            assert [k["camera"]["timestamp"] for k in viewer.recorded_path["keyframes"]] == [.4, .4, .4]
+            assert [k["path_time"] for k in viewer.recorded_path["keyframes"]] == pytest.approx([0, .1, .2])
+        finally:
+            await ws.incoming.put(None)
+            await asyncio.wait_for(task, 3)
+
+    asyncio.run(exercise())
+
+
+def test_camera_edit_discards_a_stream_frame_already_rendering(viewer, monkeypatch):
+    viewer.asset.metadata.update(time_start=0, time_end=1, fps=10,
+                                 sample_times=[i / 10 for i in range(11)])
+    started, release = threading.Event(), threading.Event()
+    render_image = viewer.render_image
+
+    def delayed(state, *args):
+        if state["time"] == .1:
+            started.set()
+            assert release.wait(3)
+        return render_image(state, *args)
+
+    monkeypatch.setattr(viewer, "render_image", delayed)
+
+    async def exercise():
+        ws = Socket()
+        task = asyncio.create_task(viewer.serve_client(ws))
+        try:
+            await ws.receive("image")
+            await ws.incoming.put(dict(type="stream", protocol=STREAM_PROTOCOL, stream_id=1,
+                                       state=dict(time=.1, playing=True)))
+            assert await asyncio.to_thread(started.wait, 3)
+            await ws.incoming.put(dict(type="stream", protocol=STREAM_PROTOCOL, stream_id=2,
+                                       state=dict(time=.6, playing=True)))
+            # This response proves the replacement was accepted before releasing GPU work.
+            await ws.incoming.put(dict(type="save_session"))
+            await ws.receive("saved")
+            release.set()
+            frame = await ws.receive("frame")
+            assert frame["stream_id"] == 2 and frame["scene_time"] == .6
+        finally:
+            release.set()
+            await ws.incoming.put(None)
+            await asyncio.wait_for(task, 3)
+
+    asyncio.run(exercise())
+
+
 @pytest.mark.parametrize("fails", [False, True])
 def test_scene_switch_serializes_commands_and_always_sends_a_frame(viewer, monkeypatch, fails):
     started, release = threading.Event(), threading.Event()
@@ -676,4 +881,98 @@ def test_latest_frame_and_capture_snapshot_are_bounded(viewer):
         assert (capture_camera["width"], capture_camera["height"]) == (192, 128)
         assert cv2.imread(str(sidecar.with_suffix(".png"))).shape[:2] == (128, 192)
         assert viewer.client is None
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("fps", [15, 23.976, 24, 29.97, 30, 59.94, 60, 120])
+def test_stream_cadence_uses_scene_fps_and_navigation_preserves_clock(viewer, fps):
+    from ftgspp.viewer.remote import PlaybackStream
+    meta = dict(viewer.asset.metadata, fps=fps, time_start=0, time_end=2)
+    state = dict(viewer.state, time=0, target_fps=120, playing=True)
+    stream = PlaybackStream(1, state, meta, 100, 100)
+    assert stream.fps == fps
+    stream.next_index = round(fps)
+    expected = round(fps) / fps
+    assert stream.sample()[0] == pytest.approx(expected)
+    stream.update_view(state, 200, 200, True, 1, .5)
+    assert stream.fps == 60
+    assert stream.sample()[0] == pytest.approx(expected)
+    stream.next_index += 1
+    assert stream.sample()[0] == pytest.approx(expected + 1 / 60)
+    stream.update_view(state, 100, 100, False, 2, 1)
+    assert stream.fps == fps
+    assert stream.sample()[0] == pytest.approx(expected + 1 / 60)
+
+
+def test_irregular_capture_samples_are_always_selected_from_metadata(viewer):
+    viewer.asset.metadata['sample_times'] = [0, .013, .052, .083, .201, .209]
+    for timestamp in np.linspace(0, .3, 121):
+        result = viewer.scene_time(dict(viewer.state, time=float(timestamp), snap=False))
+        assert result in viewer.asset.metadata['sample_times']
+        assert abs(result - timestamp) == pytest.approx(min(abs(t - timestamp) for t in viewer.asset.metadata['sample_times']))
+
+
+def test_navigation_updates_do_not_wait_for_display_and_record_actual_camera(viewer):
+    viewer.asset.metadata.update(time_start=0, time_end=1, fps=15,
+                                 sample_times=[i / 15 for i in range(16)])
+
+    async def exercise():
+        ws = Socket()
+        task = asyncio.create_task(viewer.serve_client(ws))
+        try:
+            await ws.receive('image')
+            await ws.incoming.put(dict(type='start_recording', client_time=10))
+            await ws.receive('recording_started')
+            original = wire(viewer.state['camera'])
+            await ws.incoming.put(dict(type='stream', protocol=STREAM_PROTOCOL, stream_id=1,
+                                      navigating=True, view_time=10, state=dict(time=.4, playing=False)))
+            first = await ws.receive('frame')
+            await ws.receive('image')
+            assert first['fps'] == 30  # Camera rate is independent of 15 FPS samples.
+            assert first['scene_time'] == .4 and first['playing'] is False
+            for revision in range(1, 4):
+                camera = wire(original)
+                camera['w2c'][0][3] = revision
+                await ws.incoming.put(dict(type='stream_view', stream_id=1, revision=revision,
+                                          navigating=True, view_time=10 + revision / 30,
+                                          state=dict(camera=camera)))
+            # A round-trip barrier proves all edits were accepted with no image ACK.
+            await ws.incoming.put(dict(type='ping', client_time=10.2))
+            assert (await ws.receive('pong'))['client_time'] == 10.2
+            assert viewer.state['camera']['w2c'][0][3] == 3
+            await ws.incoming.put(dict(type='stream_ack', stream_id=1,
+                                      frame_index=first['frame_index'], client_time=10.3))
+            frame = await ws.receive('frame')
+            while frame['revision'] != 3:
+                await ws.receive('image')
+                frame = await ws.receive('frame')
+            await ws.receive('image')
+            assert frame['scene_time'] == .4 and frame['stream_id'] == 1
+            assert viewer.recording_keys[-1]['camera']['w2c'] == original['w2c']
+            await ws.incoming.put(dict(type='stream_ack', stream_id=1,
+                                      frame_index=frame['frame_index'], client_time=10.4))
+            await ws.incoming.put(dict(type='stop_recording', client_time=10.5))
+            await ws.receive('recording_stopped')
+            assert viewer.recorded_path['keyframes'][-1]['camera']['w2c'][0][3] == 3
+            # A stopped navigation stream delivers the final view at full dimensions.
+            await ws.incoming.put(dict(type='stream_view', stream_id=1, revision=4,
+                                      navigating=False, view_time=10.6, state={}, width=100, height=100))
+            frame = await ws.receive('frame')
+            while frame['revision'] != 4:
+                await ws.receive('image')
+                frame = await ws.receive('frame')
+            await ws.receive('image')
+            assert frame['finished'] and frame['navigating'] is False
+            # A later ordinary seek replaces the last streamed observation.
+            await ws.incoming.put(dict(type='update', state=dict(time=.8, playing=False)))
+            await ws.receive('frame')
+            await ws.receive('image')
+            await ws.incoming.put(dict(type='start_recording', client_time=11.0))
+            await ws.receive('recording_started')
+            assert viewer.recording_keys[0]['camera']['timestamp'] == .8
+
+        finally:
+            await ws.incoming.put(None)
+            await asyncio.wait_for(task, 3)
+
     asyncio.run(exercise())

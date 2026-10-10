@@ -31,6 +31,70 @@ STATE_FIELDS = frozenset({
     "target_fps", "bookmarks", "path_times", "world_up",
 })
 
+STREAM_PROTOCOL = "ftgspp-remote-stream-v2"
+STREAM_WINDOW = 8
+STREAM_MAX_WINDOW = 64
+
+
+class PlaybackStream:
+    """Bounded lookahead; browser presentation returns credits, not render requests."""
+
+    def __init__(self, identifier, state, metadata, width, height, *, window=STREAM_WINDOW,
+                 playback_time=None, navigating=False, view_time=None):
+        self.identifier = identifier
+        self.state = wire(state)
+        self.width, self.height = width, height
+        self.capture_fps = metadata.get("fps", 30.0)
+        self.navigating = navigating
+        self.revision = 0
+        self.view_time = view_time
+        self.fps = min(state["target_fps"], 60.0 if navigating else self.capture_fps, 120.0)
+        self.start = float(state["time"] if playback_time is None else playback_time)
+        self.window = window
+        self.lo = float(metadata.get("time_start", self.start))
+        self.hi = float(metadata.get("time_end", self.start))
+        self.period = self.hi - self.lo + 1 / metadata.get("fps", 30.0)
+        self.next_index = 0
+        self.last_ack = -1
+        self.sent = {}
+        self.finished = False
+
+    @property
+    def ready(self):
+        return not self.finished and self.next_index - self.last_ack - 1 < self.window
+
+    def sample(self):
+        if not self.state["playing"]:
+            return self.start, False
+        t = self.start + self.next_index * self.state["speed"] / self.fps
+        if self.state["loop"] and self.hi > self.lo:
+            t = self.lo + (t - self.lo) % self.period
+            return t, True
+        return min(t, self.hi), t < self.hi - 1e-9
+
+    def update_view(self, state, width, height, navigating, revision, view_time):
+        # Change camera/cadence without throwing away credits or rewinding time.
+        timestamp, _ = self.sample()
+        # apply_update replaces validated camera arrays instead of mutating them;
+        # a shallow snapshot avoids copying large bookmark lists at pointer rate.
+        self.state = dict(state, playing=self.state["playing"])
+        self.width, self.height = width, height
+        self.navigating, self.revision, self.view_time = navigating, revision, view_time
+        self.fps = min(state["target_fps"], 60.0 if navigating else self.capture_fps, 120.0)
+        self.start = timestamp - (self.next_index * self.state["speed"] / self.fps
+                                  if self.state["playing"] else 0)
+        self.finished = False
+
+    def acknowledge(self, index):
+        if type(index) is not int or index < 0 or index >= self.next_index:
+            raise ValueError("Invalid stream frame acknowledgement")
+        if index <= self.last_ack:
+            return None
+        result = self.sent[index]
+        self.sent = {i: frame for i, frame in self.sent.items() if i > index}
+        self.last_ack = index
+        return result
+
 MAX_VIDEO_FRAMES = 100_000
 MAX_RECORDED_KEYS = 10_000
 VIDEO_ENCODER_PRESET = "veryfast"
@@ -63,7 +127,7 @@ def remote_state(state):
     if len(state.get("bookmarks", [])) > 256:
         raise ValueError("Too many path keyframes")
     # Retain the field for old sessions/clients, but aspect is always fixed.
-    return dict(state, lock_camera=True)
+    return dict(state, lock_camera=True, snap=True)
 
 
 def wire(value):
@@ -77,7 +141,7 @@ def initial_state(asset, args):
     c = select_camera(asset, args)
     state = dict(
         camera=c, time=c["timestamp"], speed=1.0, playing=False, loop=True,
-        snap=False, lock_camera=True,
+        snap=True, lock_camera=True,
         selected_camera=args.camera if args.camera is not None else -1,
         mode=0, background=[0, 0, 0], checker=False, exposure=0.0,
         transparent=False, sh_degree=meta["sh_degree"],
@@ -112,6 +176,7 @@ class RemoteViewer:
         self.args = args
         self.asset = asset
         self.state = initial_state(asset, args)
+        self.state["time"] = self.scene_time(self.state)
         self.output = args.output or default_export_root(asset)
         self.session = args.session or asset.model_path.parent / "viewer_session.json"
         self.path_file = args.camera_path or asset.model_path.parent / "viewer_path.json"
@@ -131,7 +196,10 @@ class RemoteViewer:
         self.last_timings = {}
         self.exports: dict[str, Path] = {}
         self.recording_started = None
+        self.recording_client_start = None
         self.recording_keys = []
+        self.recording_presented = False
+        self.presented_state = None
         self.recorded_path = None
         self.catalog: list[Path] = []
 
@@ -147,13 +215,27 @@ class RemoteViewer:
             self.renderer = None
             raise
 
+    def scene_time(self, state, timestamp=None):
+        """Resolve the same actual sample for preview, capture and export."""
+        t = float(state["time"] if timestamp is None else timestamp)
+        samples = self.asset.metadata.get("sample_times", [])
+        if not len(samples):
+            return t
+        i = int(np.searchsorted(samples, t))
+        if i == 0:
+            return float(samples[0])
+        if i == len(samples) or t - samples[i - 1] <= samples[i] - t:
+            return float(samples[i - 1])
+        return float(samples[i])
+
     def render_image(self, state, width, height, png=False):
         start = time.perf_counter()
         width, height = fit_camera_extent(state["camera"], width, height)
         c = scaled_camera(state["camera"], width, height)
+        timestamp = self.scene_time(state)
         key = (
             width, height, c["K"].tobytes(), c["w2c"].tobytes(),
-            float(state["time"]), int(state["sh_degree"]), float(state["marginal_threshold"]),
+            timestamp, int(state["sh_degree"]), float(state["marginal_threshold"]),
         )
         timing = dict(forward_ms=0.0, readback_ms=0.0, compose_ms=0.0, encode_ms=0.0,
                       rgba8_ms=0.0, readback_bytes=0,
@@ -173,7 +255,7 @@ class RemoteViewer:
         if key != self._forward_key:
             self._forward_key = self._encoded_key = None
             mark = time.perf_counter()
-            self.renderer.render(c, state["time"], state["sh_degree"], state["marginal_threshold"])
+            self.renderer.render(c, timestamp, state["sh_degree"], state["marginal_threshold"])
             timing["forward_ms"] = (time.perf_counter() - mark) * 1000
         mark = time.perf_counter()
         shape = (height, width, 4)
@@ -218,36 +300,64 @@ class RemoteViewer:
             sample_count=len(keys), duration=duration,
         )
 
-    def record_interaction_sample(self):
+    @staticmethod
+    def client_time(value):
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("Invalid recording client time")
+        if not math.isfinite(value) or value < 0:
+            raise ValueError("Invalid recording client time")
+        return float(value)
+
+    def record_interaction_sample(self, client_time=None, state=None):
         if self.recording_started is None:
             return
         if len(self.recording_keys) >= MAX_RECORDED_KEYS:
             raise ValueError(f"Interaction recording exceeds {MAX_RECORDED_KEYS:,} samples")
-        elapsed = 0.0 if not self.recording_keys else max(
-            0.0, time.monotonic() - self.recording_started
-        )
+        client_time = self.client_time(client_time)
+        if self.recording_client_start is not None:
+            if client_time is None:
+                # Disconnect/automatic stop: keep the last client observation.
+                elapsed = self.recording_keys[-1]["path_time"] if self.recording_keys else 0.0
+            else:
+                elapsed = client_time - self.recording_client_start
+            if elapsed < 0 or (self.recording_keys
+                              and elapsed < self.recording_keys[-1]["path_time"] - 1e-5):
+                raise ValueError("Recording client time must be monotonic")
+        else:
+            elapsed = 0.0 if not self.recording_keys else max(
+                0.0, time.monotonic() - self.recording_started
+            )
         if self.recording_keys:
             elapsed = max(elapsed, self.recording_keys[-1]["path_time"] + 1e-6)
-        camera = wire(dict(self.state["camera"], timestamp=float(self.state["time"])))
+        observed = self.state if state is None else state
+        camera = wire(dict(observed["camera"], timestamp=self.scene_time(observed)))
         self.recording_keys.append(dict(path_time=elapsed, camera=camera))
+        self.recording_presented = state is not None
 
-    def start_interaction_recording(self):
+    def start_interaction_recording(self, client_time=None):
         if self.recording_started is not None:
             raise ValueError("Interaction recording is already active")
+        client_time = self.client_time(client_time)
         self.recording_keys = []
         self.recorded_path = None
+        self.recording_client_start = client_time
         self.recording_started = time.monotonic()
-        self.record_interaction_sample()
+        self.record_interaction_sample(client_time, self.presented_state)
         return self.recording_summary()
 
-    def stop_interaction_recording(self):
+    def stop_interaction_recording(self, client_time=None):
         if self.recording_started is None:
             raise ValueError("Interaction recording is not active")
         # Hitting the cap must still leave a recording that can be stopped and
         # exported.  The update that reached the cap already captured the most
         # recent accepted state.
         if len(self.recording_keys) < MAX_RECORDED_KEYS:
-            self.record_interaction_sample()
+            last = (self.recording_keys[-1]["camera"]
+                    if self.recording_keys and self.recording_presented else None)
+            observed = None if last is None else dict(self.state, camera=last, time=last["timestamp"])
+            self.record_interaction_sample(client_time, observed)
         self.recording_started = None
         if len(self.recording_keys) < 2:
             raise ValueError("Interaction recording needs at least two samples")
@@ -283,6 +393,7 @@ class RemoteViewer:
         # of already validated path cameras on each frame.
         state = dict(self.state, **validate_state(updates))
         state["lock_camera"] = True
+        state["snap"] = True  # Legacy sessions/clients cannot disable sample alignment.
         if state["transparent"] and state["mode"] != 0:
             raise ValueError("Transparent output requires RGB mode")
         if len(state.get("bookmarks", [])) > 256:
@@ -300,6 +411,7 @@ class RemoteViewer:
         ch = dimensions.get("fullHeight", self.capture_height)
         if rw * rh > 3840 * 2160 or cw * ch > 3840 * 2160:
             raise ValueError("Render area exceeds 3840x2160")
+        state["time"] = self.scene_time(state)
         self.state = state
         self.render_width, self.render_height = rw, rh
         self.capture_width, self.capture_height = cw, ch
@@ -308,6 +420,7 @@ class RemoteViewer:
         current = self.asset.model_path.parent.name
         return dict(
             type="hello", metadata=self.asset.metadata, state=self.state,
+            stream_protocol=STREAM_PROTOCOL, stream_window=STREAM_MAX_WINDOW,
             model_sha256=self.asset.sha256, recording=self.recording_summary(),
             output_path=str(self.output.resolve()),
             scenes=[path.name for path in self.catalog],
@@ -365,6 +478,7 @@ class RemoteViewer:
             raise RuntimeError(f"Scene upload failed ({exc}); previous model restored") from exc
         asset.model = None
         self.asset = asset
+        self.presented_state = None
         self.state = state
         self.output = output
         self.session = session
@@ -378,6 +492,7 @@ class RemoteViewer:
             await ws.close(code=1013, reason="One viewer client at a time")
             return
         self.client = ws
+        self.presented_state = None
         wake = asyncio.Event()
         pending = {
             "render": True, "capture": False, "export": False, "video": False,
@@ -388,10 +503,12 @@ class RemoteViewer:
         export_active = False
         export_cancel = None
         switch_active = False
+        stream = None
+        last_stream_id = 0
         wake.set()
 
         async def worker():
-            nonlocal export_active, export_cancel, switch_active
+            nonlocal export_active, export_cancel, switch_active, stream
             while True:
                 await wake.wait()
                 wake.clear()
@@ -495,7 +612,7 @@ class RemoteViewer:
                             schema="ftgspp-capture-v1", model_sha256=self.asset.sha256,
                             camera=dict(
                                 scaled_camera(capture_state["camera"], width, height),
-                                timestamp=capture_state["time"],
+                                timestamp=self.scene_time(capture_state),
                             ),
                             display=display_options(capture_state), sh_degree=capture_state["sh_degree"],
                             marginal_threshold=capture_state["marginal_threshold"],
@@ -514,9 +631,46 @@ class RemoteViewer:
                             bytes=len(data), stats=self.renderer.stats(), pipeline=self.last_timings,
                         ))
                         await ws.send(b"\x01" + data)
+                    active = stream
+                    if active is not None and active.ready and not stopping:
+                        began = time.monotonic()
+                        timestamp, playing = active.sample()
+                        current = dict(active.state, time=timestamp)
+                        width, height = active.width, active.height
+                        revision, navigating, fps = active.revision, active.navigating, active.fps
+                        view_time = active.view_time
+                        data, elapsed = await asyncio.to_thread(
+                            self.render_image, current, width, height
+                        )
+                        # A camera edit, seek, export or disconnect can replace
+                        # the stream while the GPU is working. Never publish it.
+                        if stream is active and not stopping:
+                            index = active.next_index
+                            timestamp = self.scene_time(current)
+                            observed = dict(current, time=timestamp, playing=playing)
+                            active.sent[index] = (timestamp, playing, observed)
+                            active.next_index += 1
+                            active.finished = not playing and not active.navigating and revision == active.revision
+                            await self.send(ws, dict(
+                                type="frame", stream_id=active.identifier, frame_index=index,
+                                scene_time=timestamp, playing=playing, fps=fps,
+                                revision=revision, navigating=navigating, view_time=view_time,
+                                next_time=active.sample()[0],
+                                finished=active.finished,
+                                width=active.width, height=active.height, ms=elapsed,
+                                bytes=len(data), stats=self.renderer.stats(), pipeline=self.last_timings,
+                            ))
+                            await ws.send(b"\x01" + data)
+                            # Navigation sends at camera cadence, not GPU speed:
+                            # avoid filling the wire with prefetched old poses.
+                            if navigating:
+                                await asyncio.sleep(max(0, 1 / fps - (time.monotonic() - began)))
+                    if stream is not None and stream.ready:
+                        wake.set()
                 except Exception as exc:
                     if stopping:
                         return
+                    stream = None
                     await self.send(ws, dict(type="error", action="render", message=str(exc)))
 
         job = asyncio.create_task(worker())
@@ -532,14 +686,14 @@ class RemoteViewer:
                         raise ValueError("Expected a JSON object")
                     action = message.get("type")
                     if message.get("model_sha256", self.asset.sha256) != self.asset.sha256:
-                        if action == "update":
+                        if action in ("update", "stream_view", "stream_ack", "stream_stop", "ping"):
                             continue
                         raise ValueError("Command belongs to a previous scene")
                     if switch_active or pending["switch"] is not None:
                         # Browser updates describe the old scene and will be
                         # superseded by the new hello/state.  Other commands
                         # must be retried explicitly against the new scene.
-                        if action == "update":
+                        if action in ("update", "stream_view", "stream_ack", "stream_stop", "ping"):
                             continue
                         raise ValueError("Wait for the scene switch to finish")
                     if action in (
@@ -547,10 +701,90 @@ class RemoteViewer:
                         "export_path", "export_video", "start_recording", "stop_recording",
                     ) and "state" in message:
                         self.apply_update(message)
-                    if action == "update":
+                    if action == "stream":
+                        identifier = message.get("stream_id")
+                        if message.get("protocol") != STREAM_PROTOCOL:
+                            raise ValueError("Unsupported playback stream protocol")
+                        if type(identifier) is not int or not last_stream_id < identifier <= 2**53 - 1:
+                            raise ValueError("Stream identifiers must increase")
+                        window = message.get("window", STREAM_WINDOW)
+                        if type(window) is not int or not 3 <= window <= STREAM_MAX_WINDOW:
+                            raise ValueError("Invalid stream window")
+                        playback_time = message.get("playback_time")
+                        if playback_time is not None and (
+                            isinstance(playback_time, bool) or not isinstance(playback_time, (int, float))
+                            or not math.isfinite(playback_time) or abs(playback_time) > 1e12
+                        ):
+                            raise ValueError("Invalid stream playback time")
+                        if export_active or pending["export"] or pending["video"]:
+                            raise ValueError("Cannot stream during export")
+                        navigating = message.get("navigating", False)
+                        if type(navigating) is not bool:
+                            raise ValueError("Invalid navigation flag")
+                        view_time = self.client_time(message.get("view_time"))
                         self.apply_update(message)
+                        self.state["time"] = self.scene_time(self.state)
+                        last_stream_id = identifier
+                        width, height = fit_camera_extent(
+                            self.state["camera"], self.render_width, self.render_height
+                        )
+                        stream = PlaybackStream(identifier, self.state, self.asset.metadata, width, height,
+                                                window=window, playback_time=playback_time,
+                                                navigating=navigating, view_time=view_time)
+                        pending["render"] = False
+                        wake.set()
+                    elif action == "stream_view":
+                        if stream is None or message.get("stream_id") != stream.identifier:
+                            continue
+                        revision = message.get("revision")
+                        navigating = message.get("navigating")
+                        if type(revision) is not int or not stream.revision < revision <= 2**53 - 1:
+                            raise ValueError("View revisions must increase")
+                        if type(navigating) is not bool:
+                            raise ValueError("Invalid navigation flag")
+                        updates = message.get("state", {})
+                        if not isinstance(updates, dict) or set(updates) - {
+                            "camera", "selected_camera", "interactive", "target_fps",
+                        }:
+                            raise ValueError("View updates cannot change playback or display state")
+                        view_time = self.client_time(message.get("view_time"))
+                        window = message.get("window", stream.window)
+                        if type(window) is not int or not stream.window <= window <= STREAM_MAX_WINDOW:
+                            raise ValueError("Invalid stream window")
+                        self.apply_update(message)
+                        width, height = fit_camera_extent(self.state["camera"], self.render_width, self.render_height)
+                        stream.update_view(self.state, width, height, navigating, revision, view_time)
+                        stream.window = window
+                        wake.set()
+                    elif action == "stream_ack":
+                        if stream is not None and message.get("stream_id") == stream.identifier:
+                            client_time = self.client_time(message.get("client_time"))
+                            presented = message.get("presented", True)
+                            if type(presented) is not bool:
+                                raise ValueError("Invalid presentation flag")
+                            displayed = stream.acknowledge(message.get("frame_index"))
+                            if displayed is not None:
+                                if presented:
+                                    self.state.update(time=displayed[0], playing=displayed[1])
+                                    self.presented_state = displayed[2]
+                                if presented and self.recording_started is not None:
+                                    self.record_interaction_sample(client_time, displayed[2])
+                                    if len(self.recording_keys) == MAX_RECORDED_KEYS:
+                                        await self.send(ws, dict(
+                                            type="recording_stopped", **self.stop_interaction_recording(),
+                                        ))
+                                wake.set()
+                    elif action == "ping":
+                        await self.send(ws, dict(type="pong", client_time=self.client_time(message.get("client_time"))))
+                    elif action == "stream_stop":
+                        if stream is not None and message.get("stream_id") == stream.identifier:
+                            stream = None
+                    elif action == "update":
+                        self.apply_update(message)
+                        stream = None
+                        self.presented_state = None
                         if self.recording_started is not None:
-                            self.record_interaction_sample()
+                            self.record_interaction_sample(message.get("client_time"))
                             if len(self.recording_keys) == MAX_RECORDED_KEYS:
                                 await self.send(ws, dict(
                                     type="recording_stopped", **self.stop_interaction_recording(),
@@ -564,6 +798,8 @@ class RemoteViewer:
                         save_session(self.session, self.asset, self.state)
                         await self.send(ws, dict(type="saved", action="session", path=str(self.session)))
                     elif action == "load_session":
+                        stream = None
+                        self.presented_state = None
                         self.apply_update(dict(state=remote_state(load_session(self.session, self.asset))))
                         await self.send(ws, dict(type="state", state=self.state))
                         pending["render"] = True
@@ -579,6 +815,8 @@ class RemoteViewer:
                         )))
                         await self.send(ws, dict(type="state", state=self.state))
                     elif action == "sample_path":
+                        stream = None
+                        self.presented_state = None
                         path = CameraPath(from_state(self.state))
                         seconds = float(message["seconds"])
                         c = path.sample(seconds)
@@ -614,10 +852,10 @@ class RemoteViewer:
                     elif action == "start_recording":
                         if export_active or pending["export"] or pending["video"]:
                             raise ValueError("Cannot record interaction during export")
-                        summary = self.start_interaction_recording()
+                        summary = self.start_interaction_recording(message.get("client_time"))
                         await self.send(ws, dict(type="recording_started", **summary))
                     elif action == "stop_recording":
-                        summary = self.stop_interaction_recording()
+                        summary = self.stop_interaction_recording(message.get("client_time"))
                         await self.send(ws, dict(type="recording_stopped", **summary))
                     elif action == "clear_recording":
                         if export_active or pending["export"] or pending["video"]:
@@ -627,6 +865,7 @@ class RemoteViewer:
                     elif action == "export_path":
                         if export_active or pending["export"] or pending["video"]:
                             raise ValueError("An export is already in progress")
+                        stream = None
                         pending["export"] = (dict(self.state), self.capture_width, self.capture_height)
                         wake.set()
                     elif action == "export_video":
@@ -634,6 +873,7 @@ class RemoteViewer:
                             raise ValueError("An export is already in progress")
                         export_state = wire(self.state)
                         plan = self.prepare_video_export(export_state, message.get("export"))
+                        stream = None
                         export_cancel = threading.Event()
                         pending["video"] = (export_state, plan, export_cancel)
                         await self.send(ws, dict(type="export_started", **{
@@ -662,6 +902,7 @@ class RemoteViewer:
                         if not isinstance(name, str) or not name:
                             raise ValueError("Scene name required")
                         pending["switch"] = name
+                        stream = None
                         wake.set()
                     elif action == "cancel_export":
                         if export_cancel is None:
@@ -709,6 +950,7 @@ class RemoteViewer:
                 if cancelled is not None and cancelled.is_set():
                     raise RuntimeError("Path export cancelled after client disconnect")
                 c = path.sample(path.times[0] + i / fps, width, height)
+                c = dict(c, timestamp=self.scene_time(state, c["timestamp"]))
                 current = dict(state, camera=c, time=c["timestamp"])
                 data, _ = self.render_image(current, width, height, True)
                 name = f"{i:06d}.png"
@@ -866,7 +1108,8 @@ class RemoteViewer:
                 if is_cancelled():
                     raise VideoExportCancelled("Video export cancelled")
                 path_time = path.times[0] + i / fps
-                c = path.sample(path_time, width, height)
+                c = path.sample(path_time, width, height,
+                                interpolate_time=plan["mode"] != "recording")
                 if plan["scene_mode"] == "freeze":
                     c = dict(c, timestamp=plan["scene_start"])
                 elif plan["scene_mode"] == "range":
@@ -875,6 +1118,7 @@ class RemoteViewer:
                         plan["scene_start"]
                         + fraction * (plan["scene_end"] - plan["scene_start"])
                     ))
+                c = dict(c, timestamp=self.scene_time(state, c["timestamp"]))
                 self.renderer.render(
                     c, c["timestamp"], state["sh_degree"], state["marginal_threshold"]
                 )
@@ -908,7 +1152,7 @@ class RemoteViewer:
                 raise VideoExportCancelled("Video export cancelled")
             os.replace(temporary, target)
             report = dict(
-                schema="ftgspp-video-export-v1", model_sha256=self.asset.sha256,
+                schema="ftgspp-video-export-v2", model_sha256=self.asset.sha256,
                 video=target.name, mode=plan["mode"], fps=fps,
                 duration=plan["duration"], frame_count=count,
                 width=width + width % 2, height=height + height % 2,
@@ -918,6 +1162,9 @@ class RemoteViewer:
                 scene_timeline=dict(
                     mode=plan["scene_mode"], start=plan["scene_start"],
                     end=plan["scene_end"],
+                    sampling=("recorded-hold" if plan["mode"] == "recording" else
+                              "nearest-sample" if
+                              len(self.asset.metadata.get("sample_times", [])) else "continuous"),
                 ),
                 display=settings, encoding=dict(
                     codec="h264", crf=18, pixel_format="yuv420p",

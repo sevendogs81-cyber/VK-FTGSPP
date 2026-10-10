@@ -52,7 +52,7 @@ Failed model uploads attempt to restore the previous model from disk.
 ### Browser controls and image size
 
 The remote UI has orbit, pan, look/fly, optical-axis roll, dolly, fit/reset,
-calibrated capture cameras, playback/speed/loop/sample snap, RGB/Alpha/T,
+calibrated capture cameras, playback/speed/loop with mandatory sample alignment, RGB/Alpha/T,
 background/exposure, SH/threshold, faithful/interactive quality, PNG screenshot,
 camera path keyframes/preview/save/load/export, direct MP4 export, and session save/load.
 Session and path files are stored on the **server** beside the model by default.
@@ -76,7 +76,7 @@ Selecting another calibrated camera uses that camera's original aspect.
 `--width`/`--height` set the initial remote bounding box; browser resizes choose
 later boxes up to 1920×1080 for viewing. Screenshots and path exports fit the
 original aspect into the full browser viewport even when interactive quality
-reduces moving frames to 75%; their bounding box is capped at 3840×2160.
+adapts preview resolution; their bounding box is capped at 3840×2160.
 Pixel dimensions are rounded to whole pixels. The model's SH degree and dynamic
 threshold are preserved in both quality modes. Interactive frames use JPEG
 quality 88; PNG output is lossless.
@@ -90,12 +90,19 @@ for JPEG/PNG encoding (4 bytes/pixel plus a 4-byte non-finite status, instead of
 bytes/pixel). Unchanged render inputs reuse GPU F/T;
 exposure/background/mode changes only pack, read back and encode;
 identical image requests reuse the encoded bytes. The browser sends state
-deltas, waits for image decode before requesting the next frame, and stops its
-animation loop while paused. The server keeps only the latest pending view.
+deltas. Camera updates are coalesced at the target camera rate without waiting
+for earlier image responses; the server renders the latest accepted pose. Idle,
+paused views stop their animation loop. The decoder and presentation queue are
+bounded by the negotiated frame credits.
 The status bar reports host-observed total/forward/pack+readback time, cache reuse,
 renderer buffer allocation and encoded size. The frame protocol reports
 `rgba8_ms`, `readback_bytes` and `encode_ms`; composition and D2H have a combined
 host timing, not separate GPU timestamps. These are not end-to-end latency or FPS.
+During streaming the status bar also reports actual presentation FPS, a periodic
+WebSocket round-trip measurement, browser decode time, navigation view age,
+buffer occupancy, rebuffer count and preview scale. View age is measured from
+the camera command to displaying its image, and is zero for fixed-view playback.
+RTT includes transport queuing; it is not an independent bandwidth measurement.
 
 Remote access is protected by a random per-process URL token and a same-origin
 WebSocket check. Keep the printed URL private. The server rejects non-loopback
@@ -247,9 +254,11 @@ The remote viewer exports MP4 directly from the browser in three modes:
 
 - **Recorded interaction** is the default. Press `Start recording`, operate the
   viewer normally with orbit, pan, look/fly and wheel zoom, optionally control
-  scene Play/Pause, then stop recording. Server receive time becomes camera-path
+  scene Play/Pause, then stop recording. Browser monotonic time becomes camera-path
   time, while each sample retains the 4D scene time actually displayed. Export
-  interpolates the captured poses and observed scene times at the requested FPS.
+  interpolates the captured poses at the requested FPS and holds each observed
+  scene time until the next sample. Loop wraps, pauses and timeline seeks remain
+  discrete changes rather than interpolated reverse motion.
 - **Keyframed camera path** samples the user-created spatial keyframes. Its 4D
   timeline is explicit and separate: freeze at one scene time, or advance over a
   selected scene-time range for the duration of the camera path.
@@ -258,6 +267,46 @@ The remote viewer exports MP4 directly from the browser in three modes:
 The video panel controls FPS and output width; height follows the recorded/path
 camera aspect ratio. The UI reports effective extent, duration, and frame count
 before export.
+
+Remote viewing always uses the nearest actual sample timestamp, independently
+of camera motion and output FPS. This applies to playback, scrubbing, PNG
+capture, PNG paths and every MP4 export mode. The legacy session `snap` field is
+accepted for compatibility but normalized to true; there is no Snap toggle.
+If a model has no sample timestamps, the supplied time is retained. Headless CLI
+camera paths retain their explicit scene timestamps and interpolation contract.
+
+Remote playback has one strategy: a bounded server stream and paced browser
+presentation (`ftgspp-remote-stream-v2`). The initial window is at least eight
+frames; measured RTT and frame rate can enlarge it, up to 64 frames and an
+approximately 256 MiB decoded-image budget. The browser initially buffers
+roughly 120 ms of frames (3–8 frames). Presentation acknowledgements return
+credits without a request/response round trip per frame.
+
+Source FPS comes from each scene's metadata, not a fixed 15/30 FPS assumption.
+Playback cadence is bounded by source FPS, requested target FPS, measured browser
+refresh rate, transport credit capacity and 120 FPS. The continuous scene clock
+is sampled at that cadence and then aligned to actual capture timestamps,
+including irregular timestamps. A 120 FPS scene on a 60 Hz screen still advances
+at normal scene speed, using a subset of captured samples. Camera navigation is
+independent of source FPS and can run up to 60 FPS. Camera edits update the same
+stream instead of restarting it. Navigation is paced on the server, keeps at
+most two decoded frames for presentation, and coalesces outdated camera inputs.
+The capture clock continues while playing and stays fixed while paused.
+
+Interactive previews start at full viewport resolution. Sustained insufficient
+supply reduces the preview in measured steps to a 60% edge-length floor; stable
+supply gradually restores full resolution. Pausing and finishing navigation
+restore full preview resolution. Faithful preserves requested resolution.
+Captures/exports never use the adaptive preview size. When physical bandwidth
+or latency is insufficient, bounded rebuffering is still possible. Hiding the
+page, seeking, pausing, scene switching and export cancel obsolete streams.
+Loop playback includes the last captured sample before wrapping.
+
+Recording uses the camera and timestamp of acknowledged displayed frames, not
+the latest input pose or speculative prefetch. Cumulatively skipped navigation
+frames do not become recorded samples. Single-frame commands remain supported
+for paused views and older clients; incompatible stream versions are rejected.
+Reload the page after a server upgrade.
 
 Remote MP4 export snapshots the current camera/path and display settings when it
 starts. It sends the GPU-packed RGBA8 frames directly to an FFmpeg raw-video pipe,
@@ -271,6 +320,10 @@ high-resolution exports do not accumulate a large lookahead queue. An installed
 `ffmpeg` with `libx264` is required on the server; encoder failures are reported
 with FFmpeg's diagnostic instead of a generic pipe error. `scripts/setup.sh`
 installs and checks these tools for the supported setup path.
+The `ftgspp-video-export-v2` manifest identifies scene sampling as
+`recorded-hold`, `nearest-sample`, or `continuous`, and records the actual camera
+and scene time for every output frame. Earlier v1 manifests describe the old
+recording interpolation behavior; their videos are not modified.
 
 The remote worker serializes export with interactive rendering because both use
 one renderer. View updates received during export are coalesced and the newest
@@ -325,7 +378,7 @@ The reproducible checks are:
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m pytest dev/tests/test_viewer.py dev/tests/test_remote_viewer.py -q
-node --test dev/tests/viewer_browser.test.cjs
+node --test dev/tests/viewer_browser.test.cjs dev/tests/viewer_stream.test.cjs
 .venv/bin/python dev/tests/gpu/check_viewer.py --device 0
 .venv/bin/python dev/tests/gpu/check_remote_viewer.py \
   --model build/viewer/acceptance/gaussians.npz --device 0
