@@ -1,27 +1,7 @@
-# Hardware compatibility
+# Native hardware validation
 
-VK-FTGSPP does not support every NVIDIA GPU. The first-release hardware contract
-is capability-based because the Vulkan features exposed by the installed driver
-matter as much as the marketing model name.
-
-## Supported boundary
-
-The supported training, evaluation, headless rendering, and browser-viewer path
-requires all of the following:
-
-- Linux x86_64 with glibc 2.28 or newer (2.31 or newer when installing the
-  optional TensorBoard tools);
-- one physical NVIDIA GPU selected by its Vulkan device ID;
-- a driver exposing Vulkan 1.2 and the native capabilities below;
-- a device reported as **`VIABLE`** by `ftgspp doctor`; and
-- enough device memory for the selected Gaussian count, image resolution,
-  optimizer state, and rasterizer workspace.
-
-`POSSIBLY VIABLE` is an engineering fallback classification. It does not qualify
-the device for supported FTGSPP training. `NOT VIABLE`, CPU Vulkan
-implementations such as `llvmpipe`, non-NVIDIA GPUs, Windows, non-x86_64 Linux,
-and a user-facing multi-GPU training configuration are outside the first-release
-support boundary.
+For user hardware selection and doctor instructions, see
+[hardware compatibility](../../docs/install.md#requirements).
 
 ## Native capability gates
 
@@ -51,12 +31,51 @@ not require a server display.
 These are execution requirements, not a performance recommendation. A device
 can pass every feature check and still be impractical for a large scene.
 
+## Interpreting individual limits
+
+- `I16`, `I64`, and `F32Atomic` are all present.
+- The reported subgroup, group counts, group sizes, shared memory, and push
+   constant limits meet the requirement line printed above the device list.
+
+For example, the maintained RTX 4090 environment reports a 32-lane subgroup,
+`[2147483647, 65535, 65535]` group counts,
+`[1024, 1024, 64]` group sizes, 49,152 bytes of compute shared memory, and all
+three required shader features.
+
+
+## Hardware selection evidence
+
+# Hardware compatibility
+
+VK-FTGSPP does not support every NVIDIA GPU. The first-release hardware contract
+is capability-based because the Vulkan features exposed by the installed driver
+matter as much as the marketing model name.
+
+## Supported boundary
+
+The supported training, evaluation, headless rendering, and browser-viewer path
+requires all of the following:
+
+- Linux x86_64 with glibc 2.28 or newer (2.31 or newer when installing the
+  optional TensorBoard tools);
+- one physical NVIDIA GPU selected by its Vulkan device ID;
+- a driver exposing Vulkan 1.2 and the features checked by `doctor`;
+- a device reported as **`VIABLE`** by `ftgspp doctor`; and
+- enough device memory for the selected Gaussian count, image resolution,
+  optimizer state, and rasterizer workspace.
+
+`POSSIBLY VIABLE` is an engineering fallback classification. It does not qualify
+the device for supported FTGSPP training. `NOT VIABLE`, CPU Vulkan
+implementations such as `llvmpipe`, non-NVIDIA GPUs, Windows, non-x86_64 Linux,
+and a user-facing multi-GPU training configuration are outside the first-release
+support boundary.
+
 ## Model-level runnable estimate
 
 The following model families are part of the documented runnable range even
 though most have not been exercised in the maintained acceptance machine. Here,
 **runnable (estimated)** means that the architecture and NVIDIA Linux driver are
-expected to satisfy the native gate above. A listed GPU counts as runnable when
+expected to satisfy the native capability checks. A listed GPU counts as runnable when
 it has at least 4 GB of VRAM, the proprietary driver exposes it as a Vulkan
 physical device, and `ftgspp doctor` reports it as `VIABLE`.
 
@@ -96,15 +115,12 @@ runnable range even if a particular machine happens to initialize.
 ## Validated hardware
 
 GPU acceptance has been exercised on NVIDIA GeForce RTX 4090 24 GB devices.
-Single-device training, evaluation, rendering,
-headless and browser viewers, numerical checks, overflow replay, checkpoints,
-and pipeline acceptance have been exercised on this hardware. The two-device
-tests are engineering checks for code that remains outside the supported user
-workflow.
+Training, evaluation, rendering and browser viewing have been exercised on
+this hardware.
 
 The estimated families above are accepted as runnable hardware, while
 "validated" means that the repository's GPU acceptance suite has actually run
-on that model. Performance numbers in [performance.md](performance.md) are RTX
+on that model. Performance numbers in [performance.md](performance-measurements.md) are RTX
 4090 measurements and must not be projected onto another GPU.
 
 ## Check a machine
@@ -121,14 +137,6 @@ Use the Vulkan ID printed in the device list. It can differ from the CUDA or
 1. The selected device name is the intended NVIDIA GPU, rather than
    `llvmpipe` or another adapter.
 2. Its classification is `VIABLE`.
-3. `I16`, `I64`, and `F32Atomic` are all present.
-4. The reported subgroup, group counts, group sizes, shared memory, and push
-   constant limits meet the requirement line printed above the device list.
-
-For example, the maintained RTX 4090 environment reports a 32-lane subgroup,
-`[2147483647, 65535, 65535]` group counts,
-`[1024, 1024, 64]` group sizes, 49,152 bytes of compute shared memory, and all
-three required shader features.
 
 Passing `doctor` does not reserve the memory required by a real run. Peak memory
 depends on the model budget, input resolution, projected tile load, training
@@ -149,3 +157,8 @@ passes.
 Optional Torch components have a separate device boundary. BiRefNet-HR, DA3,
 CUDA point filtering, and LPIPS may use CUDA and its ordinal mapping; their
 availability does not change whether the core Vulkan device is compatible.
+The locked Torch 2.6 / CUDA 12.4 stack is tested on RTX 4090. The estimated
+Blackwell support in the table above applies to Vulkan, not this older CUDA
+wheel: newer GPU architectures need a separately validated Torch build or CPU
+preparation (`--device cpu`, and `init.da3.device: cpu`). Driver version alone
+does not establish CUDA wheel architecture support.

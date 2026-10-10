@@ -67,11 +67,22 @@ XYZ/RGB. New DA3 cache directories use a readable configuration prefix
 identity. `init.seed` can pin this namespace independently of `train.seed`.
 `init.backend=points` remains an explicit, calibrated/user-cloud path.
 
+Explicit user-cloud budgets in both modes default to the selected PLY population and are
+frozen as integers in the effective plan. `prepare points --method colorize`
+converts XYZ-only input into RGB PLYs using the existing IBR implementation or
+explicit neutral gray. Its `ftgspp-point-color-v2` manifest records source/output
+hashes and data identity; the generic points initializer validates that manifest.
+This method preserves geometry unless an explicit point cap is requested.
+
 The foreground profile defaults to `init.backend=carving`. Both public geometry
 preparations can reuse or generate the foreground DA3 cache. Explicit
 `--input-points` supplies existing geometry; carving also accepts `--bounds`.
-Without explicit bounds, carving derives robust world bounds from the input
-cloud, then creates a mask-supported surface-band grid. Its coarse pass expands
+With `--input-points`, carving derives robust world bounds from those clouds.
+Otherwise calibrated enclosing rigs use support-aware per-frame silhouette-frustum
+bounds; unsuitable/clipped envelopes fall back to DA3. Uncalibrated captures first
+recover the static rig with one DA3 keyframe. Rig-only reload validates this
+first-frame request against the complete dataset identity and model inputs.
+Carving then creates a mask-supported surface-band grid. Its coarse pass expands
 to sparse fine-grid indices, so projection work is
 limited to surviving regions; the CUDA path keeps vote arrays on-device and
 returns only selected indices. Point filtering retains DA3 samples supported by
@@ -82,6 +93,30 @@ audit metadata and emits a warning when it differs from the current runtime.
 `init.backend=points` remains the explicit generic/user-cloud path, while
 `init.backend=da3` consumes the foreground-aware DA3 cloud without either
 visual-hull preparation.
+
+New scene and foreground plans resolve `train.preset` into task-specific
+frame-adaptive horizons and proportional relocation/evaluation clocks before
+validation. Scene additionally scales CC/gate-score warm-up and the separate
+HS budget, with phase-local HS relocation. Its default geometry stride follows
+FPS (roughly 1/6-second spacing); foreground remains every-frame. Explicit numeric
+values override these defaults. Versioned effective configs persist concrete
+values, including the counted user-cloud budget; loading them never reselects a
+budget from the preset label. `train --print-config` prints the same effective
+configuration without importing the runner or creating a run. DA3 geometry
+scheduling still resolves later against the actual scene and writes its cache
+metadata. See [training settings](training-settings.md).
+
+Point preparation v4 (colorize v2) reuses frame-scoped masks/validity between
+bounds, coarse/fine carving and IBR; coarse/fine projections share prepared device
+masks too. RGB decode uses a bounded two-worker prefetch in IBR and DA3. Generated
+color queries default to 4× the average final Gaussian budget per keyframe, with
+2×/8×/uncapped alternatives. Dense geometry still builds the depth buffer, so
+query sampling does not expose previously occluded colors. Original user clouds
+are uncapped unless explicitly requested. Source/data/PLY hashes and completed
+markers remain mandatory for managed artifacts; old v2/v3 and colorize v1
+artifacts remain accepted. The manifest records the resolved preparation choices
+and wall-clock stages. These changes do not alter saved training clocks or L3.
+
 
 ## Optimizer updates
 
@@ -95,7 +130,7 @@ the same generation and views.
 ### Batch size four
 
 Ordinary single-device foreground training supports batch size four (B4). See
-[configuration requirements](usage.md#batch-size).
+[configuration requirements](training-settings.md#batch-size).
 
 A compile-time specialization of the shared parameter backward accumulates
 the first three complete gradients with weight 0.25 directly into the existing
@@ -144,8 +179,9 @@ document them as a user workflow.
 ## Phases and checkpoints
 
 Main training and the hard-separation phase share one optimizer-update
-implementation. Hard separation defaults to 3000 steps with one group-local
-relocation at local step 1500. It has its own local Adam step, seed, LR/freezes
+implementation. Scene hard separation defaults to 10% of the main horizon with
+one group-local relocation at its local midpoint (3000/1500 at 30k main steps).
+Foreground retains its explicit opt-in HS reference of 3000/1500. It has its own local Adam step, seed, LR/freezes
 and fresh moments. It binarizes persistence without zeroing motion, keeps gates
 fixed, continues low-rate velocity optimization, uses opacity-and-gradient donor
 scoring within each persistence group, and exports the terminal hard-phase state.
@@ -224,3 +260,83 @@ Examples stay in the git checkout and sdist; they are not installed by the
 wheel. The default wheel is headless and includes offscreen rendering plus the
 browser asset; `FTGSPP_BUILD_VIEWER=ON` additionally compiles the X11
 GLFW / Dear ImGui module.
+
+## Viewer rendering
+
+Here, `F` is the accumulated foreground color and `T` is transmittance. The
+local window reads the resident `float4(F.rgb, T)` buffer directly; the remote
+mode reads back, encodes and sends frames to the browser. The model stays on one
+server GPU. Headless export remains available without either UI.
+
+### Remote rendering and timing
+
+Frames keep FP32 F/T on the GPU. A Vulkan compute shader composes display
+options and packs RGBA8; packing and device-to-host (D2H) transfer share one
+submission and completion wait. Readback writes a reusable uint8 NumPy buffer
+for JPEG/PNG encoding (4 bytes/pixel plus a 4-byte non-finite status, instead of 16
+bytes/pixel). Unchanged render inputs reuse GPU F/T;
+exposure/background/mode changes only pack, read back and encode;
+identical image requests reuse the encoded bytes. The browser sends state
+deltas. Camera updates are coalesced at the target camera rate without waiting
+for earlier image responses; the server renders the latest accepted pose. Idle,
+paused views stop their animation loop. The decoder and presentation queue are
+bounded by the negotiated frame credits.
+The status bar reports host-observed total/forward/pack+readback time, cache reuse,
+renderer buffer allocation and encoded size. The frame protocol reports
+`rgba8_ms`, `readback_bytes` and `encode_ms`; composition and D2H have a combined
+host timing, not separate GPU timestamps. These are not end-to-end latency or FPS.
+During streaming the status bar also reports actual presentation FPS, a periodic
+WebSocket round-trip measurement, browser decode time, navigation view age,
+buffer occupancy, rebuffer count and preview scale. View age is measured from
+the camera command to displaying its image, and is zero for fixed-view playback.
+RTT includes transport queuing; it is not an independent bandwidth measurement.
+
+## Viewer camera-path format
+
+Camera paths use JSON schema `ftgspp-camera-path-v1`, with a `keyframes` array.
+Each entry has `path_time` and a `camera` containing `width`, `height`, `K[3][3]`,
+`w2c[4][4]` and `timestamp`. Times must strictly increase; camera poses use
+OpenCV conventions. Saving a path in the viewer provides a working example.
+
+
+## Remote sampling and streaming
+
+Remote viewing always uses the nearest actual sample timestamp, independently
+of camera motion and output FPS. This applies to playback, scrubbing, PNG
+capture, PNG paths and every MP4 export mode. The legacy session `snap` field is
+accepted for compatibility but normalized to true; there is no Snap toggle.
+If a model has no sample timestamps, the supplied time is retained. Headless CLI
+camera paths retain their explicit scene timestamps and interpolation contract.
+
+Remote playback has one strategy: a bounded server stream and paced browser
+presentation (`ftgspp-remote-stream-v2`). The initial window is at least eight
+frames; measured RTT and frame rate can enlarge it, up to 64 frames and an
+approximately 256 MiB decoded-image budget. The browser initially buffers
+roughly 120 ms of frames (3–8 frames). Presentation acknowledgements return
+credits without a request/response round trip per frame.
+
+Source FPS comes from each scene's metadata, not a fixed 15/30 FPS assumption.
+Playback cadence is bounded by source FPS, requested target FPS, measured browser
+refresh rate, transport credit capacity and 120 FPS. The continuous scene clock
+is sampled at that cadence and then aligned to actual capture timestamps,
+including irregular timestamps. A 120 FPS scene on a 60 Hz screen still advances
+at normal scene speed, using a subset of captured samples. Camera navigation is
+independent of source FPS and can run up to 60 FPS. Camera edits update the same
+stream instead of restarting it. Navigation is paced on the server, keeps at
+most two decoded frames for presentation, and coalesces outdated camera inputs.
+The capture clock continues while playing and stays fixed while paused.
+
+Interactive previews start at full viewport resolution. Sustained insufficient
+supply reduces the preview in measured steps to a 60% edge-length floor; stable
+supply gradually restores full resolution. Pausing and finishing navigation
+restore full preview resolution. Faithful preserves requested resolution.
+Captures/exports never use the adaptive preview size. When physical bandwidth
+or latency is insufficient, bounded rebuffering is still possible. Hiding the
+page, seeking, pausing, scene switching and export cancel obsolete streams.
+Loop playback includes the last captured sample before wrapping.
+
+Recording uses the camera and timestamp of acknowledged displayed frames, not
+the latest input pose or speculative prefetch. Cumulatively skipped navigation
+frames do not become recorded samples. Single-frame commands remain supported
+for paused views and older clients; incompatible stream versions are rejected.
+Reload the page after a server upgrade.

@@ -225,7 +225,7 @@ def _load_model(
     except ImportError as exc:  # pragma: no cover - depends on optional install
         raise RuntimeError(
             "BiRefNet-HR preparation requires the 'birefnet' optional dependencies: "
-            "pip install 'ftgspp-vulkan-community[birefnet]'"
+            "run bash scripts/setup.sh --with-birefnet from the repository clone."
         ) from exc
     resolved_device = (
         "cuda" if device == "auto" and torch.cuda.is_available()

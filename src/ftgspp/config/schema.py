@@ -175,7 +175,9 @@ class InitConfig:
     backend: str = "auto"
     points_path: Path | None = MISSING
     keyframe_stride: int = MISSING
-    num_gaussians: int = MISSING
+    # Null is an input-only request to count a user-supplied points set.
+    # Resolution freezes a positive integer before a run plan is returned.
+    num_gaussians: int | None = MISSING
     # Geometry/L3 seed is independent from train.seed when set.  Leaving it
     # null preserves the historical behavior for existing configurations.
     seed: int | None = None
@@ -214,6 +216,9 @@ class BackgroundConfig:
 
 @dataclass
 class TrainConfig:
+    # Task-specific input budget: preview / balanced / extended. Resolution
+    # freezes all optimizer clocks; this label never reinterprets a resume.
+    preset: str | None = None
     iterations: int = MISSING
     # One Adam update averages four sequential views on the same GPU.
     batch_size: int = 1

@@ -24,7 +24,7 @@ def _write_grid(root: Path) -> None:
             )
 
 
-def test_prepare_dataset_creates_manifest_and_resolvable_starter_config(tmp_path):
+def test_prepare_dataset_creates_manifest_and_resolvable_starter_config(tmp_path, capsys):
     images = tmp_path / "images"
     _write_grid(images)
     prepare_dataset([
@@ -51,12 +51,17 @@ def test_prepare_dataset_creates_manifest_and_resolvable_starter_config(tmp_path
     starter = OmegaConf.load(config_path)
     assert starter.init.seed == 0
     assert starter.init.backend == "carving"
-    assert starter.init.points_path == "points_vhull_ibr_stride2"
+    assert starter.init.points_path == "points_vhull_ibr_stride1"
+    assert config.init.keyframe_stride == 1
+    assert config.init.num_velocity_nns == 3
+    assert config.train.iterations == 35000
+    assert config.data.scale == 1.0
     assert config.init.seed == 0
     assert config.init.backend == "carving"
     assert config.init.points_path == (
         tmp_path / f"points_vhull_ibr_stride{config.init.keyframe_stride}"
     )
+    assert f"--output {config.init.points_path}" in capsys.readouterr().out
 
 
 def test_manifest_only_supports_arbitrary_paths_and_explicit_timestamps(tmp_path):
@@ -169,6 +174,36 @@ def test_outputs_cannot_overwrite_images(tmp_path, option, alias):
     assert image.read_bytes() == before
     assert target.read_bytes() == before
     assert not (tmp_path / "manifests").exists()
+
+
+@pytest.mark.parametrize("option", ["--config", "--output-manifest"])
+@pytest.mark.parametrize("alias", ["direct", "symlink", "hardlink"])
+@pytest.mark.parametrize("filename", ["f000003.ply", "manifest.json"])
+def test_outputs_cannot_overwrite_supplied_point_data(tmp_path, option, alias, filename):
+    images = tmp_path / "images"
+    _write_grid(images)
+    points = tmp_path / "points"
+    points.mkdir()
+    source = points / filename
+    before = b"user point-cloud data\n"
+    source.write_bytes(before)
+    target = source
+    if alias != "direct":
+        target = tmp_path / "alias"
+        if alias == "symlink":
+            target.symlink_to(source)
+        else:
+            target.hardlink_to(source)
+    with pytest.raises(SystemExit) as error:
+        prepare_dataset([
+            "--images", str(images), "--points", str(points),
+            option, str(target), "--overwrite",
+        ])
+    assert error.value.code == 2
+    assert source.read_bytes() == before
+    assert target.read_bytes() == before
+    assert not (tmp_path / "manifests").exists()
+    assert not (tmp_path / "ftgspp.yaml").exists()
 
 
 def test_outputs_must_be_distinct(tmp_path):

@@ -61,13 +61,18 @@ class CameraPath:
     def duration(self):
         return float(self.times[-1] - self.times[0])
 
-    def sample(self, t, width=None, height=None):
+    def sample(self, t, width=None, height=None, *, interpolate_time=True):
         t = float(t)
         if not np.isfinite(t):
             raise ValueError("Path sample time must be finite")
         t = np.clip(t, self.times[0], self.times[-1])
         if self.slerp is None:
             return scaled_camera(self.cameras[0], width, height)
+        # Recordings contain observed scene states, including pauses, seeks and
+        # loop wraps. Interpolate their camera motion, but hold the last observed
+        # timestamp instead of synthesizing a backwards sweep through the scene.
+        observed = min(int(np.searchsorted(self.times, t, side="right") - 1),
+                       len(self.times) - 1)
         i = int(
             np.clip(
                 np.searchsorted(self.times, t, side="right") - 1, 0, len(self.times) - 2
@@ -86,7 +91,8 @@ class CameraPath:
                 a,
                 w2c=np.linalg.inv(pose),
                 K=(1 - f) * a["K"] + f * b["K"],
-                timestamp=(1 - f) * a["timestamp"] + f * b["timestamp"],
+                timestamp=((1 - f) * a["timestamp"] + f * b["timestamp"]
+                           if interpolate_time else self.cameras[observed]["timestamp"]),
                 name="Path",
             )
         )

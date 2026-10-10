@@ -1,241 +1,78 @@
-# Installation
+# Install
 
-The usual path is one script from a clone:
+## Requirements
 
-```bash
-git clone https://github.com/sevendogs81-cyber/VK-FTGSPP.git
-cd VK-FTGSPP
-bash scripts/setup.sh
-source .venv/bin/activate
-```
+- Linux x86_64, glibc 2.28+, and a supported NVIDIA Vulkan GPU.
+- An NVIDIA driver exposing Vulkan 1.2; setup does not install the driver.
+- Network access for packages and, when first used, optional model weights.
+- Sudo for missing system packages, or use the shared-server option below.
 
-Before running it, the host needs Linux x86_64 with glibc 2.28 or newer
-(2.31 or newer with `--with-tensorboard`),
-`apt-get` and root/sudo access (or all packages already present with
-`--skip-apt`), and network access to fetch uv, Python, Slang, and locked Python
-packages. Native training and rendering also need an installed NVIDIA Linux
-driver with a Vulkan ICD and a GPU in the [runnable range](hardware.md); the
-script does not install or replace the driver. A local desktop viewer needs an
-X11/XWayland display backed by the selected GPU. Raw-RGB initialization and
-LPIPS fetch their model weights on first use unless cached.
+The maintained GPU acceptance tests use RTX 4090 24 GB. For the default model,
+12 GB or more is a starting memory estimate; actual use depends on your capture.
+Select a GPU marked **VIABLE** by `ftgspp doctor`. Windows, non-NVIDIA GPUs and
+multi-GPU training are unsupported. Compute-only data-center GPUs such as
+A100/H100 are outside the documented supported range.
 
-Building the wheel compiles C++ and every shader. That step does **not** need
-a GPU. `ftgspp doctor`, `train`, and `eval` do. CUDA ordinals and Vulkan
-device indices can differ; `--devices` is the Vulkan ID from `doctor`, not
-`nvidia-smi`.
-
-Not every NVIDIA GPU is supported. Read the
-[hardware compatibility matrix](hardware.md) before installation; the full
-training path requires a physical NVIDIA device classified as `VIABLE`, rather
-than `POSSIBLY VIABLE`, by `ftgspp doctor`.
-
-The default installation is the lightweight Vulkan training runtime. It stays
-Torch-free and is intended for users who already have the masks and keyframe
-PLYs required by their configuration. Add the complete raw-RGB initialization
-stack when needed:
-
-```bash
-bash scripts/setup.sh --with-init
-```
-
-The two initialization components can also be installed independently:
-`--with-birefnet` adds BiRefNet-HR mask generation, while `--with-da3` adds DA3
-point generation and CUDA-accelerated carving. The foreground pipeline mode is
-a data/training choice; it is not an installation profile.
-
-`--with-lpips` adds the optional locked final-test metric. It is composable with
-every initialization profile, for example `bash scripts/setup.sh --with-init
---with-lpips`, and never enables LPIPS during training.
-`--with-tensorboard` adds the optional research visualization tools.
-
-Viewer options are independent of training and initialization. `--with-viewer`
-builds the GLFW / Dear ImGui X11 window and installs its required X11 headers.
-`--with-remote` installs the lightweight `websockets` dependency for the SSH
-browser viewer; it needs no server display or desktop build. Headless
-`ftgspp render` is part of the core install. The two viewer flags can be
-combined with each other and with initialization or LPIPS flags.
-
-| Available inputs | Setup command |
-|---|---|
-| Required masks and point-cloud set are already prepared | `bash scripts/setup.sh` |
-| Point clouds are ready; masks must be generated | `bash scripts/setup.sh --with-birefnet` |
-| Masks are ready; DA3 points or automatic carving bounds are needed | `bash scripts/setup.sh --with-da3` |
-| Start from raw RGB | `bash scripts/setup.sh --with-init` |
-| Add LPIPS to any profile | Add `--with-lpips` to the same setup command |
-| Add the local desktop viewer | Add `--with-viewer` to the same setup command |
-| Add the SSH browser viewer | Add `--with-remote` to the same setup command |
-| Add TensorBoard tools | Add `--with-tensorboard` to the same setup command |
-
-Each setup run synchronizes the selected profile. Use `--with-init` or pass
-both component flags in the same command when both must remain installed.
-To install every public optional component in one pass, use:
-
-```bash
-bash scripts/setup.sh --with-init --with-viewer --with-remote \
-  --with-lpips --with-tensorboard
-```
-
-The command builds the desktop module and installs the full optional Python
-stack; model weights are fetched when their feature first runs.
-
-Release wheels are not published to PyPI. YAML examples live in the **clone**;
-the wheel only provides the `ftgspp` command.
-
-## What the script does
-
-1. Checks Linux x86_64 and the selected glibc minimum, then installs
-   `build-essential`, `git`,
-   `curl`, `ca-certificates`, `tar`,
-   `coreutils`, `libvulkan-dev`, and FFmpeg with `apt-get` when
-   they are missing (unless `--skip-apt`). It verifies C++17, `ffprobe`, and the
-   `libx264` encoder for SelfCap video preparation and MP4 export. A
-   `--with-viewer` build also installs the required X11 development headers.
-   CMake downloads GLM 0.9.9.8 when its system headers are absent.
-2. Downloads Slang **2026.10** to `$HOME/.local/slang-2026.10` when `slangc`
-   2026.10 is not already on `PATH`, and checks the same tarball checksum as
-   CI (`beddadd9b481…`).
-3. Installs [uv](https://docs.astral.sh/uv/) **0.11.29** when that exact version
-   is not already on `PATH`.
-4. Creates `.venv` with Python **3.12.x**, appends Slang to that venv's
-   `activate` script, then synchronizes the locked core environment plus the
-   optional components selected on the command line, then rebuilds the wheel
-   with the selected desktop-viewer setting.
-5. Imports every selected component and rejects dependencies resolved from a
-   foreign `.pth`/`PYTHONPATH` location outside `.venv`.
-6. Runs `ftgspp doctor --devices 0` unless `--skip-doctor`.
-
-`.venv` is gitignored. Keep it activated for every later `ftgspp` and
-extra-install command.
-
-The build needs CMake 3.24+; scikit-build-core can provide it when the system
-copy is older.
-
-## Installed components
-
-| Layer | Required components | Installed by `setup.sh` |
-|---|---|---|
-| System/build | Linux x86_64, glibc 2.28+ (2.31+ with TensorBoard), C++17-capable `g++`/`make`, Git, curl/CA certificates, tar/coreutils, Vulkan headers and loader, GLM | System tools and Vulkan headers are installed through `apt-get` when needed; CMake fetches GLM if absent |
-| Video input/export | `ffmpeg`, `ffprobe`, and the `libx264` encoder | Yes, through `apt-get` when needed, then checked on `PATH` |
-| Shader build | Slang/`slangc` 2026.10 | Yes, pinned with SHA-256 verification |
-| Python/build | CPython 3.12.x, uv 0.11.29, scikit-build-core, pybind11 3.0.1, CMake 3.24+ | Yes |
-| Core runtime | NumPy 2.x, SciPy, OpenCV headless 4.12, pycolmap 3.12, OmegaConf, tqdm | Yes |
-| Native training | NVIDIA Linux driver with Vulkan ICD and a device reported as `VIABLE` by `ftgspp doctor`; see [hardware.md](hardware.md) | Driver/GPU must already exist |
-| BiRefNet-HR masks | PyTorch/TorchVision, Transformers, Safetensors, timm, Kornia, einops, and pinned `ZhengPeng7/BiRefNet_HR` | With `--with-birefnet` or `--with-init`; model weights require network or a populated Hugging Face cache |
-| DA3 points/carving | PyTorch/TorchVision, pinned `depth-anything-3==0.1.1`, Addict, evo, ImageIO/MoviePy, Pillow, plyfile, and trimesh | With `--with-da3` or `--with-init`; model weights require network or a populated cache |
-| Locked final-test LPIPS | PyTorch, TorchMetrics and TorchVision | With `--with-lpips`; only needed for `ftgspp eval --lpips` |
-| SSH browser viewer | websockets 15.x | With `--with-remote`; server remains loopback-only and display-free |
-| Local desktop viewer | GLFW 3.4, Dear ImGui v1.91.9b and X11 development headers | With `--with-viewer`; archives are fetched by CMake using pinned SHA-256 values |
-| TensorBoard | TensorBoard | With `--with-tensorboard` |
-
-The pinned BiRefNet-HR repository publishes a broad
-[training/application requirements file](https://huggingface.co/ZhengPeng7/BiRefNet_HR/blob/a7a562f6fd16021180f2f4348f4de003a2d3d1e1/requirements.txt)
-that includes `numpy<2`. This project does not install that file. Its
-`birefnet` extra declares the direct imports used by the pinned inference
-module (`torchvision`, timm, Kornia, and einops) while retaining the project's
-tested NumPy 2/OpenCV 4.12 core.
-
-The audited upstream `depth-anything-3==0.1.1` distribution declares its full
-demo/server/training environment as hard dependencies, including `numpy<2`.
-FTGSPP uses only the inference API and is tested with NumPy 2/OpenCV 4.12. The
-uv lock therefore supplies reviewed static metadata for that exact DA3 version
-and explicitly declares the smaller inference dependency set in the `da3`
-extra. This avoids unrelated Open3D, web-server, pre-commit, and
-duplicate OpenCV packages while keeping DA3 itself version-pinned.
-
-## Manual install
-
-Use this only if you cannot run `scripts/setup.sh`. The pins must stay the
-same.
+## Recommended installation
 
 ```bash
 git clone https://github.com/sevendogs81-cyber/VK-FTGSPP.git
 cd VK-FTGSPP
-
-sudo apt-get update
-sudo apt-get install -y build-essential git curl ca-certificates tar coreutils libvulkan-dev libglm-dev ffmpeg
-
-curl -fsSL https://github.com/shader-slang/slang/releases/download/v2026.10/slang-2026.10-linux-x86_64-glibc-2.27.tar.gz \
-  -o /tmp/slang.tgz
-echo "beddadd9b48151aa2d7b556056ea02b9826bde59d4d4fa827b33c5184e42a983  /tmp/slang.tgz" | sha256sum -c -
-mkdir -p "$HOME/.local/slang-2026.10"
-tar -xzf /tmp/slang.tgz -C "$HOME/.local/slang-2026.10"
-export PATH="$HOME/.local/slang-2026.10/bin:$PATH"
-slangc -v   # expect 2026.10
-
-curl -LsSf https://astral.sh/uv/0.11.29/install.sh | sh
-export PATH="$HOME/.local/bin:$PATH"
-
-uv python install 3.12
-uv venv --python 3.12
+bash scripts/setup.sh --with-init --with-remote
 source .venv/bin/activate
-uv sync --locked --no-dev --no-editable
 ftgspp doctor --devices 0
 ```
 
-Check `ffprobe -version` and `ffmpeg -hide_banner -encoders` for `libx264`
-before SelfCap preparation or MP4 export. Debian/Ubuntu's `ffmpeg` package
-normally supplies all three.
+Setup creates a Python 3.12 environment. This command includes image preparation
+and browser viewing. Use the NVIDIA Vulkan ID shown by doctor; it may differ
+from the `nvidia-smi` index. Continue with [your first capture](first-run.md).
 
-For the SSH browser viewer, add `--extra remote` to the `uv sync` command.
-For the local desktop viewer, install
-`libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev`, then build
-with `-C cmake.define.FTGSPP_BUILD_VIEWER=ON`. See [viewer.md](viewer.md) for
-the complete commands and runtime requirements.
+## Optional components
 
-For both raw-RGB initialization components, replace the `uv sync` command with:
+| Setup option | Use it for |
+|---|---|
+| No flags | Training/rendering with prepared inputs |
+| `--with-init` | BiRefNet masks and DA3 geometry/camera estimation |
+| `--with-birefnet` / `--with-da3` | Just one preparation component |
+| `--with-remote` | Browser viewer, including over SSH |
+| `--with-viewer` | Linux desktop viewer with X11/XWayland |
+| `--with-lpips` | Optional perceptual metric for final-test evaluation |
 
-```bash
-uv sync --locked --no-dev --no-editable --extra birefnet --extra da3
-```
+Add a component by rerunning setup with its flag. Earlier selections are kept.
+Stop jobs using `.venv` before updating it. Older installations without a saved
+profile need all desired flags specified once; `--reset-profile` replaces the
+selection. Use `bash scripts/setup.sh --help` for additional options.
 
-`uv build --python 3.12` produces the core release wheel. A DA3 initialization
-environment should be synchronized from the clone so uv applies the locked DA3
-metadata correction; installing a standalone wheel extra cannot carry
-project-level uv resolver metadata.
+## Shared servers and offline use
 
-## Troubleshooting
+Without sudo, have a C++17 compiler, Vulkan headers/loader and FFmpeg with
+`ffprobe` and `libx264` installed, then add `--skip-apt` to setup.
 
-The selected device from `doctor` must be an NVIDIA GPU classified as `VIABLE`,
-not `POSSIBLY VIABLE`, `NOT VIABLE`, or `llvmpipe`. Use that device's JSON
-`device_id` as `--devices`. CUDA ordinals from `nvidia-smi` and
-Vulkan IDs often differ: on a two-GPU Linux host, Vulkan index `1` can be
-`llvmpipe` while `nvidia-smi` GPU `1` is the second NVIDIA card. Doctor opens
-a real device; it fails on a CPU-only build machine even when the wheel
-compiled. `scripts/setup.sh` treats a doctor failure as a warning so a CPU
-host can still finish the install. Passing the feature gate does not guarantee
-enough VRAM for a particular run; see [hardware.md](hardware.md).
+Download packages and populate model caches before working offline. For local
+DA3 weights, set `init.da3.model_path` in your YAML. Optional preparation uses
+Torch/CUDA separately from Vulkan training. On GPUs unsupported by the pinned
+Torch build, use CPU preparation (`--device cpu`, `init.da3.device: cpu`).
 
-If `slangc: not found`, Python/CMake cannot find 3.12, or Vulkan headers are
-missing, stop and fix that step. Do not pass `--devices` with two ids: the
-first release trains on one GPU.
+## Check the installation
 
-Optional extras (`[remote]`, `[lpips]`, `[birefnet]`, `[da3]`, and
-`[tensorboard]`) install into the same venv. `scripts/setup.sh --with-init` is a
-convenience profile that selects both `[birefnet]` and `[da3]` without
-duplicating their dependency declarations. The locked `[da3]` extra includes
-the pinned upstream package and reviewed inference dependencies.
+For a small execution check without data or model downloads, choose a new path:
 
 ```bash
-uv sync --locked --no-dev --no-editable --extra da3
+python examples/make_tiny_scene.py --output /tmp/ftgspp-tiny
+ftgspp train --config /tmp/ftgspp-tiny/ftgspp.yaml --devices 0
+ftgspp render --run /tmp/ftgspp-tiny/run --camera 0 --time 0 \
+  --device 0 --output /tmp/ftgspp-tiny/render
 ```
 
-LPIPS alone can be added to the core environment with:
+Success creates `run/gaussians.npz` and `render/000000.png`. This synthetic
+example checks execution; use your own capture to judge reconstruction quality.
 
-```bash
-uv sync --locked --no-dev --no-editable --extra lpips
-```
+## Common problems
 
-Keep every required extra in the same exact sync command. For raw-RGB
-initialization plus final-test LPIPS, use:
-
-```bash
-uv sync --locked --no-dev --no-editable \
-  --extra birefnet --extra da3 --extra lpips
-```
-
-The first scored LPIPS batch downloads the roughly 528 MiB TorchVision VGG16
-weights when they are absent from the Torch cache (normally
-`~/.cache/torch/hub/checkpoints`). Training and ordinary validation never load
-TorchMetrics or these weights.
-
-See [usage.md](usage.md) for when each extra is required.
+| Problem | Action |
+|---|---|
+| Missing system packages / no sudo | Install the requirements above, then use `--skip-apt` |
+| Existing `.venv` uses another Python version | Use a fresh checkout; setup requires Python 3.12 |
+| Wrong GPU or `llvmpipe` selected | Use the NVIDIA Vulkan ID printed by doctor |
+| No `VIABLE` GPU | Check the NVIDIA driver; include doctor output when reporting a problem |
+| Missing optional package | Add its setup flag and reactivate `.venv` |

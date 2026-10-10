@@ -1,0 +1,25 @@
+# Paths in this file are relative to this file's directory.
+pipeline:
+  mode: scene
+data:
+  name: my_scene
+  root: ../data/my_scene
+  frames: {start: 0, stop: 300}
+  scale: 0.5
+init:
+  # auto keeps user PLYs when present and otherwise runs optional DA3.
+  # Default search path: <data.root>/points_stride<keyframe_stride>/fXXXXXX.ply
+  backend: auto
+  # Keep geometry initialization stable across training-seed sweeps.
+  seed: 0
+  num_gaussians: 2000000
+  # Omit stride to use roughly 1/6-second spacing (60 FPS: 10, 30 FPS: 5).
+  # Set it explicitly when your existing PLYs have a fixed frame spacing.
+  da3:
+    # Set this cache path to persist DA3's generated RGB PLYs.
+    cache_path: ${data.root}/points_da3_stride${init.keyframe_stride}
+train:
+  # Adaptive scene budget, including CC warm-up and the separate HS phase.
+  preset: preview
+run:
+  output_path: ../runs/my_scene_preview

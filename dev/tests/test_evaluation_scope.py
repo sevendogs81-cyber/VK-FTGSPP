@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import sys
 
 import pytest
 
@@ -55,6 +56,7 @@ def test_scope_must_match_locked_dataset(scope, identity):
 def test_cli_rejects_quick_locked_test_before_loading_data(tmp_path, monkeypatch, saved):
     from ftgspp import cli
 
+    monkeypatch.setitem(sys.modules, "ftgspp.training.runner", None)
     config = SimpleNamespace(
         run=SimpleNamespace(output_path=tmp_path),
         data=SimpleNamespace(test_manifest=tmp_path / "test.json" if saved else None),

@@ -23,6 +23,7 @@ import cv2
 import numpy as np
 from websockets.asyncio.client import connect
 from websockets.exceptions import InvalidStatus
+from ftgspp.viewer.asset import fit_camera_extent
 
 
 async def receive(ws, kind):
@@ -76,19 +77,21 @@ async def check(port, token, scene):
 
         state = hello["state"]
         c = state["camera"]
+        preview_width, preview_height = fit_camera_extent(c, 96, 64)
+        capture_width, capture_height = fit_camera_extent(c, 192, 128)
         modified = dict(state, camera=dict(c, w2c=[list(row) for row in c["w2c"]]), time=0.7)
         modified["camera"]["w2c"][0][3] = 0.15
         await ws.send(json.dumps(dict(type="update", state=modified, width=96, height=64,
                                       fullWidth=192, fullHeight=128)))
         frame = await receive(ws, "frame")
         jpeg = await receive(ws, "binary")
-        assert (frame["width"], frame["height"]) == (96, 64)
+        assert (frame["width"], frame["height"]) == (preview_width, preview_height)
         assert jpeg[0] == 1
         rendered = frame["stats"]["frames"]
         readbacks = frame["stats"]["readbacks"]
         rgba8_readbacks = frame["stats"]["rgba8_readbacks"]
         assert readbacks == 0  # the remote path never downloads FP32 F/T
-        assert frame["pipeline"]["readback_bytes"] == 96 * 64 * 4 + 4
+        assert frame["pipeline"]["readback_bytes"] == preview_width * preview_height * 4 + 4
         for exposure in (0.25, 0.5, 0.5):
             await ws.send(json.dumps(dict(type="update", state=dict(exposure=exposure))))
             cached = await receive(ws, "frame")
@@ -99,6 +102,59 @@ async def check(port, token, scene):
         assert cached["pipeline"]["encoded_cached"]
         assert cached["stats"]["rgba8_readbacks"] == rgba8_readbacks + 2
         assert cached["pipeline"]["readback_bytes"] == 0
+        # Prefetch crosses the network without a per-frame request/response.
+        assert hello["stream_protocol"] == "ftgspp-remote-stream-v2"
+        await ws.send(json.dumps(dict(
+            type="stream", protocol=hello["stream_protocol"], stream_id=1,
+            state=dict(time=hello["metadata"]["time_start"], playing=True, snap=False),
+            width=96, height=64,
+        )))
+        samples = hello["metadata"].get("sample_times", [])
+        for i in range(8):
+            streamed = await receive(ws, "frame")
+            assert (streamed["stream_id"], streamed["frame_index"]) == (1, i)
+            assert np.isfinite(streamed["next_time"])
+            if samples:
+                assert streamed["scene_time"] in samples
+            await receive(ws, "binary")
+        try:
+            await asyncio.wait_for(ws.recv(), .1)
+            raise AssertionError("Stream exceeded its unacknowledged-frame window")
+        except asyncio.TimeoutError:
+            pass
+        await ws.send(json.dumps(dict(type="stream_ack", stream_id=1, frame_index=2)))
+        for i in range(8, 11):
+            assert (await receive(ws, "frame"))["frame_index"] == i
+            await receive(ws, "binary")
+        # Navigation changes camera at target FPS while captured time remains exact.
+        await ws.send(json.dumps(dict(type="stream", protocol=hello["stream_protocol"],
+                                     stream_id=2, navigating=True, state=dict(playing=False, time=.4))))
+        first = await receive(ws, "frame")
+        await receive(ws, "binary")
+        assert first["stream_id"] == 2 and first["navigating"]
+        moved = json.loads(json.dumps(hello["state"]["camera"]))
+        moved["w2c"][0][3] += .1
+        await ws.send(json.dumps(dict(type="stream_view", stream_id=2, revision=1,
+                                     navigating=True, view_time=1.0, state=dict(camera=moved))))
+        while True:
+            frame = await receive(ws, "frame")
+            await receive(ws, "binary")
+            if frame["revision"] == 1:
+                break
+        assert frame["stream_id"] == 2 and frame["scene_time"] == first["scene_time"]
+        assert frame["view_time"] == 1.0
+        await ws.send(json.dumps(dict(type="stream_ack", stream_id=2, frame_index=frame["frame_index"])))
+        await ws.send(json.dumps(dict(type="stream_view", stream_id=2, revision=2,
+                                     navigating=False, state={})))
+        while True:
+            frame = await receive(ws, "frame")
+            await receive(ws, "binary")
+            if frame["revision"] == 2:
+                break
+        assert frame["finished"]
+        await ws.send(json.dumps(dict(type="update", state=dict(playing=False, time=.7))))
+        assert "stream_id" not in await receive(ws, "frame")
+        await receive(ws, "binary")
         await ws.send("[]")
         assert json.loads(await ws.recv())["type"] == "error"
         modified["time"] = 0.83
@@ -108,15 +164,17 @@ async def check(port, token, scene):
         png = await receive(ws, "binary")
         image = cv2.imdecode(np.frombuffer(png[1:], np.uint8), cv2.IMREAD_UNCHANGED)
         assert png[:9] == b"\x02\x89PNG\r\n\x1a\n"
-        assert image.shape[:2] == (128, 192)
+        assert image.shape[:2] == (capture_height, capture_width)
         assert Path(screenshot["path"]).is_file()
         assert Path(screenshot["path"]).with_suffix(".json").is_file()
-        assert json.loads(Path(screenshot["path"]).with_suffix(".json").read_text())["camera"]["timestamp"] == 0.83
+        samples = hello["metadata"].get("sample_times", [])
+        expected_time = min(samples, key=lambda t: abs(t - .83)) if modified.get("snap") and samples else .83
+        assert json.loads(Path(screenshot["path"]).with_suffix(".json").read_text())["camera"]["timestamp"] == expected_time
         await ws.send(json.dumps(dict(type="capture", state=dict(mode=0, transparent=True))))
         await receive(ws, "capture")
         png = await receive(ws, "binary")
         transparent = cv2.imdecode(np.frombuffer(png[1:], np.uint8), cv2.IMREAD_UNCHANGED)
-        assert transparent.shape == (128, 192, 4)
+        assert transparent.shape == (capture_height, capture_width, 4)
         assert transparent[..., 3].min() == 0 and transparent[..., 3].max() > 0
 
         modified["bookmarks"] = [c, dict(c, timestamp=0.8)]
@@ -190,6 +248,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--device", type=int, default=0)
+    parser.add_argument("--startup-timeout", type=float, default=90)
     parser.add_argument("--installed", action="store_true", help="test the installed wheel")
     parser.add_argument("--native-dir", type=Path, help="use extensions from a CMake build directory")
     args = parser.parse_args()
@@ -232,7 +291,7 @@ def main():
         reader.start()
         startup_log = deque(maxlen=100)
         try:
-            deadline = time.monotonic() + 90
+            deadline = time.monotonic() + args.startup_timeout
             token = None
             while time.monotonic() < deadline:
                 if process.poll() is not None:

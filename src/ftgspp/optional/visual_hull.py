@@ -5,7 +5,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
+import time
 import os
+import shlex
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -19,15 +22,21 @@ from ftgspp.io.ply import read_point_ply, write_point_ply_atomic
 from ftgspp.io.provenance import source_identity
 from ftgspp.optional.point_color import (
     IBR_COLOR_VERSION,
+    PointColorResult,
     color_points_ibr,
     project_points,
 )
 from ftgspp.optional.torch_compute import resolve_torch_device
+from ftgspp.optional.preparation_views import PreparationView
+from ftgspp.optional.carving_bounds import silhouette_bounds, SilhouetteBoundsUnavailable
+from ftgspp.training.stage_timer import StageTimer
 from ftgspp.training.init_plan import initialization_seed
 from ftgspp.training.point_sampling import spatial_sample_indices
 
-VISUAL_HULL_SCHEMA = "ftgspp-visual-hull-ibr-v3"
-VISUAL_HULL_METHODS = {"carving", "point_filtering"}
+VISUAL_HULL_SCHEMA = "ftgspp-visual-hull-ibr-v4"
+VISUAL_HULL_METHODS = {"carving", "point_filtering", "colorize"}
+POINT_COLOR_SCHEMA = "ftgspp-point-color-v2"
+logger = logging.getLogger("ftgspp.native")
 
 
 def _resolve_carving_device(requested: str):
@@ -109,6 +118,7 @@ def carve_visual_hull(
     mask_dilation_pixels: int = 0,
     chunk_points: int = 1_000_000,
     device: str = "auto",
+    _prepared=None,
 ) -> tuple[np.ndarray, dict[str, object]]:
     """Carve voxel centers, using chunked CUDA projection when available."""
 
@@ -138,28 +148,31 @@ def carve_visual_hull(
     if int(surface_band_layers) <= 0:
         raise ValueError("surface_band_layers must be positive")
     resolved_device, torch = _resolve_carving_device(device)
-    masks = [view.load_mask() for view in views]
-    support_masks = [
-        ndimage.binary_dilation(
-            mask >= float(mask_threshold), iterations=int(mask_dilation_pixels),
-        ) if int(mask_dilation_pixels) > 0 else mask >= float(mask_threshold)
-        for mask in masks
-    ]
-    validities = [view.load_validity() >= 0.5 for view in views]
-    cuda_views = None
-    if resolved_device.startswith("cuda"):
-        cuda_views = [(
-            torch.as_tensor(view.w2c, dtype=torch.float32, device=resolved_device),
-            torch.as_tensor(
-                view.intrinsic, dtype=torch.float32, device=resolved_device,
-            ),
-            torch.as_tensor(support_mask, device=resolved_device),
-            torch.as_tensor(validity, device=resolved_device),
-            int(view.size[0]),
-            int(view.size[1]),
-        ) for view, support_mask, validity in zip(
-            views, support_masks, validities, strict=True,
-        )]
+    if _prepared is None:
+        masks = [view.load_mask() for view in views]
+        support_masks = [
+            ndimage.binary_dilation(
+                mask >= float(mask_threshold), iterations=int(mask_dilation_pixels),
+            ) if int(mask_dilation_pixels) > 0 else mask >= float(mask_threshold)
+            for mask in masks
+        ]
+        validities = [view.load_validity() >= 0.5 for view in views]
+        cuda_views = None
+        if resolved_device.startswith("cuda"):
+            cuda_views = [(
+                torch.as_tensor(view.w2c, dtype=torch.float32, device=resolved_device),
+                torch.as_tensor(
+                    view.intrinsic, dtype=torch.float32, device=resolved_device,
+                ),
+                torch.as_tensor(support_mask, device=resolved_device),
+                torch.as_tensor(validity, device=resolved_device),
+                int(view.size[0]),
+                int(view.size[1]),
+            ) for view, support_mask, validity in zip(
+                views, support_masks, validities, strict=True,
+            )]
+    else:
+        support_masks, validities, cuda_views = _prepared
     axes = [
         np.linspace(bounds[0, axis], bounds[1, axis], shape[axis], endpoint=False)
         + (bounds[1, axis] - bounds[0, axis]) / (2.0 * shape[axis])
@@ -190,6 +203,7 @@ def carve_visual_hull(
             mask_dilation_pixels=mask_dilation_pixels,
             chunk_points=chunk_points,
             device=resolved_device,
+            _prepared=(support_masks, validities, cuda_views),
         )
         extent = bounds[1] - bounds[0]
         coarse_indices = np.floor(
@@ -283,6 +297,9 @@ def carve_visual_hull(
     if volume_count == 0:
         raise RuntimeError("visual-hull carving produced an empty volume")
     volume = occupied.reshape(shape)
+    boundary_voxels = sum(int(np.count_nonzero(face)) for face in (
+        volume[0], volume[-1], volume[:, 0], volume[:, -1], volume[:, :, 0], volume[:, :, -1],
+    ))
     selected = (
         volume & ~ndimage.binary_erosion(
             volume, iterations=int(surface_band_layers), border_value=0,
@@ -300,6 +317,7 @@ def carve_visual_hull(
         "coarse_candidate_count": int(candidate_total),
         "evaluated_candidate_count": int(evaluated_candidates),
         "volume_count": volume_count,
+        "boundary_voxels": boundary_voxels,
         "output_count": int(len(points)),
         "surface_band": bool(surface_band),
         "surface_band_layers": int(surface_band_layers),
@@ -458,6 +476,25 @@ def _bounds_from_point_clouds(
     }
 
 
+def preparation_point_cap(
+    gaussians: int, keyframes: int, *, quality: str = "balanced",
+    max_points: int | None = None, generated_geometry: bool = True,
+) -> int | None:
+    """Bound expensive coloring by the actual temporal/model budget."""
+    if keyframes <= 0 or gaussians <= 0:
+        raise ValueError("preparation requires positive keyframe and Gaussian budgets")
+    if quality not in {"fast", "balanced", "high", "full"}:
+        raise ValueError("invalid preparation quality")
+    if max_points is not None:
+        if int(max_points) <= 0:
+            raise ValueError("max_points must be positive")
+        return int(max_points)
+    if not generated_geometry or quality == "full":
+        return None
+    multiplier = {"fast": 2, "balanced": 4, "high": 8}[quality]
+    return multiplier * ((int(gaussians) + int(keyframes) - 1) // int(keyframes))
+
+
 def prepare_visual_hull_points(
     config_path: Path,
     output: Path,
@@ -474,6 +511,8 @@ def prepare_visual_hull_points(
     surface_band_layers: int = 2,
     coarse_resolution: int | None = None,
     max_points: int | None = None,
+    quality: str = "balanced",
+    bounds_method: str = "auto",
     input_points: Path | None = None,
     color_mode: str = "visibility_robust",
     visibility_relative_tolerance: float = 0.01,
@@ -483,43 +522,89 @@ def prepare_visual_hull_points(
     device: str = "auto",
     chunk_points: int = 1_000_000,
 ) -> Path:
+    timer = StageTimer()
+    if quality not in {"fast", "balanced", "high", "full"}:
+        raise ValueError("preparation quality must be fast, balanced, high, or full")
+    if bounds_method not in {"auto", "da3"}:
+        raise ValueError("bounds_method must be auto or da3")
     if method not in VISUAL_HULL_METHODS:
         raise ValueError(
             f"visual-hull method must be one of {sorted(VISUAL_HULL_METHODS)}"
         )
     if method == "carving" and bounds is not None and input_points is not None:
         raise ValueError("carving accepts --bounds or --input-points, not both")
-    if method == "point_filtering" and bounds is not None:
+    if method != "carving" and bounds is not None:
         raise ValueError("--bounds is only valid with method=carving")
+    if method == "colorize" and input_points is None:
+        raise ValueError("colorize requires --input-points; it never generates geometry")
+    if color_mode == "gray" and method != "colorize":
+        raise ValueError("--color-mode gray requires --method colorize")
     if method == "carving" and sampling not in {"surface_band", "volume"}:
         raise ValueError("visual-hull sampling must be surface_band or volume")
     if int(chunk_points) <= 0:
         raise ValueError("visual-hull chunk_points must be positive")
     if max_points is not None and int(max_points) <= 0:
         raise ValueError("visual-hull max_points must be positive when set")
+    if method == "carving":
+        if int(resolution) <= 2:
+            raise ValueError("preparation resolution must exceed two for coarse-to-fine carving")
+        if coarse_resolution is not None and not 1 < int(coarse_resolution) < int(resolution):
+            raise ValueError("coarse_resolution must exceed one and be below resolution")
+        if bounds is not None:
+            bounds = np.asarray(bounds, np.float64)
+            if bounds.shape != (2, 3) or not np.isfinite(bounds).all() or np.any(bounds[1] <= bounds[0]):
+                raise ValueError("bounds must be finite increasing [[xmin,ymin,zmin],[xmax,ymax,zmax]]")
+    for name, value in (("mask_threshold", mask_threshold), ("color_mask_threshold", color_mask_threshold),
+                        ("support_fraction", support_fraction)):
+        if not 0 <= float(value) <= 1:
+            raise ValueError(f"{name} must be in [0, 1]")
+    if min_views is not None and int(min_views) <= 0:
+        raise ValueError("min_views must be positive")
+    if int(color_min_sources) <= 0 or int(surface_band_layers) <= 0:
+        raise ValueError("color_min_sources and surface_band_layers must be positive")
+    if min(int(mask_dilation_pixels), int(z_buffer_radius), int(source_search_radius)) < 0:
+        raise ValueError("mask dilation and coloring radii must be nonnegative")
+    if not np.isfinite(visibility_relative_tolerance) or visibility_relative_tolerance < 0:
+        raise ValueError("visibility_relative_tolerance must be finite and nonnegative")
+    if color_mode not in {"visibility_robust", "depth_rank_top3", "gray"}:
+        raise ValueError("unsupported color_mode")
     input_root = (
         None if input_points is None else input_points.expanduser().resolve()
     )
     if input_root is not None and not input_root.is_dir():
         raise FileNotFoundError(input_root)
-    config = load_config(config_path)
-    scene = Scene.from_config(config)
+    with timer.stage("input_validation"):
+        config = load_config(config_path)
+        scene = Scene.from_config(config)
     output = output.expanduser().resolve()
+    if output == input_root:
+        raise ValueError("output must differ from --input-points to preserve source PLYs")
+    if output.exists() and any(output.iterdir()):
+        raise FileExistsError(f"use an empty output directory: {output}")
     output.mkdir(parents=True, exist_ok=True)
-    resolved_coarse = None if method == "point_filtering" else (
+    resolved_coarse = None if method != "carving" else (
         max(2, int(resolution) // 4)
         if coarse_resolution is None else int(coarse_resolution)
     )
     frames = list(range(0, len(scene.frames), int(config.init.keyframe_stride)))
     if frames[-1] != len(scene.frames) - 1:
         frames.append(len(scene.frames) - 1)
+    generated_geometry = method == "carving" or input_root is None
+    resolved_max_points = preparation_point_cap(
+        int(getattr(config.init, "num_gaussians", 2_000_000)), len(frames),
+        quality=quality, max_points=max_points, generated_geometry=generated_geometry,
+    )
+    logger.info("Preparation %s: %d keyframes, quality=%s, colored points/frame cap=%s",
+                method, len(frames), quality, resolved_max_points or "full")
     source_clouds: Sequence[tuple[np.ndarray, np.ndarray]] | None = None
     source_hashes: dict[str, str] = {}
     point_source: dict[str, object] | None = None
-    if input_root is None and (method == "point_filtering" or bounds is None):
+    if input_root is None and (method == "point_filtering" or
+                               (method == "carving" and bounds is None and bounds_method == "da3")):
         from ftgspp.optional.da3 import generate_da3_points
 
-        generated = generate_da3_points(config, scene, frames)
+        with timer.stage("depth_source"):
+            generated = generate_da3_points(config, scene, frames)
         source_clouds = generated
         input_root = Path(generated.cache_root).resolve()
         try:
@@ -539,37 +624,60 @@ def prepare_visual_hull_points(
             "kind": "da3_generated" if generated.generated else "da3_cache",
             "path": str(input_root),
         }
+        del generated
     elif input_root is not None:
         if method == "carving" and bounds is None:
             source_clouds = [
                 read_point_ply(
-                    input_root / f"f{int(scene.frames[position]):06d}.ply"
+                    input_root / f"f{int(scene.frames[position]):06d}.ply",
+                    allow_missing_color=True,
                 )
                 for position in frames
             ]
         point_source = {"kind": "prepared_cloud", "path": str(input_root)}
+    if (not scene.calibration_available and method == "carving"
+            and bounds is None and input_root is None):
+        # Recover the static rig once; do not infer dense depth at every time
+        # merely to establish camera geometry. The normal versioned DA3 cache
+        # also persists/restores these cameras for later training.
+        from ftgspp.optional.da3 import generate_da3_points
+        with timer.stage("camera_estimation"):
+            generate_da3_points(config, scene, frames[:1])
     if not scene.calibration_available:
         raise ValueError(
             "visual-hull preparation requires calibrated cameras or DA3 camera estimation"
         )
     bounds_source: dict[str, object]
-    if method == "carving" and bounds is None:
-        assert source_clouds is not None
+    if method == "carving" and bounds is None and source_clouds is not None:
         bounds, bounds_source = _bounds_from_point_clouds(source_clouds)
         bounds_source["point_source"] = point_source
+        source_clouds = None  # Bounds-only depth clouds need not stay resident.
     else:
         bounds_source = {"kind": "explicit"} if bounds is not None else {
-            "kind": "not_applicable",
+            "kind": "per_frame_auto" if method == "carving" else "not_applicable",
         }
+    def depth_bounds(reason):
+        nonlocal source_clouds, input_root, point_source, bounds, bounds_source
+        logger.warning("Silhouette bounds unavailable (%s); using full-sequence DA3 bounds", reason)
+        from ftgspp.optional.da3 import generate_da3_points
+        with timer.stage("depth_source"):
+            generated = generate_da3_points(config, scene, frames)
+        input_root = Path(generated.cache_root).resolve()
+        point_source = {"kind": "da3_generated" if generated.generated else "da3_cache",
+                        "path": str(input_root)}
+        bounds, bounds_source = _bounds_from_point_clouds(generated)
+        bounds_source.update(point_source=point_source, fallback_reason=str(reason))
+        return bounds, bounds_source
+
     rows: list[dict[str, object]] = []
     resolved_preparation_device: str | None = None
     resolved_coloring_device: str | None = None
     tolerance = float(config.init.da3.sync_tolerance_fraction) / float(scene.fps)
     seed = initialization_seed(config)
     rng = np.random.default_rng(seed)
-    for cloud_index, position in enumerate(
-        tqdm(frames, desc=f"Preparing {method} points")
-    ):
+    progress = tqdm(frames, desc=f"Preparing {method} points")
+    for cloud_index, position in enumerate(progress):
+        frame_started = time.perf_counter()
         frame = int(scene.frames[position])
         # Use an actual capture timestamp as the keyframe coordinate. Camera
         # offsets make logical ``frame/fps`` an unsuitable synchronization
@@ -579,22 +687,52 @@ def prepare_visual_hull_points(
             reference, scene.train_cameras,
             tolerance_seconds=tolerance, train_only=True,
         )
+        views = [PreparationView(view) for view in views]
+        frame_bounds, frame_bounds_source = bounds, bounds_source
+        if method == "carving" and frame_bounds is None:
+            try:
+                with timer.stage("bounds"):
+                    frame_bounds, frame_bounds_source = silhouette_bounds(
+                        views, mask_threshold=mask_threshold,
+                        mask_dilation_pixels=mask_dilation_pixels,
+                        support_fraction=support_fraction,
+                    )
+            except SilhouetteBoundsUnavailable as exc:
+                frame_bounds, frame_bounds_source = depth_bounds(exc)
+        geometry_started = time.perf_counter()
         if method == "carving":
-            points, diagnostics = carve_visual_hull(
-                views, np.asarray(bounds),
-                resolution=resolution, mask_threshold=mask_threshold,
-                min_views=min_views, support_fraction=support_fraction,
-                surface_band=sampling == "surface_band",
-                surface_band_layers=surface_band_layers,
-                coarse_resolution=resolved_coarse,
-                mask_dilation_pixels=mask_dilation_pixels,
-                chunk_points=chunk_points,
-                device=device,
-            )
+            def carve_frame(active_bounds):
+                return carve_visual_hull(
+                    views, np.asarray(active_bounds),
+                    resolution=resolution, mask_threshold=mask_threshold,
+                    min_views=min_views, support_fraction=support_fraction,
+                    surface_band=sampling == "surface_band",
+                    surface_band_layers=surface_band_layers,
+                    coarse_resolution=resolved_coarse,
+                    mask_dilation_pixels=mask_dilation_pixels,
+                    chunk_points=chunk_points, device=device,
+                )
+
+            try:
+                points, diagnostics = carve_frame(frame_bounds)
+                if (frame_bounds_source["kind"] == "silhouette_frusta_v1"
+                        and diagnostics.get("boundary_voxels", 0)):
+                    raise SilhouetteBoundsUnavailable("carved volume touches the inferred bounds")
+            except (RuntimeError, SilhouetteBoundsUnavailable) as exc:
+                if frame_bounds_source["kind"] != "silhouette_frusta_v1" or (
+                    isinstance(exc, RuntimeError) and "empty volume" not in str(exc)
+                ):
+                    raise
+                # Discard this attempted frame; never publish a clipped/empty
+                # auto envelope. Future frames use the depth-derived fallback.
+                timer.stages["geometry"] = timer.stages.get("geometry", 0.0) + time.perf_counter() - geometry_started
+                frame_bounds, frame_bounds_source = depth_bounds(exc)
+                geometry_started = time.perf_counter()
+                points, diagnostics = carve_frame(frame_bounds)
             resolved_preparation_device = str(diagnostics["device"])
             source_record: dict[str, object] = {
                 "kind": "carved_grid",
-                "bounds_source": bounds_source["kind"],
+                "bounds_source": frame_bounds_source["kind"],
             }
         else:
             source_path = input_root / f"f{frame:06d}.ply"
@@ -605,18 +743,23 @@ def prepare_visual_hull_points(
                     source_digest = _sha256(source_path)
             else:
                 source_xyz, _source_rgb, source_digest = read_point_ply(
-                    source_path, return_sha256=True,
+                    source_path, return_sha256=True, allow_missing_color=True,
                 )
-            keep, diagnostics = filter_points_by_visual_hull(
-                source_xyz, views, mask_threshold=mask_threshold,
-                min_views=min_views, support_fraction=support_fraction,
-                mask_dilation_pixels=mask_dilation_pixels,
-                device=device, chunk_points=chunk_points,
-            )
-            resolved_preparation_device = str(diagnostics["device"])
-            points = source_xyz[keep]
+            if method == "colorize":
+                points = source_xyz
+                diagnostics = {"device": "cpu", "output_count": len(points)}
+                resolved_preparation_device = "cpu"
+            else:
+                keep, diagnostics = filter_points_by_visual_hull(
+                    source_xyz, views, mask_threshold=mask_threshold,
+                    min_views=min_views, support_fraction=support_fraction,
+                    mask_dilation_pixels=mask_dilation_pixels,
+                    device=device, chunk_points=chunk_points,
+                )
+                resolved_preparation_device = str(diagnostics["device"])
+                points = source_xyz[keep]
             source_record = {
-                "kind": "input_cloud_hull_filter",
+                "kind": "input_cloud" if method == "colorize" else "input_cloud_hull_filter",
                 "path": str(source_path),
                 "sha256": source_digest,
             }
@@ -624,30 +767,93 @@ def prepare_visual_hull_points(
                 raise RuntimeError(
                     f"visual-hull filtering removed every point for f{frame:06d}"
                 )
-        colored = color_points_ibr(
-            points, views, mask_threshold=color_mask_threshold,
-            visibility_relative_tolerance=visibility_relative_tolerance,
-            min_sources=color_min_sources, mode=color_mode,
-            z_buffer_radius=z_buffer_radius,
-            source_search_radius=source_search_radius,
-            device=device,
-        )
+        geometry_seconds = time.perf_counter() - geometry_started
+        timer.stages["geometry"] = timer.stages.get("geometry", 0.0) + geometry_seconds
+        candidate_count = len(points)
+        with timer.stage("budget_sampling"):
+            query_indices = (
+                spatial_sample_indices(rng, points, resolved_max_points)
+                if resolved_max_points is not None and len(points) > resolved_max_points
+                else np.arange(len(points), dtype=np.int64)
+            )
+        color_started = time.perf_counter()
+        color_evaluations = 0 if color_mode == "gray" else len(query_indices)
+        if color_mode == "gray":
+            colored = PointColorResult(
+                rgb=np.full((len(query_indices), 3), 128, np.uint8),
+                keep=np.ones(len(query_indices), bool),
+                source_count=np.zeros(len(query_indices), np.int64),
+                disagreement=np.zeros(len(query_indices), np.float32),
+            )
+        else:
+            colored = color_points_ibr(
+                points, views, mask_threshold=color_mask_threshold,
+                visibility_relative_tolerance=visibility_relative_tolerance,
+                min_sources=color_min_sources, mode=color_mode,
+                z_buffer_radius=z_buffer_radius,
+                source_search_radius=source_search_radius,
+                device=device, query_indices=query_indices,
+            )
+            minimum_candidates = min(
+                len(query_indices),
+                (int(getattr(config.init, "num_gaussians", 2_000_000)) + len(frames) - 1) // len(frames),
+            )
+            if (method != "colorize" and len(query_indices) < len(points)
+                    and np.count_nonzero(colored.keep) < minimum_candidates):
+                # An occlusion-heavy cloud can put most preliminary queries on
+                # hidden surfaces. Retry once on all geometry before declaring
+                # the frame sparse or empty, then cap trusted points only.
+                logger.warning("f%06d: few trusted color queries; retrying full geometry", frame)
+                color_evaluations += len(points)
+                full_color = color_points_ibr(
+                    points, views, mask_threshold=color_mask_threshold,
+                    visibility_relative_tolerance=visibility_relative_tolerance,
+                    min_sources=color_min_sources, mode=color_mode,
+                    z_buffer_radius=z_buffer_radius,
+                    source_search_radius=source_search_radius, device=device,
+                )
+                trusted = np.flatnonzero(full_color.keep)
+                if resolved_max_points is not None and len(trusted) > resolved_max_points:
+                    trusted = trusted[spatial_sample_indices(rng, points[trusted], resolved_max_points)]
+                query_indices = trusted
+                colored = PointColorResult(
+                    rgb=full_color.rgb[trusted], keep=full_color.keep[trusted],
+                    source_count=full_color.source_count[trusted],
+                    disagreement=full_color.disagreement[trusted], device=full_color.device,
+                )
+                diagnostics["color_budget_fallback"] = True
+        color_seconds = time.perf_counter() - color_started
+        timer.stages["coloring"] = timer.stages.get("coloring", 0.0) + color_seconds
+        points = points[query_indices]
+        diagnostics["color_query_count"] = len(query_indices)
+        diagnostics["color_evaluations"] = color_evaluations
+        diagnostics["occlusion_reference_count"] = candidate_count
         resolved_coloring_device = str(
             getattr(colored, "device", resolved_preparation_device or "cpu")
         )
-        points = points[colored.keep]
-        rgb = colored.rgb[colored.keep]
+        if method == "colorize":
+            # Keep user geometry; points without a trusted image source start gray.
+            rgb = colored.rgb.copy()
+            rgb[~colored.keep] = 128
+            diagnostics["uncolored_points"] = (
+                len(points) if color_mode == "gray" else int(np.count_nonzero(~colored.keep))
+            )
+        else:
+            points = points[colored.keep]
+            rgb = colored.rgb[colored.keep]
         if not len(points):
             raise RuntimeError(f"visual hull f{frame:06d} has no trusted color source")
-        if max_points is not None and len(points) > int(max_points):
-            keep = spatial_sample_indices(rng, points, int(max_points))
-            points, rgb = points[keep], rgb[keep]
-        ply, ply_digest = write_point_ply_atomic(
-            output / f"f{frame:06d}.ply", points, rgb,
-            return_sha256=True,
-        )
+        with timer.stage("cache_write"):
+            ply, ply_digest = write_point_ply_atomic(
+                output / f"f{frame:06d}.ply", points, rgb,
+                return_sha256=True,
+            )
         rows.append({
             "frame": frame,
+            "bounds": None if frame_bounds is None else np.asarray(frame_bounds).tolist(),
+            "bounds_source": frame_bounds_source,
+            "performance": {"wall_seconds": time.perf_counter() - frame_started,
+                            "geometry_seconds": geometry_seconds, "color_seconds": color_seconds},
             "reference_timestamp": reference,
             "views": [{
                 "camera_id": int(view.camera_id),
@@ -664,8 +870,11 @@ def prepare_visual_hull_points(
             "geometry_diagnostics": diagnostics,
             "geometry_source": source_record,
         })
+        progress.set_postfix(points=len(points), geometry=f"{geometry_seconds:.2f}s",
+                             color=f"{color_seconds:.2f}s", refresh=False)
+    schema = POINT_COLOR_SCHEMA if method == "colorize" else VISUAL_HULL_SCHEMA
     manifest = {
-        "schema": VISUAL_HULL_SCHEMA,
+        "schema": schema,
         "method": method,
         "dataset_fingerprint": scene.checkpoint_metadata()["fingerprint"],
         "bounds": None if bounds is None else np.asarray(bounds, float).tolist(),
@@ -685,7 +894,9 @@ def prepare_visual_hull_points(
             int(surface_band_layers) if method == "carving" else None
         ),
         "geometry_source": (
-            "carved_grid" if method == "carving" else "input_cloud_hull_filter"
+            "carved_grid" if method == "carving" else (
+                "input_cloud" if method == "colorize" else "input_cloud_hull_filter"
+            )
         ),
         "requested_device": device,
         "device": resolved_preparation_device,
@@ -693,16 +904,25 @@ def prepare_visual_hull_points(
         "input_points": None if input_root is None else str(input_root),
         "point_source": point_source,
         "coloring": {
-            "version": IBR_COLOR_VERSION,
+            "version": "neutral-gray-v1" if color_mode == "gray" else IBR_COLOR_VERSION,
             "mode": color_mode,
             "visibility_relative_tolerance": float(visibility_relative_tolerance),
             "min_sources": int(color_min_sources),
             "z_buffer_radius": int(z_buffer_radius),
             "source_search_radius": int(source_search_radius),
-            "robust_color": "weighted_median_mad_v1",
+            "robust_color": None if color_mode == "gray" else "weighted_median_mad_v1",
             "device": resolved_coloring_device,
         },
         "max_points": None if max_points is None else int(max_points),
+        "preparation_plan": {
+            "version": "ftgspp-preparation-v1", "quality": quality,
+            "bounds_method": bounds_method, "keyframes": len(frames),
+            "gaussian_budget": int(getattr(config.init, "num_gaussians", 2_000_000)),
+            "resolved_max_points": resolved_max_points,
+            "preserve_input_population": not generated_geometry and max_points is None,
+            "sampling_before_coloring": True, "dense_occlusion_reference": True,
+        },
+        "performance": timer.report(),
         "rows": rows,
     }
     source = source_identity()
@@ -717,7 +937,7 @@ def prepare_visual_hull_points(
     completed = output / "completed.json"
     completed_tmp = output / f".completed.{os.getpid()}.tmp"
     completed_tmp.write_text(json.dumps({
-        "schema": VISUAL_HULL_SCHEMA,
+        "schema": schema,
         "manifest_sha256": _sha256(manifest_path),
         "keyframes": len(rows),
     }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -733,14 +953,14 @@ def main(argv: list[str] | None = None) -> None:
         "--method", choices=tuple(sorted(VISUAL_HULL_METHODS)),
         default="carving",
         help=(
-            "carving builds points from masks inside DA3-derived bounds "
-            "(default); point_filtering filters the DA3 cloud"
+            "carving builds points from calibrated masks inside automatic bounds "
+            "(default); point_filtering filters the DA3 cloud; colorize colors user XYZ without carving"
         ),
     )
     parser.add_argument(
         "--bounds", type=float, nargs=6,
         metavar=("XMIN", "YMIN", "ZMIN", "XMAX", "YMAX", "ZMAX"),
-        help="optional carving bounds override; default derives robust bounds from DA3",
+        help="optional carving bounds override; default uses mask frusta with DA3 fallback",
     )
     parser.add_argument("--resolution", type=int, default=128)
     parser.add_argument("--mask-threshold", type=float, default=0.5)
@@ -753,13 +973,17 @@ def main(argv: list[str] | None = None) -> None:
         default="surface_band",
     )
     parser.add_argument("--coarse-resolution", type=int)
-    parser.add_argument("--max-points", type=int)
+    parser.add_argument("--max-points", type=int, help="explicit colored-point cap per keyframe; overrides quality")
+    parser.add_argument("--quality", choices=("fast", "balanced", "high", "full"), default="balanced",
+                        help="generated color candidates: 2/4/8 times N/keyframes, or full; user clouds are preserved")
+    parser.add_argument("--bounds-method", choices=("auto", "da3"), default="auto",
+                        help="auto: per-frame mask frusta with DA3 fallback; da3: legacy full-sequence depth bounds")
     parser.add_argument("--surface-band-layers", type=int, default=2)
     parser.add_argument(
         "--input-points", type=Path,
         help=(
             "optional DA3/user PLY directory used for filtering or automatic "
-            "carving bounds; default generates/reuses the configured DA3 cache"
+            "carving bounds; without it carving tries masks and filtering uses DA3"
         ),
     )
     parser.add_argument(
@@ -771,7 +995,7 @@ def main(argv: list[str] | None = None) -> None:
         help="candidate voxels per projection chunk; CUDA OOM halves it automatically",
     )
     parser.add_argument(
-        "--color-mode", choices=("visibility_robust", "depth_rank_top3"),
+        "--color-mode", choices=("visibility_robust", "depth_rank_top3", "gray"),
         default="visibility_robust",
     )
     parser.add_argument("--visibility-relative-tolerance", type=float, default=0.01)
@@ -779,15 +1003,16 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--z-buffer-radius", type=int, default=1)
     parser.add_argument("--source-search-radius", type=int, default=2)
     args = parser.parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     if args.method == "carving" and args.bounds is not None and args.input_points is not None:
         parser.error("carving accepts --bounds or --input-points, not both")
-    if args.method == "point_filtering" and args.bounds is not None:
+    if args.method != "carving" and args.bounds is not None:
         parser.error("--bounds is only valid with --method carving")
     bounds = (
         None if args.bounds is None
         else np.asarray(args.bounds, np.float64).reshape(2, 3)
     )
-    print(prepare_visual_hull_points(
+    manifest_path = prepare_visual_hull_points(
         args.config, args.output, bounds,
         method=args.method,
         resolution=args.resolution,
@@ -800,6 +1025,7 @@ def main(argv: list[str] | None = None) -> None:
         surface_band_layers=args.surface_band_layers,
         coarse_resolution=args.coarse_resolution,
         max_points=args.max_points,
+        quality=args.quality, bounds_method=args.bounds_method,
         input_points=args.input_points,
         color_mode=args.color_mode,
         visibility_relative_tolerance=args.visibility_relative_tolerance,
@@ -808,4 +1034,18 @@ def main(argv: list[str] | None = None) -> None:
         source_search_radius=args.source_search_radius,
         device=args.device,
         chunk_points=args.chunk_points,
-    ))
+    )
+    print(manifest_path)
+    user_geometry = args.method == "colorize" or (
+        args.method == "point_filtering" and args.input_points is not None
+    )
+    generated_budget = None
+    if not user_geometry:
+        prepared = json.loads(manifest_path.read_text(encoding="utf-8"))
+        generated_budget = int(prepared["preparation_plan"]["gaussian_budget"])
+    print("train: " + shlex.join([
+        "ftgspp", "train", "--config", str(args.config),
+        "--set", f"init.backend={'points' if user_geometry else args.method}",
+        "--set", f"init.num_gaussians={'null' if user_geometry else generated_budget}",
+        "--set", f"init.points_path={args.output.expanduser().resolve()}",
+    ]))

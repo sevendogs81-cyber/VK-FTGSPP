@@ -16,15 +16,10 @@ SKIP_APT=0
 SKIP_DOCTOR=0
 DOCTOR_DEVICE=0
 INSTALL_EXTRAS=()
+RESET_PROFILE=0
+PROFILE_PATH="$ROOT/.venv/ftgspp-install-profile"
 
-add_extra() {
-  local candidate="$1"
-  local existing
-  for existing in "${INSTALL_EXTRAS[@]}"; do
-    [[ "$existing" == "$candidate" ]] && return
-  done
-  INSTALL_EXTRAS+=("$candidate")
-}
+source "$ROOT/scripts/setup_profile.sh"
 
 usage() {
   cat <<'EOF'
@@ -44,10 +39,14 @@ Options:
   --with-da3        Install DA3 point generation
   --with-lpips      Install optional locked final-test LPIPS dependencies
   --with-tensorboard  Install optional TensorBoard tools
+  --reset-profile  Replace saved optional components with only this command's flags
   --skip-apt        Do not call apt-get (system tools and Vulkan/X11 headers must be present)
   --skip-doctor     Skip the GPU check after install
   --device N        Vulkan device id passed to ftgspp doctor (default: 0)
   -h, --help        Show this help
+
+Successful installs remember optional components in .venv. Later setup runs
+retain them and add the requested options. Use --reset-profile to remove extras.
 EOF
 }
 
@@ -66,6 +65,7 @@ while [[ $# -gt 0 ]]; do
     --with-da3) add_extra da3; shift ;;
     --with-lpips) add_extra lpips; shift ;;
     --with-tensorboard) add_extra tensorboard; shift ;;
+    --reset-profile) RESET_PROFILE=1; shift ;;
     --device)
       [[ $# -ge 2 ]] || { echo "error: --device needs an integer" >&2; exit 2; }
       DOCTOR_DEVICE="$2"
@@ -79,6 +79,14 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ "$RESET_PROFILE" -eq 0 ]]; then
+  load_install_profile "$PROFILE_PATH"
+fi
+if [[ ! "$DOCTOR_DEVICE" =~ ^[0-9]+$ ]]; then
+  echo "error: --device needs a nonnegative integer" >&2
+  exit 2
+fi
 
 if [[ "$(uname -s)" != "Linux" || "$(uname -m)" != "x86_64" ]]; then
   echo "error: this release targets Linux x86_64" >&2
@@ -173,7 +181,7 @@ else
   tarball="$(mktemp "${TMPDIR:-/tmp}/slang.XXXXXX.tgz")"
   cleanup_tarball() { rm -f "$tarball"; }
   trap cleanup_tarball EXIT
-  curl -fsSL "$SLANG_URL" -o "$tarball"
+  curl --retry 3 --retry-delay 2 --connect-timeout 30 -fsSL "$SLANG_URL" -o "$tarball"
   echo "$SLANG_SHA256  $tarball" | sha256sum -c -
   mkdir -p "$SLANG_PREFIX"
   tar -xzf "$tarball" -C "$SLANG_PREFIX"
@@ -240,78 +248,10 @@ fi
 uv "${sync_args[@]}"
 
 install_extras_csv="$(IFS=,; echo "${INSTALL_EXTRAS[*]}")"
-FTGSPP_INSTALL_EXTRAS="$install_extras_csv" "$ROOT/.venv/bin/python" - <<'PY'
-import os
-import sys
-from importlib import import_module
-from importlib.metadata import distribution
-from pathlib import Path
+FTGSPP_INSTALL_EXTRAS="$install_extras_csv" FTGSPP_INSTALL_VIEWER="$WITH_VIEWER" \
+  "$ROOT/.venv/bin/python" "$ROOT/scripts/verify_install.py"
 
-required = {
-    "ftgspp-vulkan-community": "ftgspp",
-    "numpy": "numpy",
-    "omegaconf": "omegaconf",
-    "opencv-python-headless": "cv2",
-    "pycolmap": "pycolmap",
-    "scipy": "scipy",
-    "tqdm": "tqdm",
-}
-extras = {value for value in os.environ["FTGSPP_INSTALL_EXTRAS"].split(",") if value}
-if "birefnet" in extras:
-    required.update({
-        "torch": "torch",
-        "torchvision": "torchvision",
-        "transformers": "transformers",
-        "safetensors": "safetensors",
-        "timm": "timm",
-        "kornia": "kornia",
-        "einops": "einops",
-    })
-if "da3" in extras:
-    required.update({
-        "depth-anything-3": "depth_anything_3.api",
-        "torch": "torch",
-        "torchvision": "torchvision",
-        "safetensors": "safetensors",
-        "einops": "einops",
-        "addict": "addict",
-        "evo": "evo",
-        "imageio": "imageio",
-        "moviepy": "moviepy",
-        "pillow": "PIL",
-        "plyfile": "plyfile",
-        "trimesh": "trimesh",
-        "huggingface-hub": "huggingface_hub",
-    })
-if "lpips" in extras:
-    required.update({
-        "torch": "torch",
-        "torchvision": "torchvision",
-        "torchmetrics": "torchmetrics",
-    })
-if "remote" in extras:
-    required["websockets"] = "websockets"
-if "tensorboard" in extras:
-    required["tensorboard"] = "tensorboard"
-
-venv = Path(sys.prefix).resolve()
-versions = []
-for package, module in required.items():
-    item = distribution(package)
-    location = Path(item.locate_file("")).resolve()
-    if not location.is_relative_to(venv):
-        raise RuntimeError(
-            f"{package} resolved outside .venv: {location}; remove foreign "
-            ".pth/PYTHONPATH injection and rerun setup"
-        )
-    import_module(module)
-    versions.append(f"{package}={item.version}")
-print("verified runtime:", " ".join(versions))
-
-if "torch" in required:
-    import torch
-    print(f"PyTorch CUDA available: {torch.cuda.is_available()}")
-PY
+save_install_profile "$PROFILE_PATH"
 
 if [[ "$SKIP_DOCTOR" -eq 0 ]]; then
   if ! "$ROOT/.venv/bin/ftgspp" doctor --devices "$DOCTOR_DEVICE"; then

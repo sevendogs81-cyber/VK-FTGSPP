@@ -228,9 +228,8 @@ def _load_model(options: Any, *, fallback_gpu: int):
         from depth_anything_3.api import DepthAnything3
     except Exception as exc:  # pragma: no cover - depends on optional environment
         raise DA3UnavailableError(
-            "DA3 initialization requires the upstream depth-anything-3 package "
-            "and its Torch dependencies. Install it in the active environment "
-            "(the upstream package currently has its own dependency constraints) "
+            "DA3 initialization requires the project's locked DA3 dependencies. "
+            "Run bash scripts/setup.sh --with-da3 from the repository clone, "
             "or use init.backend=points with a user point cloud."
         ) from exc
 
@@ -1792,7 +1791,9 @@ def _run_chunk_inference(
     extrinsics: np.ndarray | None = None,
     intrinsics: np.ndarray | None = None,
 ) -> Any:
-    images = [view.load_rgb()[..., :3] for view in views]
+    from ftgspp.optional.preparation_views import prefetch_rgb
+    with timer.stage("image_decode"):
+        images = [rgb[..., :3] for _index, _view, rgb in prefetch_rgb(views)]
     inference_intrinsics = (
         None if extrinsics is None
         else np.asarray(intrinsics, np.float32) if intrinsics is not None

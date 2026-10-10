@@ -218,8 +218,8 @@ test("browser preserves aspect, navigation playback, deltas and decode backpress
   assert.equal(capture.type, "capture");
   assert.equal(
     capture.width,
-    1440,
-    "scale must apply after the 1080p stream cap",
+    1920,
+    "interactive starts at full preview resolution",
   );
   assert.equal(capture.fullWidth, 3840);
   assert.equal(capture.state.bookmarks, undefined);
@@ -307,57 +307,109 @@ test("browser preserves aspect, navigation playback, deltas and decode backpress
   viewportBox = { width: 1600, height: 900 };
   captureDimensions(900, 900, "square after resize");
 
-  const tick = () => {
+  const tick = (step = 50) => {
     const pending = [...animations.values()];
     animations.clear();
-    now += 50;
+    now += step;
     pending.forEach((callback) => callback(now));
   };
-  const keepsPlaying = (label) => {
-    const before = Number(nodes.get("time").value);
-    tick();
-    assert.equal(nodes.get("play").textContent, "Pause", label);
-    assert.ok(Number(nodes.get("time").value) > before, `${label}: time must advance`);
-    assert.equal(animations.size, 1, `${label}: one continuing animation loop`);
-    nodes.get("shot").click();
-    const patch = ws.sent.at(-1).state;
-    assert.notEqual(patch.playing, false, label);
-    assert.ok(patch.time > before, `${label}: advancing time reaches the server`);
+  const finishFrame = async () => {
+    const pending = ws.onmessage({ data: image });
+    await new Promise((resolve) => setImmediate(resolve));
+    decodeDone();
+    await pending;
   };
+  await finishFrame();
+  const older = ws.onmessage({ data: image });
+  await new Promise((resolve) => setImmediate(resolve));
+  const finishOlder = decodeDone;
+  const newer = ws.onmessage({ data: image });
+  await new Promise((resolve) => setImmediate(resolve));
+  decodeDone();
+  await newer;
+  const newestSource = nodes.get("view").src;
+  finishOlder();
+  await older;
+  assert.equal(nodes.get("view").src, newestSource, "late decodes cannot replace a newer frame");
+  assert.ok(!html.includes('id="snap"') && !html.includes('id="playbackClock"'),
+    "sample alignment and the single playback strategy are not optional controls");
   nodes.get("play").click();
-  const beforeStall = Number(nodes.get("time").value);
-  now += 500;
+  flushTimers();
+  let stream = ws.sent.at(-1);
+  assert.equal(stream.type, "stream");
+  assert.equal(stream.protocol, "ftgspp-remote-stream-v2");
+  const startTime = Number(nodes.get("time").value), requests = ws.sent.length;
+  now += 700;
   tick();
-  assert.ok(Math.abs(Number(nodes.get("time").value) - beforeStall - .55) < 1e-8,
-    "playback uses elapsed wall time even when animation frames stall");
-  for (const button of [0, 1, 2]) {
-    stage.listeners.pointerdown({
-      button, clientX: 20, clientY: 20, pointerId: 1, preventDefault() {},
-    });
-    stage.listeners.pointermove({ clientX: 45, clientY: 35 });
-    keepsPlaying(`playing during drag ${button}`);
-    stage.listeners.pointerup();
-    keepsPlaying(`playing after drag ${button}`);
+  flushTimers();
+  assert.equal(Number(nodes.get("time").value), startTime, "clock follows displayed frames");
+  assert.equal(ws.sent.length, requests, "initial network stall cannot queue requests");
+  const streamFrame = async (index, time, id = stream.stream_id) => {
+    await ws.onmessage({ data: JSON.stringify({
+      type: "frame", stream_id: id, frame_index: index, scene_time: time,
+      next_time: time + 1 / 30,
+      playing: true, fps: 30, width: 900, height: 900, ms: 10, bytes: 100,
+      pipeline: {}, stats: { render_ms: 10, gaussians: 100, vram_bytes: 1000 },
+    }) });
+    const result = ws.onmessage({ data: image });
+    await new Promise((resolve) => setImmediate(resolve));
+    if (id === stream.stream_id) decodeDone();
+    await result;
+  };
+  await streamFrame(0, 2);
+  assert.equal(Number(nodes.get("time").value), 2, "first camera frame is shown promptly");
+  // Six future frames can arrive in a burst. Presentation must be clocked,
+  // independent of arrival times, with no per-frame request/response wait.
+  for (let i = 1; i <= 6; ++i) await streamFrame(i, 2 + i / 30);
+  const arrivalTime = now;
+  for (let i = 1; i <= 5; ++i) {
+    tick(1000 / 30);
+    assert.ok(Math.abs(Number(nodes.get("time").value) - (2 + i / 30)) < 1e-8);
   }
+  assert.ok(Math.abs(now - arrivalTime - 5 * 1000 / 30) < 1e-8);
+  assert.equal(ws.sent.filter((m) => m.type === "stream").length, 1,
+    "five displayed frames do not require five network round trips");
+  assert.deepEqual(ws.sent.filter((m) => m.type === "stream_ack").map((m) => m.frame_index),
+    [0, 1, 2, 3, 4, 5]);
+  assert.equal(ws.sent.at(-1).client_time, now / 1000);
+  // Camera input updates the same stream while frames are still in flight.
+  const activeId = stream.stream_id;
   stage.listeners.wheel({ deltaY: 50, preventDefault() {} });
-  keepsPlaying("playing during dolly");
-  nodes.get("fit").click();
-  keepsPlaying("playing after fit");
-  stage.listeners.pointerdown({
-    button: 2, clientX: 20, clientY: 20, pointerId: 1, preventDefault() {},
-  });
-  windowListeners.get("keydown")({ key: "w" });
-  keepsPlaying("playing during keyboard fly");
-  windowListeners.get("keyup")({ key: "w" });
-  stage.listeners.pointerup();
-
+  flushTimers();
+  const viewUpdate = ws.sent.at(-1);
+  assert.equal(viewUpdate.type, "stream_view");
+  assert.equal(viewUpdate.stream_id, activeId);
+  assert.equal(viewUpdate.navigating, true);
+  assert.equal(viewUpdate.state.time, undefined, "view updates do not rewind playback");
+  const sentViews = ws.sent.filter((m) => m.type === "stream_view").length;
+  stage.listeners.wheel({ deltaY: 10, preventDefault() {} });
+  flushTimers();
+  assert.equal(ws.sent.filter((m) => m.type === "stream_view").length, sentViews + 1,
+    "next camera input must not wait for the preceding image");
+  await streamFrame(7, 3);
+  tick();
+  tick(1000 / 30);
+  assert.equal(Number(nodes.get("time").value), 3);
+  // Resolution policy and bandwidth recovery are covered by the timed simulator.
+  // Navigation never pauses playback; pause/seek explicitly cancel the stream.
+  for (const button of [0, 1, 2]) {
+    stage.listeners.pointerdown({ button, clientX: 20, clientY: 20, pointerId: 1, preventDefault() {} });
+    stage.listeners.pointermove({ clientX: 45, clientY: 35 });
+    stage.listeners.pointerup();
+    assert.equal(nodes.get("play").textContent, "Pause");
+  }
   nodes.get("play").click();
   const pausedTime = Number(nodes.get("time").value);
   stage.listeners.wheel({ deltaY: 50, preventDefault() {} });
   tick();
-  assert.equal(nodes.get("play").textContent, "Play", "navigation keeps a paused scene paused");
+  assert.equal(nodes.get("play").textContent, "Play");
   assert.equal(Number(nodes.get("time").value), pausedTime);
-  assert.equal(animations.size, 0);
+  assert.ok(animations.size <= 1, "navigation uses a single RAF loop");
+  nodes.get("time").value = 2.4;
+  nodes.get("time").oninput();
+  assert.equal(Number(nodes.get("time").value), 2, "scrubbing always aligns to captured samples");
+  nodes.get("quality").value = "faithful";
+  nodes.get("quality").onchange();
 
   // Export snapshots the current free camera and explicit video settings.
   nodes.get("exportMode").value = "view";

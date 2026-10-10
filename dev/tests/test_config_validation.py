@@ -40,8 +40,10 @@ class StaticConfigValidationTests(unittest.TestCase):
                 "foreground", "composite_v1", "point_filtering",
             ),
             "foreground_scene.yaml": ("foreground", "composite_v1", "carving"),
+            "foreground_preview.yaml": ("foreground", "composite_v1", "carving"),
             "foreground_visual_hull.yaml": ("foreground", "composite_v1", "carving"),
             "scene.yaml": ("scene", "scene_rgb_v1", "auto"),
+            "scene_preview.yaml": ("scene", "scene_rgb_v1", "auto"),
         }
         for name, contract in expected.items():
             with self.subTest(example=name):
@@ -62,6 +64,10 @@ class StaticConfigValidationTests(unittest.TestCase):
                     self.assertEqual(
                         list(config.train.background.color), [0.0, 0.0, 0.0],
                     )
+                if name == "foreground_preview.yaml":
+                    self.assertEqual(config.train.iterations, 87000)
+                    self.assertEqual(config.data.scale, 0.5)
+                    self.assertEqual(config.init.num_gaussians, 2000000)
         manifest = json.loads(
             (ROOT / "examples" / "final_test_manifest.example.json").read_text(
                 encoding="utf-8",
@@ -86,14 +92,14 @@ class StaticConfigValidationTests(unittest.TestCase):
         self.assertEqual(config.init.backend, "carving")
         self.assertEqual(
             config.init.points_path,
-            (ROOT / "scene/points_vhull_ibr_stride10").resolve(),
+            (ROOT / "scene/points_vhull_ibr_stride1").resolve(),
         )
         self.assertTrue(config.init.da3.foreground_only)
         self.assertIsNone(config.init.da3.min_consistent_views)
         self.assertIsNone(config.init.da3.use_sky_mask)
         self.assertEqual(
             config.init.da3.cache_path,
-            (ROOT / "scene/points_da3_foreground_stride10").resolve(),
+            (ROOT / "scene/points_da3_foreground_stride1").resolve(),
         )
         self.assertEqual(config.pipeline.image_objective, "composite_v1")
         self.assertEqual(config.train.background.mode, "random_solid")
@@ -105,12 +111,136 @@ class StaticConfigValidationTests(unittest.TestCase):
         )
         self.assertTrue(config.model.marginal_gating)
         self.assertEqual(
-            config.train.relocation.score_mode, "gate_included",
+            config.train.relocation.score_mode, "default",
         )
         self.assertFalse(config.train.color_correction)
         self.assertFalse(config.train.hard_separation)
         self.assertEqual(config.train.hard_separation_steps, 3000)
         self.assertEqual(list(config.train.hard_relocation_steps), [1500])
+        self.assertEqual(config.data.scale, 1.0)
+        self.assertEqual(config.init.keyframe_stride, 1)
+        self.assertEqual(config.init.num_velocity_nns, 3)
+        self.assertEqual(config.init.seed, 0)
+        self.assertAlmostEqual(config.init.duration, 1 / config.data.fps)
+        self.assertEqual(config.train.iterations, 174000)
+        self.assertEqual(config.train.batch_size, 1)
+        self.assertEqual(config.train.relocation.start, 4971)
+        self.assertEqual(config.train.relocation.stop, 87000)
+        self.assertEqual(config.train.relocation.every, 1243)
+        self.assertEqual(config.train.lrs["durations"], 0.001)
+        self.assertEqual(config.train.lrs["marginal_gates"], 0.0005)
+        self.assertEqual(config.train.lr_schedules["means"], 0.03)
+        self.assertEqual(config.train.lr_schedules["velocity_model"], 0.03)
+        self.assertEqual(config.eval.frame_interval, 1)
+        self.assertEqual(config.eval.candidate_max_views, 128)
+        self.assertTrue(config.train.export_best)
+
+    def test_foreground_explicit_recipe_and_saved_plan_survive_new_defaults(self):
+        import tempfile
+        from ftgspp.config.compose import load_config, save_resolved_config
+
+        # An older explicit recipe must keep its geometry, optimizer and
+        # evaluation settings when loaded as a saved effective run plan.
+        config = resolve_config(OmegaConf.create({
+            "pipeline": {"mode": "foreground"},
+            "data": {"root": "scene", "scale": 0.5},
+            "init": {"keyframe_stride": 10, "num_velocity_nns": 0, "seed": None},
+            "train": {
+                "iterations": 30000,
+                "relocation": {
+                    "start": 500, "stop": 25000, "every": 100,
+                    "score_mode": "gate_included",
+                },
+                "lrs": {"durations": 0.005, "marginal_gates": 0.001},
+                "lr_schedules": {"means": 0.01, "velocity_model": 0.01},
+            },
+            "eval": {"frame_interval": 10, "candidate_max_views": 32},
+        }), base_dir=ROOT).config
+        self.assertEqual(config.init.keyframe_stride, 10)
+        self.assertEqual(config.init.num_velocity_nns, 0)
+        self.assertIsNone(config.init.seed)
+        self.assertEqual(config.train.iterations, 30000)
+        self.assertEqual(config.train.relocation.score_mode, "gate_included")
+        self.assertEqual(config.data.scale, 0.5)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.resolved.yaml"
+            save_resolved_config(config, path)
+            restored = load_config(path)
+        self.assertEqual(restored, config)
+
+    def test_foreground_explicit_horizon_scales_default_relocation(self):
+        config = resolve_config(OmegaConf.create({
+            "pipeline": {"mode": "foreground"},
+            "data": {"root": "scene"},
+            "train": {"iterations": 10000},
+        }), base_dir=ROOT).config
+        self.assertEqual(config.train.relocation.stop, 5000)
+
+    def test_user_point_budget_is_counted_once_and_saved_as_an_integer(self):
+        import tempfile
+        from types import SimpleNamespace
+        import numpy as np
+        from ftgspp.config.compose import load_config, save_resolved_config
+        from ftgspp.io.ply import write_point_ply
+        from ftgspp.training.initialize import initialize_explicit
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            points = root / "my_points"
+            # Frame 4 is outside the stride, and frame 6 is the required final
+            # keyframe even though it is not aligned to stride 2.
+            for frame, count in ((3, 2), (4, 99), (5, 5), (6, 3)):
+                xyz = np.arange(count * 3, dtype=np.float32).reshape(-1, 3) + frame
+                write_point_ply(points / f"f{frame:06d}.ply", xyz,
+                                np.full((count, 3), 128, np.uint8))
+            node = OmegaConf.create({
+                "pipeline": {"mode": "foreground"},
+                "data": {"root": ".", "frames": {"start": 3, "stop": 7}},
+                "init": {"backend": "points", "points_path": "my_points",
+                         "keyframe_stride": 2},
+                "run": {"output_path": "run"},
+            })
+            config = resolve_config(node, base_dir=root).config
+            self.assertEqual(config.init.num_gaussians, 10)
+            config.run.output_path.mkdir()
+            dataset = SimpleNamespace(
+                frames=[3, 4, 5, 6], train_cameras=[0], calibration_available=True,
+                view=lambda frame, camera: SimpleNamespace(timestamp=frame / 60),
+            )
+            model = initialize_explicit(config, dataset)
+            self.assertEqual(len(model), 10)
+            report = json.loads(
+                (config.run.output_path / "initialization_manifest.json").read_text()
+            )
+            self.assertEqual(report["replica_fraction"], 0.0)
+            self.assertEqual(
+                [(row["frame"], row["selected_points"], row["resampled_points"])
+                 for row in report["keyframes"]],
+                [(3, 2, 0), (5, 5, 0), (6, 3, 0)],
+            )
+            saved = root / "config.resolved.yaml"
+            save_resolved_config(config, saved)
+            # Resume/evaluation loads must not recount changed source PLYs.
+            (points / "f000003.ply").unlink()
+            restored = load_config(saved)
+            self.assertEqual(restored.init.num_gaussians, 10)
+            explicit = OmegaConf.merge(node, {"init": {"num_gaussians": 24}})
+            self.assertEqual(resolve_config(explicit, base_dir=root).config.init.num_gaussians, 24)
+            with self.assertRaises(FileNotFoundError):
+                resolve_config(node, base_dir=root)
+
+    def test_generated_geometry_keeps_two_million_and_rejects_null_budget(self):
+        for backend in ("carving", "point_filtering", "da3"):
+            node = OmegaConf.create({
+                "pipeline": {"mode": "foreground"},
+                "data": {"root": "scene"},
+                "init": {"backend": backend},
+            })
+            with self.subTest(backend=backend):
+                self.assertEqual(resolve_config(node, base_dir=ROOT).config.init.num_gaussians, 2000000)
+                node.init.num_gaussians = None
+                with self.assertRaisesRegex(ValueError, "null requires init.backend=points"):
+                    resolve_config(node, base_dir=ROOT)
 
     def test_foreground_ranking_background_must_stay_black(self):
         with self.assertRaisesRegex(ValueError, "background_colors\\[0\\]"):
@@ -131,8 +261,12 @@ class StaticConfigValidationTests(unittest.TestCase):
         )
         self.assertTrue(config.train.color_correction)
         self.assertTrue(config.train.hard_separation)
-        self.assertEqual(config.train.hard_separation_steps, 3000)
-        self.assertEqual(list(config.train.hard_relocation_steps), [1500])
+        self.assertEqual(config.train.hard_separation_steps, 15000)
+        self.assertEqual(list(config.train.hard_relocation_steps), [7500])
+        self.assertEqual(config.train.iterations, 150000)
+        self.assertEqual(config.init.keyframe_stride, 10)
+        self.assertEqual(config.init.num_velocity_nns, 0)
+        self.assertEqual(config.data.scale, 0.5)
 
     def test_explicit_settings_override_scene_pipeline_defaults(self):
         config = resolve_config(OmegaConf.create({
@@ -197,19 +331,19 @@ class StaticConfigValidationTests(unittest.TestCase):
         self.assertIsNone(config.init.da3.min_consistent_views)
         self.assertIsNone(config.init.da3.use_sky_mask)
 
-    def test_official_training_preset_matches_freetimegs_plus_plus(self):
+    def test_scene_reference_schedule_and_manual_horizon(self):
         config = resolve_config(OmegaConf.create({
-            "data": {"root": "scene"},
+            "data": {"root": "scene", "frames": {"start": 0, "stop": 60}},
         }), base_dir=ROOT).config
         self.assertEqual(config.train.relocation.start, 500)
         self.assertEqual(config.train.relocation.stop, 25000)
         self.assertEqual(config.train.relocation.every, 100)
         self.assertAlmostEqual(config.train.lrs["velocity_model"], 1.6e-3)
         short = resolve_config(OmegaConf.create({
-            "data": {"root": "scene"},
+            "data": {"root": "scene", "frames": {"start": 0, "stop": 60}},
             "train": {"iterations": 20000},
         }), base_dir=ROOT).config
-        self.assertEqual(short.train.relocation.stop, 20000)
+        self.assertEqual(short.train.relocation.stop, 16667)
 
     def test_foreground_profile_keeps_alpha_source_and_fixed_background(self):
         config = resolve_config(OmegaConf.create({
