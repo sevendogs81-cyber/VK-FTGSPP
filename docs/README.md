@@ -1,22 +1,11 @@
 # Documentation
 
-Start at the repository [README](../README.md). Use this folder when the
-landing page is not enough.
+[See the results](performance.md), then follow the installation and first-run guides.
 
-| Doc | Audience |
-|---|---|
-| [hardware.md](hardware.md) | Capability gates, estimated runnable GPU families, validated hardware, and `doctor` interpretation |
-| [install.md](install.md) | Manual install, pins, and troubleshooting |
-| [first-run.md](first-run.md) | Scene and foreground input routes: raw RGB, XYZ-only clouds and complete data |
-| [arguments.md](arguments.md) | Adaptive scene/foreground presets, point budgets, key arguments and agent tuning workflow |
-| [usage.md](usage.md) | Prepare / train / eval, foreground, DA3, research YAML |
-| [viewer.md](viewer.md) | Local and SSH browser viewers, cameras, playback, screenshots and headless export |
-| [performance.md](performance.md) | SelfCap timing definitions and B1/B4 image-throughput benchmarks |
-| [architecture.md](architecture.md) | CLI, native, and config boundaries |
-| [migration.md](migration.md) | Breaking changes from older FTGSPP layouts |
+1. [Install](install.md)
+2. [Train your first capture](first-run.md)
+3. [View and export](viewer.md)
 
-Local design notes (`foreground_reconstruction_plan.md`,
-`initialization_pipeline_improvement_plan.md`, `validation.md`, and the local
-viewer plan/performance reports and raw benchmark JSON) are gitignored and are
-not part of the published snapshot. Tests and research helpers live under
-[dev/](../dev/README.md), not here.
+[Resume, adjust settings and evaluate](usage.md) · [Input formats](data.md)
+
+Development notes and experiment records live in [dev/](../dev/README.md).

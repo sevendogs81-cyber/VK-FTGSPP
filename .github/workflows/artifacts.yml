@@ -56,19 +56,26 @@ jobs:
                   "src/ftgspp/viewer/remote.html",
                   "native/slang/ftgspp_image_objective.slang",
                   "native/slang/viewer_pack.slang",
-                  "docs/architecture.md",
-                  "docs/hardware.md",
-                  "docs/migration.md",
+                  "dev/CONTRIBUTING.md",
+                  "dev/agent-guide.md",
+                  "dev/docs/architecture.md",
+                  "dev/docs/benchmarks.md",
+                  "dev/docs/training-settings.md",
+                  "dev/docs/performance-measurements.md",
+                  "dev/docs/hardware-validation.md",
+                  "dev/docs/migration-history.md",
+                  "dev/docs/source-history.md",
                   "docs/install.md",
                   "docs/usage.md",
                   "docs/first-run.md",
-                  "docs/arguments.md",
                   "docs/viewer.md",
+                  "docs/data.md",
                   "docs/performance.md",
                   "scripts/setup.sh",
                   "scripts/setup_profile.sh",
                   "scripts/verify_install.py",
                   "tests/test_gpu_foreground_numeric.py",
+                  "examples/make_tiny_scene.py",
                   "examples/foreground_scene.yaml",
                   "examples/foreground_preview.yaml",
                   "examples/scene_preview.yaml",
@@ -78,7 +85,15 @@ jobs:
                   "examples/final_test_manifest.example.json",
               ):
                   assert any(n.endswith(suffix) for n in names), suffix
+              assert not any("/dev/local/" in n or "/dev/records/" in n for n in names)
               forbidden = (
+                  "docs/arguments.md",
+                  "docs/hardware.md",
+                  "docs/migration.md",
+                  "docs/viewer-reference.md",
+                  "CONTRIBUTING.md",
+                  "docs/architecture.md",
+                  "docs/assets/vk-ftgspp_4danyone_teaser.json",
                   "docs/foreground_reconstruction_plan.md",
                   "docs/initialization_pipeline_improvement_plan.md",
                   "docs/validation.md",
@@ -89,7 +104,7 @@ jobs:
                   "docs/viewer_rgba8_benchmark_20260923.json",
               )
               for suffix in forbidden:
-                  assert not any(n.endswith(suffix) for n in names), suffix
+                  assert not any(n.split("/", 1)[-1] == suffix for n in names), suffix
           with zipfile.ZipFile(next(Path("dist").glob("*.whl"))) as archive:
               names = archive.namelist()
               for suffix in ("VKSPLAT-APACHE-2.0.txt", "GLM.txt", "PYBIND11-BSD-3-CLAUSE.txt", "GLFW-ZLIB.txt", "IMGUI-MIT.txt", "radix_sort/LICENSE"):

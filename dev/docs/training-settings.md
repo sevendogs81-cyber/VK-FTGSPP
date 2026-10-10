@@ -6,8 +6,8 @@ subject. Scene mode means full-scene reconstruction with the supported cameras;
 it does not imply support for equirectangular/360-degree image projection.
 Both modes accept `train.preset: preview|balanced|extended`, using different
 reference recipes. Saved effective run plans retain their original settings.
-See the [scene input routes](first-run.md#scene-mode-input-routes) or
-[foreground input routes](first-run.md).
+See the [scene input routes](../../docs/first-run.md#scene-mode-input-routes) or
+[foreground input routes](../../docs/first-run.md).
 
 ## Choose a training budget
 
@@ -35,7 +35,7 @@ Foreground (`pipeline.mode: foreground`) main-phase budgets:
 These are **training budgets**, not different reconstruction algorithms. The
 foreground variants keep full input resolution, every-frame initialization and the same learning
 rates. They do not increase Gaussian capacity. The optional
-[preview example](../examples/foreground_preview.yaml) also sets `data.scale: 0.5`
+[preview example](../../examples/foreground_preview.yaml) also sets `data.scale: 0.5`
 for quicker image processing; selecting `train.preset: preview` alone does not.
 Choose image scale before point preparation. Prepared manifests include the
 image/camera geometry: changing scale, frame range, calibration or camera split
@@ -109,7 +109,7 @@ learning rates and `0.01` position/velocity final LR ratios. It does not inherit
 the foreground gate/duration recipe. B1 remains the supported scene batch size.
 
 The reference is 30k main steps on a 60-frame clip, as used in the existing
-[SelfCap timing study](performance.md#selfcap-timing-comparison). This anchors
+[SelfCap timing study](performance-measurements.md#selfcap-timing-comparison). This anchors
 the schedule; the study used 500k Gaussians and does not validate the new 2M
 starter, automatic FPS spacing, or quality on longer captures. For scene presets:
 
@@ -361,7 +361,7 @@ defaults or a preset cannot extend or reinterpret an existing run.
 1. Inspect indexed frame count/FPS, camera splits and coordinate alignment;
    also inspect masks for foreground mode.
    Identify whether the source is raw RGB, XYZ clouds or complete RGB clouds.
-   Use the matching [first-run route](first-run.md), with `point_filtering` for
+   Use the matching [first-run route](../../docs/first-run.md), with `point_filtering` for
    optional foreground filtering plus image coloring of supplied XYZ points.
    In scene mode use `colorize` instead; no foreground masks are required.
 2. Print the effective plan. Record `F`, selected keyframe count, total Gaussian
@@ -389,3 +389,12 @@ memory, or lower DA3 `max_views`/`process_res` for depth inference. Preview's
 shorter horizon alone does not lower peak model memory. For long clips at a
 fixed capacity, compare a short-segment run before spending more steps on the
 whole sequence.
+
+## Batch size
+
+B1 is the default. B4 supports single-device foreground with color correction
+and HS disabled, `distributed.mode: off`,
+`distributed.sampling_policy: flat_epoch`, and no automatic LR scaling.
+Four views share one mean gradient and one Adam update. Iterations count
+optimizer updates; equal update counts at B4 see four times as many images.
+See [execution benchmarks](benchmarks.md#local-batch-execution-cost).
