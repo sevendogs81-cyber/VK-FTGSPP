@@ -71,7 +71,7 @@ The first command shows the effective settings without training. Check the
 frame range, FPS, camera split and iteration count. The default `balanced`
 budget adapts to clip length. For a shorter diagnostic run, add
 `--set train.preset=preview` to the training command. See
-[training settings](arguments.md) when you need to adjust memory or quality.
+[common settings](usage.md#change-settings) when you need to adjust memory or quality.
 
 Use a new `RUN` directory for each experiment. On completion, it contains
 `gaussians.npz` and the camera information needed for viewing.

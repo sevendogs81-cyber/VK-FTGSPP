@@ -120,6 +120,12 @@ def test_path_slerp_and_separate_time():
     p = CameraPath(data)
     middle = p.sample(2)
     assert middle["timestamp"] == 5
+    held = p.sample(2, interpolate_time=False)
+    assert held["timestamp"] == 8
+    np.testing.assert_array_equal(held["w2c"], middle["w2c"])
+    assert p.sample(4, interpolate_time=False)["timestamp"] == 2
+    assert p.sample(100, interpolate_time=False)["timestamp"] == 2
+    assert p.sample(-1, interpolate_time=False)["timestamp"] == 8
     np.testing.assert_allclose(
         np.linalg.inv(middle["w2c"])[:3, 3], [2, 0, 0], atol=1e-6
     )

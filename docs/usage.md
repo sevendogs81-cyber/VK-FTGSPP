@@ -1,8 +1,12 @@
-# Resume, evaluate and troubleshoot
+# Work with a capture
 
-For a new capture, start with [the training guide](first-run.md).
-The commands below use `RUN=/absolute/path/to/your/completed-run` and Vulkan
-device `0`; replace them with your own values.
+Start a new capture with [the first-run guide](first-run.md). Run the commands
+below from the repository with `.venv` activated, replacing these paths:
+
+```bash
+CONFIG=/absolute/path/to/capture/ftgspp.yaml
+RUN=/absolute/path/to/capture/runs/foreground
+```
 
 ## Resume training
 
@@ -10,19 +14,52 @@ device `0`; replace them with your own values.
 ftgspp train --resume "$RUN"
 ```
 
-Resume uses the saved configuration. To change settings, start a new run with
-`--config` and a new `--output` directory instead.
+Resume keeps the saved settings. Retain the original environment for older
+incompatible checkpoints. To change settings, start a new run as below.
 
-## Find your outputs
+## Change settings
+
+Inspect the settings, then use a new output directory for each trial:
+
+```bash
+ftgspp train --config "$CONFIG" --print-config
+ftgspp train --config "$CONFIG" --output /path/to/new-run \
+  --set train.preset=preview
+```
+
+| What you want | Setting or action |
+|---|---|
+| A short trial | `train.preset=preview` |
+| A normal first run | `train.preset=balanced` (default) |
+| A longer run | `train.preset=extended` |
+| An explicit number of steps | `train.iterations=90000`; use `null` to return to the preset |
+| Lower image-memory use | Reduce `data.scale`, for example to `0.5` |
+| A smaller model | Reduce `init.num_gaussians` |
+| A shorter clip | Set `data.frames.start` and `.stop`; stop is exclusive |
+| Correct capture timing | Set `data.fps` to the indexed image rate |
+| Save disk space | `train.save_checkpoints=false`; optimizer resume then lacks periodic snapshots |
+
+Preview shortens training but keeps the model size. Presets adapt to the clip;
+use `--print-config` to see the resulting step count. Prepared geometry must
+match the image scale, frame range, calibration and camera split. Regenerate
+it in a new directory if these inputs change.
+
+YAML paths are relative to the YAML file; CLI paths are relative to your working
+directory. Use `${oc.env:VARIABLE}` for environment variables inside YAML.
+
+## Find the outputs
 
 | File | Use |
 |---|---|
-| `gaussians.npz` + `viewer_manifest.json` | Open the trained model in the viewer |
-| `config.resolved.yaml` | See the settings actually used |
+| `gaussians.npz` + `viewer_manifest.json` | Open the result in the viewer |
+| `config.resolved.yaml` | Review the settings actually used |
 | `run.log` | Read progress or diagnose a failure |
-| `ckpt/` | Resume checkpoints |
-| `export_selection.json` | Identify the selected model |
-| `gaussians_4dgs.ply` | Compatibility export; use NPZ for faithful native viewing |
+| `ckpt/` | Resume training |
+| `export_selection.json` | Identify the exported model |
+| `gaussians_4dgs.ply` | Compatibility export; use NPZ for native viewing |
+
+For an older run missing viewer metadata, use
+`ftgspp prepare viewer --run "$RUN"` before opening it.
 
 ## Evaluate
 
@@ -30,45 +67,33 @@ Resume uses the saved configuration. To change settings, start a new run with
 ftgspp eval --run "$RUN" --device 0
 ```
 
-Ordinary evaluation uses sampled hold-out views and writes `metrics.jsonl`.
-Foreground training also writes diagnostic results to
-`full_validation_metrics.jsonl` at completion. Cameras used to select the best
-checkpoint are validation data, not an independent final test.
+This evaluates sampled hold-out views and writes `metrics.jsonl`. Foreground
+training also writes `full_validation_metrics.jsonl` at completion.
 
-For an independent test, fill in the [manifest template](../examples/final_test_manifest.example.json)
-with views not used for training or selection:
+For an independent final test, fill in the [manifest template](../examples/final_test_manifest.example.json)
+with views not used for training or checkpoint selection:
 
 ```bash
 ftgspp prepare final-test --run "$RUN" --manifest /path/to/final_test.json
 ftgspp eval --run "$RUN" --device 0 --test-manifest /path/to/final_test.json
 ```
 
-These results go to `final_test_metrics.jsonl`. Optional VGG LPIPS requires
-`bash scripts/setup.sh --with-lpips`; add `--lpips` to the final-test command.
-Weights may download on first use.
+Results go to `final_test_metrics.jsonl`. For LPIPS, install `--with-lpips` and
+add `--lpips` to the final-test command; weights may download on first use.
 
-## When results look wrong
-
-Inspect several recorded times, including fast motion, from a held-out camera.
-Match the source image's camera and timestamp; use a paused, faithful PNG for
-detail rather than a compressed video.
+## Troubleshoot
 
 | Symptom | Check first |
 |---|---|
-| Blurred motion or double edges | Capture FPS, synchronization, masks and initial point-cloud coverage |
-| Missing or misplaced subject | Camera IDs, calibration, mask alignment and point-cloud coordinates |
-| Out of memory | Other GPU jobs; then lower image scale or Gaussian count in a new experiment |
-| Unexpected DA3 download | Missing calibration or an incomplete initial point-cloud set |
-| Existing output error | Resume the run, or choose a new directory for a new experiment |
+| Blurred motion or double edges | Capture FPS, synchronization, masks and point-cloud coverage |
+| Missing or misplaced subject | Camera IDs, calibration, mask alignment and point coordinates |
+| Out of memory | Other GPU jobs; then image scale or Gaussian count |
+| Unexpected DA3 download | Missing calibration or incomplete input point clouds |
+| Existing output error | Resume the run, or choose a new directory |
 | Viewer connection failure | [Viewer troubleshooting](viewer.md#troubleshooting) |
 
-If changing image scale, frames or camera splits, regenerate matching prepared
-geometry. More iterations alone cannot repair incorrect inputs. See
-[training settings](arguments.md) for budget and memory choices.
+Compare a paused render with the source image at the same camera and time.
+To report a problem, include the command, commit, doctor output, log excerpt and
+resolved config, removing private paths and viewer tokens.
 
-## Report a problem
-
-Include the command, repository commit, doctor output, relevant log excerpt and
-resolved config. Remove private paths and viewer tokens before sharing.
-
-For SelfCap video input, start with `ftgspp prepare selfcap --help`.
+For SelfCap videos, use `ftgspp prepare selfcap --help`.

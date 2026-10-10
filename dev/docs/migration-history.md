@@ -11,7 +11,7 @@ There is no implicit migration of old execution semantics.
   `ftgspp-point-color-v2`; validated v2/v3 and colorize v1 outputs remain readable.
   First-keyframe DA3 camera recovery is accepted only after validating that exact
   request against the complete current dataset and model identity. See
-  [arguments](../../docs/arguments.md#max_points-per-keyframe-versus-the-total-model).
+  [arguments](training-settings.md#max_points-per-keyframe-versus-the-total-model).
 
 - `setup.sh` now remembers enabled extras and the desktop build in `.venv`.
   Use `--reset-profile` to replace that selection. Legacy environments without
@@ -24,12 +24,12 @@ There is no implicit migration of old execution semantics.
 
 - New foreground runs default to full input resolution, keyframe stride 1,
   three-neighbor velocity initialization, a frame-adaptive training budget, and the gentler
-  temporal/relocation recipe documented in [training settings](../../docs/arguments.md#choose-a-budget).
+  temporal/relocation recipe documented in [training settings](training-settings.md#choose-a-training-budget).
   `train.preset: balanced` uses 70k updates at 121 frames and 174k at 300 frames.
   `preview` and `extended` select smaller/larger budgets. Relocation and eval
   clocks scale with the effective horizon unless explicitly overridden. Remove
   copied numeric settings (or set `train.iterations: null`) to enable adaptation.
-  Saved effective clocks remain unchanged; see [arguments.md](../../docs/arguments.md).
+  Saved effective clocks remain unchanged; see [training settings](training-settings.md).
   Generated starters and foreground examples now use `points_vhull_ibr_stride1`
   (or `points_vhull_filtered_stride1` for point filtering). Regenerate geometry
   when changing a capture's stride. Explicit YAML overrides and saved resolved
@@ -43,7 +43,7 @@ There is no implicit migration of old execution semantics.
   An omitted scene keyframe stride follows FPS at roughly 1/6-second spacing
   (30 FPS: 5; 60 FPS: 10). Generated generic starters leave that choice adaptive.
   Existing PLYs require an explicit matching stride. Saved numeric run plans
-  and explicit user settings are retained. See [arguments.md](../../docs/arguments.md#scene-adaptation).
+  and explicit user settings are retained. See [arguments.md](training-settings.md#scene-adaptation).
 - Replace Hydra groups/launcher with `ftgspp train --config scene.yaml` and
   repeated `--set key=value`. Personal scene presets are no longer distributed.
 - Remove `pipeline.stages` and `pipeline.check_only`. Training has one fixed

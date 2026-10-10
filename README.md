@@ -8,7 +8,7 @@ viewer for playback, free-view navigation and video export.
 
 ## Performance
 
-SelfCap, RTX 4090, 60 frames, 500k Gaussians and 30k main training steps:
+SelfCap · RTX 4090 · reported train-only throughput:
 
 | Scene RGB, six-capture mean | FTGSPP (CUDA) | VK-FTGSPP (Vulkan) | Ratio |
 |---|---:|---:|---:|
@@ -16,13 +16,13 @@ SelfCap, RTX 4090, 60 frames, 500k Gaussians and 30k main training steps:
 
 These reported intervals exclude evaluation and hard separation; the original
 includes relocation while VK-FTGSPP excludes it, so this is not an end-to-end
-speedup. See the [full comparison and timing definitions](docs/performance.md).
+speedup. See the [comparison results](docs/performance.md).
 
 ## Install
 
 You need **Linux x86_64 and a supported NVIDIA GPU**. The installer sets up
 Python 3.12 and the build tools; missing system packages require sudo.
-See [hardware compatibility](docs/hardware.md) if you are unsure about your GPU.
+See [requirements and installation options](docs/install.md#requirements).
 
 ```bash
 git clone https://github.com/sevendogs81-cyber/VK-FTGSPP.git
@@ -73,7 +73,7 @@ See [viewer controls and export](docs/viewer.md) for screenshots and videos.
 ## More
 
 - [Resume, evaluate and troubleshoot](docs/usage.md)
-- [Data formats](docs/data.md) · [Training settings](docs/arguments.md)
+- [Data formats](docs/data.md) · [Common settings](docs/usage.md#change-settings)
 - [FTGSPP comparison](docs/performance.md) · [Development](dev/README.md)
 
 The showcase illustrates a real reconstruction; a downloadable reproduction

@@ -283,9 +283,11 @@
         ><input id="speed" type="number" min="0.01" max="100" step="0.25" />
       </div>
       <div class="row">
-        <label><input id="loop" type="checkbox" /> Loop</label
-        ><label><input id="snap" type="checkbox" /> Snap samples</label>
+        <label><input id="loop" type="checkbox" /> Loop</label>
       </div>
+      <small>Playback and exports use captured scene timestamps. Playback buffers
+        upcoming frames to absorb network jitter; Interactive quality adapts
+        preview resolution to sustained load and restores clarity when it recovers.</small>
       <h2>Image</h2>
       <div class="row">
         <label>View</label
@@ -469,9 +471,40 @@
           dirty = false,
           renderTimer = 0,
           lastFrame = 0,
+          networkScale = 1,
+          viewTimer = 0,
+          viewRevision = 0,
+          streamNavigating = false,
+          navigationUntil = 0,
+          lastViewSent = 0,
+          lastQualityChange = 0,
+          qualityWindowStart = 0,
+          qualityFrames = 0,
+
+          stableSince = 0,
+          stalls = 0,
+          displayTimes = [],
+          refreshSamples = [],
+          displayHz = 60,
+          decodeMs = 0,
+          lastProbe = 0,
+          networkRtt = 0,
+          viewLatency = 0,
+          roundTrip = 0,
+          frameSerial = 0,
+          streamId = 0,
+          streamActive = false,
+          streamFrames = new Map(),
+          streamNext = 0,
+          streamFps = 30,
+          streamWindow = 8,
+          maxStreamWindow = 64,
+          nextSceneTime = null,
+          presentAt = 0,
+          buffering = true,
+          pendingFrame = null,
           drag = null,
           keysDown = new Set(),
-          playClock = 0,
           frameInfo = "",
           switching = false,
           modelHash,
@@ -537,7 +570,8 @@
             ws.send(JSON.stringify({ type, model_sha256: modelHash, ...more }));
         };
         function acceptState(next) {
-          state = next;
+          stopStream();
+          state = { ...next, snap: true };
           selectedKey = -1;
           sentState = {};
           for (const [key, value] of Object.entries(state)) {
@@ -569,6 +603,7 @@
             full = viewport(true, box);
           return {
             state: statePatch(),
+            client_time: performance.now() / 1000,
             ...normal,
             fullWidth: full.width,
             fullHeight: full.height,
@@ -633,6 +668,7 @@
             `${extent.width}×${extent.height} · ${Math.max(0, duration).toFixed(2)}s · ${frames} frames · ${detail}`;
         }
         function setExporting(active) {
+          if (active) stopStream();
           exporting = active;
           $("videoCancel").disabled = !active;
           $("exportMode").disabled = active;
@@ -642,6 +678,7 @@
           $("exportFps").disabled = active;
           if (!active) $("videoCancel").textContent = "Cancel";
           refreshRecordingUI();
+          if (!active) requestFrame();
         }
         function refreshRecordingUI() {
           $("scenes").disabled = switching || exporting || recording.active ||
@@ -682,7 +719,6 @@
           $("play").textContent = state.playing ? "Pause" : "Play";
           $("speed").value = state.speed;
           $("loop").checked = state.loop;
-          $("snap").checked = state.snap;
           $("aspect").textContent =
             `Original aspect ratio · ${state.camera.width}:${state.camera.height} · fixed`;
           $("mode").value = state.mode;
@@ -743,8 +779,8 @@
         ) {
           const limit = full
             ? 1
-            : state.interactive && (drag || state.playing)
-              ? 0.75
+            : state.interactive && (isNavigating() || state.playing)
+              ? networkScale
               : 1;
           // Fit the camera into the viewport and pixel caps with one scale.
           // Camera navigation changes the pose, never the image aspect ratio.
@@ -758,23 +794,42 @@
         }
         function requestFrame() {
           if (!state) return;
+          if (streamActive && !state.playing && !isNavigating()) stopStream();
           dirty = true;
-          if (switching || inflight || document.hidden || ws.readyState !== 1) return;
+          if (switching || exporting || inflight || document.hidden || ws.readyState !== 1) return;
           const now = performance.now(),
             delay = Math.max(
               0,
-              1000 / (state.target_fps || 30) - (now - lastFrame),
+              1000 / Math.min(targetFps(), 60) - (now - lastFrame),
             );
           if (!renderTimer) renderTimer = setTimeout(flush, delay);
         }
         function flush() {
           renderTimer = 0;
-          if (switching || inflight || !dirty || document.hidden || ws.readyState !== 1)
+          if (switching || exporting || inflight || !dirty || document.hidden || ws.readyState !== 1)
             return;
           dirty = false;
           inflight = true;
           lastFrame = performance.now();
-          send("update", updateMessage());
+          if (state.playing || isNavigating()) {
+            const resumeTime = streamActive && streamNext > 0 ? nextSceneTime : undefined;
+            stopStream();
+            streamActive = true;
+            inflight = true;
+            streamNavigating = isNavigating();
+            streamWindow = desiredWindow();
+            streamFps = playbackFps();
+            const message = updateMessage();
+            message.state.target_fps = targetFps();
+            send("stream", { ...message, protocol: "ftgspp-remote-stream-v2",
+              stream_id: streamId, window: streamWindow, playback_time: resumeTime,
+              navigating: streamNavigating, view_time: performance.now() / 1000 });
+            scheduleTick();
+          } else {
+            stopStream();
+            inflight = true;
+            send("update", updateMessage());
+          }
         }
         function cameraChanged() {
           // Pointer events can arrive far above the target render FPS. Avoid
@@ -784,7 +839,47 @@
             state.selected_camera = -1;
             $("camera").value = -1;
           }
-          requestFrame();
+          navigationUntil = performance.now() + 180;
+          requestView();
+        }
+        function isNavigating() {
+          return !!drag || performance.now() < navigationUntil;
+        }
+        function requestView() {
+          if (!state || switching || exporting || document.hidden) return;
+          if (!viewTimer) viewTimer = setTimeout(flushView,
+            Math.max(0, 1000 / Math.min(targetFps(), 60) -
+              (performance.now() - lastViewSent)));
+          scheduleTick();
+        }
+        function flushView() {
+          viewTimer = 0;
+          if (!state || switching || exporting || document.hidden || ws.readyState !== 1) return;
+          // Coalesce locally while the upstream socket is congested.
+          if (ws.bufferedAmount > 65536) { viewTimer = setTimeout(flushView, 50); return; }
+          lastViewSent = performance.now();
+          if (streamActive && windowLimit() < streamWindow) {
+            // A larger viewport may require a smaller decoded-image budget.
+            dirty = true;
+            inflight = false;
+            flush();
+            return;
+          }
+          if (!streamActive) {
+            inflight = false;
+            dirty = true;
+            flush();
+            return;
+          }
+          streamNavigating = isNavigating();
+          streamWindow = Math.max(streamWindow, desiredWindow());
+          const normal = viewport(), full = viewport(true);
+          const changes = { camera: state.camera, selected_camera: state.selected_camera,
+            interactive: state.interactive, target_fps: targetFps() };
+          for (const [key, value] of Object.entries(changes)) sentState[key] = JSON.stringify(value);
+          send("stream_view", { stream_id: streamId, revision: ++viewRevision, window: streamWindow,
+            navigating: streamNavigating, view_time: lastViewSent / 1000,
+            state: changes, ...normal, fullWidth: full.width, fullHeight: full.height });
         }
         function fit() {
           pivot = meta.center.slice();
@@ -911,13 +1006,15 @@
           $("status").textContent = "Connected · loading scene…";
         };
         ws.onclose = (ev) => {
+          stopStream();
           $("status").textContent = `Disconnected (${ev.code})`;
           toast("Viewer connection closed");
         };
         ws.onerror = () => toast("WebSocket error");
         ws.onmessage = async (ev) => {
           if (ev.data instanceof Blob) {
-            const epoch = sceneEpoch;
+            const epoch = sceneEpoch, packet = pendingFrame;
+            pendingFrame = null;
             const kind = new Uint8Array(
                 await ev.data.slice(0, 1).arrayBuffer(),
               )[0],
@@ -928,20 +1025,43 @@
               );
             if (kind === 1) {
               if (switching || epoch !== sceneEpoch) return;
-              const old = $("view").src,
-                url = URL.createObjectURL(blob);
+              const isStream = packet?.stream_id !== undefined;
+              if (isStream && (!streamActive || packet.stream_id !== streamId)) return;
+              if (!isStream && streamActive) return;
+              const serial = ++frameSerial, generation = streamId,
+                url = URL.createObjectURL(blob), decoded = document.createElement("img");
               try {
-                $("view").src = url;
-                await $("view").decode();
-                if (epoch === sceneEpoch) $("empty").hidden = true;
-              } catch (error) {
-                toast("Image decode failed");
-              } finally {
-                if (old.startsWith("blob:")) URL.revokeObjectURL(old);
-                if (epoch === sceneEpoch && !switching) {
+                decoded.src = url;
+                const decoding = performance.now();
+                await decoded.decode();
+                decodeMs = performance.now() - decoding;
+                if (epoch !== sceneEpoch || generation !== streamId || switching) {
+                  URL.revokeObjectURL(url);
+                  return;
+                }
+                if (isStream) {
+                  if (!streamActive || packet.frame_index < streamNext ||
+                      packet.frame_index >= streamNext + streamWindow || streamFrames.has(packet.frame_index)) {
+                    URL.revokeObjectURL(url);
+                    return;
+                  }
+                  streamFrames.set(packet.frame_index, { ...packet, url, decoded });
+                  if (streamNext === 0) presentStream(performance.now());
+                  scheduleTick();
+                } else if (serial === frameSerial) {
+                  showFrame(url);
+                  roundTrip = Math.max(1, performance.now() - lastFrame);
+                  $("status").textContent = `${frameInfo} · ${roundTrip.toFixed(0)} ms round trip`;
                   inflight = false;
                   if (dirty) requestFrame();
+                } else URL.revokeObjectURL(url);
+              } catch (error) {
+                URL.revokeObjectURL(url);
+                if (generation === streamId) {
+                  stopStream();
+                  requestFrame();
                 }
+                toast("Image decode failed");
               }
             } else if (kind === 2) {
               let a = document.createElement("a");
@@ -954,15 +1074,25 @@
           }
           let msg = JSON.parse(ev.data);
           if (msg.type === "hello") {
+            if (msg.stream_protocol && msg.stream_protocol !== "ftgspp-remote-stream-v2") {
+              toast("Viewer protocol changed; reload after updating the server");
+              return;
+            }
+            maxStreamWindow = Math.min(64, msg.stream_window || 64);
             ++sceneEpoch;
             switching = false;
             modelHash = msg.model_sha256;
             exporting = false;
             meta = msg.metadata;
+            networkScale = 1;
+            navigationUntil = 0;
+            displayTimes = [];
+            stalls = 0;
+            stableSince = lastQualityChange = 0;
+            roundTrip = 0;
             acceptState(msg.state);
             drag = null;
             keysDown.clear();
-            playClock = state.time;
             home = structuredClone(meta.initial_camera);
             pivot = meta.center.slice();
             $("label").textContent = meta.label || "Scene";
@@ -1011,17 +1141,23 @@
             requestFrame();
           } else if (msg.type === "state") {
             acceptState(msg.state);
-            playClock = state.time;
             sync();
             renderKeys();
             requestFrame();
+          } else if (msg.type === "pong") {
+            if (Number.isFinite(msg.client_time)) {
+              networkRtt = Math.max(0, performance.now() - msg.client_time * 1000);
+              if (streamActive && (desiredWindow() > streamWindow || Math.abs(streamFps - (isNavigating() ? Math.min(targetFps(), 60) : playbackFps())) > 1)) requestView();
+            }
           } else if (msg.type === "frame") {
+            pendingFrame = msg;
             const phases = msg.pipeline || {};
             const pixelTiming = phases.rgba8_ms !== undefined
               ? `${Number(phases.rgba8_ms).toFixed(1)} ms pack + readback`
               : `${Number(phases.readback_ms || 0).toFixed(1)} ms readback`;
             frameInfo = `${msg.width}×${msg.height} · ${msg.ms.toFixed(1)} ms total · ${Number(phases.forward_ms ?? msg.stats.render_ms).toFixed(1)} ms forward · ${pixelTiming}${phases.forward_cached ? " · cached F/T" : ""} · ${Number(msg.stats.gaussians).toLocaleString()} Gaussians · ${(Number(msg.stats.vram_bytes) / 1048576).toFixed(1)} MiB buffers · ${(msg.bytes / 1024).toFixed(0)} KiB JPEG`;
-            $("status").textContent = frameInfo;
+            pendingFrame = { ...msg, info: frameInfo };
+            if (msg.stream_id === undefined) $("status").textContent = frameInfo;
           } else if (msg.type === "recording_started") {
             setRecording(msg);
             toast("Interaction recording started");
@@ -1068,8 +1204,11 @@
           } else if (msg.type === "error") {
             sentState = {};
             pathDirty = true;
-            if (msg.action === "render" || msg.action === "update")
-              inflight = false;
+            if (["render", "update", "stream", "stream_ack"].includes(msg.action)) {
+              stopStream();
+              state.playing = false;
+              sync();
+            }
             if (msg.action === "switch_scene") {
               switching = false;
               inflight = false;
@@ -1105,8 +1244,7 @@
                   : "orbit",
           };
           previous = performance.now();
-          scheduleTick();
-          requestFrame();
+          requestView();
         });
         $("stage").addEventListener("pointermove", (e) => {
           if (!drag) return;
@@ -1123,7 +1261,8 @@
         function release() {
           if (drag) {
             drag = null;
-            requestFrame();
+            navigationUntil = 0;
+            requestView();
           }
         }
         $("stage").addEventListener("pointerup", release);
@@ -1173,6 +1312,7 @@
         $("camera").onchange = () => capture(Number($("camera").value));
         $("scenes").onchange = () => {
           if (switching || exporting || recording.active || ws.readyState !== 1) return;
+          stopStream();
           switching = true;
           drag = null;
           keysDown.clear();
@@ -1197,7 +1337,6 @@
         $("play").onclick = () => {
           if (!state) return;
           state.playing = !state.playing;
-          playClock = state.time;
           previous = performance.now();
           sync();
           requestFrame();
@@ -1206,8 +1345,8 @@
         $("prev").onclick = () => sample(-1);
         $("next").onclick = () => sample(1);
         $("time").oninput = () => {
-          state.time = Number($("time").value);
-          playClock = state.time;
+          const t = Number($("time").value);
+          state.time = nearestSample(t);
           state.playing = false;
           sync();
           requestFrame();
@@ -1219,10 +1358,6 @@
         };
         $("loop").onchange = () => {
           state.loop = $("loop").checked;
-          requestFrame();
-        };
-        $("snap").onchange = () => {
-          state.snap = $("snap").checked;
           requestFrame();
         };
         $("mode").onchange = () => {
@@ -1268,6 +1403,9 @@
         };
         $("quality").onchange = () => {
           state.interactive = $("quality").value === "interactive";
+          networkScale = 1;
+          stableSince = qualityWindowStart = qualityFrames = 0;
+          lastQualityChange = performance.now();
           requestFrame();
         };
         $("fps").onchange = () => {
@@ -1401,7 +1539,8 @@
           send("cancel_export");
         };
         function nearestSample(t) {
-          const values = meta.sample_times;
+          const values = meta.sample_times || [];
+          if (!values.length) return t;
           let lo = 0,
             hi = values.length;
           while (lo < hi) {
@@ -1416,13 +1555,144 @@
             : values[lo];
         }
         let previous = performance.now();
+        function windowLimit() {
+          const size = viewport();
+          // Bound decoded image storage to roughly 256 MiB even on high-DPI screens.
+          return Math.max(8, Math.min(maxStreamWindow, Math.floor(256 * 1048576 / (size.width * size.height * 4))));
+        }
+        function targetFps() {
+          const creditRate = Math.max(1, Math.floor((windowLimit() - 3) * 1000 / (networkRtt + 120)));
+          return Math.min(state?.target_fps || 30, displayHz, creditRate, 120);
+        }
+        function desiredWindow() {
+          const fps = isNavigating() ? Math.min(targetFps(), 60) : playbackFps();
+          return Math.min(windowLimit(), Math.max(8, Math.ceil(fps * (networkRtt + 120) / 1000) + 3));
+        }
+        function playbackFps() {
+          return Math.min(targetFps(), meta.fps || 30);
+        }
+        function stopStream() {
+          if (streamActive) send("stream_stop", { stream_id: streamId });
+          ++streamId;
+          clearTimeout(viewTimer);
+          viewTimer = 0;
+          viewRevision = 0;
+          streamNavigating = false;
+          streamActive = false;
+          for (const frame of streamFrames.values()) URL.revokeObjectURL(frame.url);
+          streamFrames.clear();
+          streamNext = 0;
+          qualityWindowStart = qualityFrames = 0;
+          presentAt = 0;
+          buffering = true;
+          inflight = false;
+        }
+        function showFrame(url) {
+          const old = $("view").src;
+          $("view").src = url;
+          $("empty").hidden = true;
+          if (old.startsWith("blob:") && old !== url) URL.revokeObjectURL(old);
+        }
+        function acknowledgeFrame(frame, presented) {
+          send("stream_ack", { stream_id: streamId, frame_index: frame.frame_index,
+            presented, client_time: performance.now() / 1000 });
+        }
+        function qualityFeedback(now, starving) {
+          if (!state.interactive) return;
+          if (!qualityWindowStart) qualityWindowStart = now;
+          if (!starving) ++qualityFrames;
+          const elapsed = now - qualityWindowStart;
+          if (elapsed < 2000) return;
+          const target = isNavigating() ? Math.min(targetFps(), 60) : playbackFps();
+          const supplied = qualityFrames * 1000 / elapsed;
+          qualityWindowStart = now;
+          qualityFrames = 0;
+          if (supplied < target * .8) {
+            stableSince = 0;
+            if (now - lastQualityChange > 2000 && networkScale > .6) {
+              networkScale = Math.max(.6, networkScale * .85);
+              lastQualityChange = now;
+              requestView();
+            }
+          } else if (supplied >= target * .9) {
+            if (!stableSince) stableSince = now;
+            if (now - stableSince >= 4000 && now - lastQualityChange > 4000 && networkScale < 1) {
+              networkScale = Math.min(1, networkScale + .1);
+              stableSince = lastQualityChange = now;
+              requestView();
+            }
+          } else stableSince = 0;
+        }
+        function presentationStatus(now) {
+          displayTimes.push(now);
+          displayTimes = displayTimes.filter((t) => now - t <= 2000);
+          const fps = displayTimes.length > 1
+            ? (displayTimes.length - 1) * 1000 / (now - displayTimes[0]) : 0;
+          $("status").textContent = `${frameInfo} · ${fps.toFixed(1)} display FPS · ${networkRtt.toFixed(0)} ms RTT · ${decodeMs.toFixed(1)} ms decode · ${viewLatency.toFixed(0)} ms view age · buffer ${streamFrames.size}/${streamWindow} · ${stalls} stalls · ${Math.round(networkScale * 100)}% preview`;
+        }
+        function presentStream(now) {
+          if (!streamActive || document.hidden || exporting) return;
+          // Camera navigation presents the freshest completed frame. Control
+          // messages continue at camera cadence, independent of frame ACKs.
+          const navigating = isNavigating() || streamNavigating ||
+            [...streamFrames.values()].some((f) => f.navigating);
+          if (navigating && streamFrames.size) {
+            const indices = [...streamFrames.keys()].sort((a, b) => a - b);
+            // Keep at most two frames (one frame of jitter tolerance). Avoid
+            // both a long queue of obsolete poses and arrival-time bursts.
+            const first = indices[Math.max(0, indices.length - 2)];
+            for (const [index, old] of streamFrames) {
+              if (index < first) { URL.revokeObjectURL(old.url); streamFrames.delete(index); }
+            }
+            streamNext = first;
+            if (buffering) presentAt = now;
+            buffering = false;
+          }
+          const frame = streamFrames.get(streamNext);
+          if (frame) streamFps = frame.fps;
+          const interval = 1000 / streamFps;
+          if (buffering) {
+            const ended = [...streamFrames.values()].some((f) => f.finished);
+            if (!frame || (streamNext > 0 && streamFrames.size < Math.min(8, Math.max(3, Math.ceil(streamFps * .12))) && !ended)) {
+              if (streamNext > 0) qualityFeedback(now, true);
+              return;
+            }
+            presentAt = Math.max(presentAt, now);
+            buffering = false;
+          }
+          if (now + .5 < presentAt) return;
+          if (!frame) {
+            if (!navigating) { buffering = true; ++stalls; }
+            qualityFeedback(now, true);
+            return;
+          }
+          streamFrames.delete(streamNext++);
+          showFrame(frame.url);
+          frameInfo = frame.info || frameInfo;
+          state.time = frame.scene_time;
+          nextSceneTime = frame.next_time;
+          state.playing = frame.playing;
+          $("time").value = state.time;
+          $("timeValue").textContent = state.time.toFixed(3) + " s";
+          $("play").textContent = state.playing ? "Pause" : "Play";
+          acknowledgeFrame(frame, true);
+          viewLatency = frame.navigating && Number.isFinite(frame.view_time)
+            ? Math.max(0, now - frame.view_time * 1000) : 0;
+          presentationStatus(now);
+          qualityFeedback(now, false);
+          inflight = false;
+          presentAt = Math.max(presentAt + interval, now + interval * .5);
+          if (streamNext === 1 && !navigating) buffering = true;
+          if (frame.finished && !isNavigating() && !streamNavigating) stopStream();
+          if (dirty) requestFrame();
+        }
         function scheduleTick() {
           if (
             !tickId &&
             !switching &&
             ws.readyState === 1 &&
             !document.hidden &&
-            (state?.playing || (drag?.mode === "look" && keysDown.size))
+            (state?.playing || streamActive || isNavigating())
           ) {
             tickId = requestAnimationFrame(tick);
           }
@@ -1432,38 +1702,34 @@
           const elapsed = Math.max(0, (now - previous) / 1000),
             dt = Math.min(0.1, elapsed);
           previous = now;
-          if (document.hidden || switching || !state) return;
-          if (state.playing) {
-            playClock += elapsed * state.speed;
-            let lo = meta.time_start,
-              hi = meta.time_end;
-            if (playClock > hi) {
-              if (state.loop && hi > lo)
-                playClock = lo + ((playClock - lo) % (hi - lo));
-              else {
-                playClock = hi;
-                state.playing = false;
+          if (elapsed > .003 && elapsed < .08) {
+            refreshSamples.push(elapsed);
+            if (refreshSamples.length > 30) refreshSamples.shift();
+            if (refreshSamples.length >= 10) {
+              const sorted = refreshSamples.slice().sort((a, b) => a - b);
+              const hz = Math.round(1 / sorted[Math.floor(sorted.length / 2)]);
+              if (Math.abs(hz - displayHz) > 2) {
+                displayHz = hz;
+                if (streamActive && state.target_fps > Math.min(hz, streamFps)) requestView();
               }
             }
-            const t =
-              state.snap && meta.sample_times?.length
-                ? nearestSample(playClock)
-                : playClock;
-            if (t !== state.time || !state.playing) {
-              state.time = t;
-              $("time").value = t;
-              $("timeValue").textContent = t.toFixed(3) + " s";
-              $("play").textContent = state.playing ? "Pause" : "Play";
-              requestFrame();
-            }
           }
+          if (document.hidden || switching || !state) return;
+          if (streamActive && streamNavigating !== isNavigating()) requestView();
+          if (now - lastProbe > 1000) {
+            lastProbe = now;
+            send("ping", { client_time: now / 1000 });
+          }
+          presentStream(now);
           if (drag?.mode === "look") fly(dt);
           scheduleTick();
         }
         document.addEventListener("visibilitychange", () => {
           if (document.hidden) {
+            stopStream();
             keysDown.clear();
             drag = null;
+            navigationUntil = 0;
           } else {
             previous = performance.now();
             requestFrame();

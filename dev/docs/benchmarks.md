@@ -7,7 +7,7 @@ B1 uses one image per optimizer update; B4 averages four images before one updat
 
 ## Local batch execution cost
 
-See [batch-size configuration](../../docs/arguments.md#batch-size) for B4's supported scope.
+See [batch-size configuration](training-settings.md#batch-size) for B4's supported scope.
 B1 keeps its fused backward/Adam update. B4 reuses the same parameter-backward
 and fused-commit shader sources: the first three views accumulate gradients
 with weight 0.25 into the existing FP32 Adam input buffers; the fourth finishes

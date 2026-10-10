@@ -7,6 +7,8 @@ Run development commands from the repository root.
 - [Architecture](docs/architecture.md): initialization, training, checkpoints and viewer internals.
 - [Benchmarks](docs/benchmarks.md): internal B1/B4 optimization, profiling and reproduction commands.
   Public comparison results are in [performance](../docs/performance.md).
+- [Training settings](docs/training-settings.md): defaults, budget details and research controls.
+- [Performance measurements](docs/performance-measurements.md): complete tables and timing definitions.
 - [Hardware validation](docs/hardware-validation.md): Vulkan capability gates.
 - [Migration history](docs/migration-history.md) and [source history](docs/source-history.md).
 - [Agent guide](agent-guide.md): repository-wide development instructions.

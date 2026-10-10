@@ -51,15 +51,14 @@ Read the smallest relevant set before changing behavior:
   boundary, and pinned-tool requirements.
 - `dev/docs/architecture.md`: runtime ownership, initialization, training phases,
   persistence, evaluation, and build boundaries.
-- `docs/hardware.md`: supported GPU capability gates, estimated runnable model
-  families, validated devices, viewer requirements, and `doctor` interpretation.
 - `docs/install.md`: dependency groups and supported installation modes.
 - `docs/usage.md`: public CLI, data, training, foreground, evaluation, and
   optional-component behavior.
 - `docs/viewer.md`: desktop, SSH browser, and headless viewer contracts.
-- `docs/performance.md`: user-facing experimental results and comparison timing definitions.
+- `docs/performance.md`: user-facing results and a short timing-scope note.
 - `dev/docs/benchmarks.md`: internal profiling and benchmark reproduction.
-  Keep results that demonstrate user benefits in public docs, with their measurement conditions.
+  Keep headline results and usage instructions in public docs; detailed experimental
+  settings, analysis and implementation belong under `dev/`.
 - `dev/docs/migration-history.md`: intentionally removed behavior and rejected legacy keys.
 - `src/ftgspp/config/defaults.yaml`, `schema.py`, and `validate.py`: authoritative
   configuration defaults, types, derived fields, and hard validation.
