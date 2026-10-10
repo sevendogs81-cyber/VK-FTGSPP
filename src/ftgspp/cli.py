@@ -137,6 +137,10 @@ def main(argv: list[str] | None = None) -> None:
     evaluate.add_argument("--run", type=Path, required=True)
     evaluate.add_argument("--device", type=int, default=0)
     evaluate.add_argument(
+        "--quick", action="store_true",
+        help="evaluate only the checkpoint-selection subset; unavailable for a locked final test",
+    )
+    evaluate.add_argument(
         "--test-manifest", type=Path,
         help="locked ftgspp-final-test-v1/v2 manifest; never used for model selection",
     )
@@ -247,13 +251,15 @@ def main(argv: list[str] | None = None) -> None:
         from ftgspp.training.runner import NativeRunner
         NativeRunner(config).run()
         return
-    from ftgspp.training.runner import NativeRunner
     from ftgspp.training.backend import NativeVulkanBackend, camera_extent
     from ftgspp.data.scene import load_final_test_scene
     from ftgspp.io.checkpoint import load_model
+    from ftgspp.training.evaluation import Evaluator, load_evaluation_scene
     config = load_run_config(args.run.resolve())
     config.run.output_path = args.run.resolve()
     configured_test_manifest = getattr(config.data, "test_manifest", None)
+    if args.quick and (args.test_manifest is not None or configured_test_manifest is not None):
+        parser.error("--quick cannot be used with a locked final test manifest")
     if args.lpips and args.test_manifest is None and configured_test_manifest is None:
         parser.error("--lpips requires a locked final test manifest")
     if args.lpips_batch_size <= 0:
@@ -262,8 +268,8 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--lpips-min-size must be at least 32")
     if not str(args.lpips_device).strip():
         parser.error("--lpips-device must not be empty")
-    runner = NativeRunner(config)
-    dataset = runner._preflight()
+    evaluator = Evaluator(config)
+    dataset = load_evaluation_scene(config)
     selection_path = export_selection_path(args.run)
     selection = load_export_selection(args.run)
     final_test = False
@@ -340,12 +346,16 @@ def main(argv: list[str] | None = None) -> None:
                 min_size=int(args.lpips_min_size),
                 vulkan_metadata=backend.device_metadata(),
             )
-            runner._evaluate(
+            evaluator.evaluate(
                 backend, dataset, selected_step,
+                scope="final_test",
                 metric_extension=metric_extension,
             )
         else:
-            runner._evaluate(backend, dataset, selected_step)
+            evaluator.evaluate(
+                backend, dataset, selected_step,
+                scope="final_test" if final_test else "candidate" if args.quick else "validation",
+            )
     finally:
         backend.close()
 

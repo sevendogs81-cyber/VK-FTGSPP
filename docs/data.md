@@ -33,6 +33,11 @@ Set `--fps` to the actual indexed image rate. `--start` includes its frame and
 `--stop` excludes it. Without these flags, indexing uses the available span.
 For example, `--start 0 --stop 225` selects frames 0 through 224.
 
+Indexing validates camera splits and output paths before writing. `--overwrite`
+allows replacing generated files; it rejects collisions with input images,
+calibration, supplied mask directories and point-cloud files. Each output file
+is published atomically.
+
 ## Calibration and synchronization
 
 Place EasyMocap/OpenCV FileStorage `intri.yml` and `extri.yml` beside `images/`,

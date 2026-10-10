@@ -67,8 +67,9 @@ For an older run missing viewer metadata, use
 ftgspp eval --run "$RUN" --device 0
 ```
 
-This evaluates sampled hold-out views and writes `metrics.jsonl`. Foreground
-training also writes `full_validation_metrics.jsonl` at completion.
+This evaluates all hold-out views selected by `eval.frame_interval` and writes
+`full_validation_metrics.jsonl`. Add `--quick` to evaluate the smaller selection
+subset and write `metrics.jsonl`. `--quick` cannot be used with a locked final test.
 
 For an independent final test, fill in the [manifest template](../examples/final_test_manifest.example.json)
 with views not used for training or checkpoint selection:

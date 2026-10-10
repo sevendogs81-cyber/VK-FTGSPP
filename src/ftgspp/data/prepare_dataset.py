@@ -20,6 +20,7 @@ from typing import Sequence
 from omegaconf import OmegaConf
 
 from ftgspp.data.multiview import load_image_manifest
+from ftgspp.io.atomic import atomic_output
 
 _FLAT = re.compile(r"^c(?P<camera>[0-9]+)-f(?P<frame>[0-9]{6})\.[A-Za-z0-9]+$")
 
@@ -155,11 +156,10 @@ def _write_manifest(
         "fps": float(fps),
         "views": views,
     }
-    temporary = output.with_name(output.name + ".tmp")
-    temporary.write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8",
-    )
-    temporary.replace(output)
+    with atomic_output(output) as temporary:
+        temporary.write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8",
+        )
 
 
 def _write_config(
@@ -235,7 +235,8 @@ def _write_config(
         "init": init,
         "run": {"output_path": rel(output.parent / "runs" / name)},
     }
-    OmegaConf.save(OmegaConf.create(node), output)
+    with atomic_output(output) as temporary:
+        OmegaConf.save(OmegaConf.create(node), temporary)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -291,10 +292,6 @@ def main(argv: list[str] | None = None) -> None:
             else root / "manifests" / "dataset.json"
         )
         fps = 60.0 if args.fps is None else float(args.fps)
-        _write_manifest(
-            rows, frames, cameras, manifest, fps=fps,
-            include_hashes=bool(args.hash_images), overwrite=bool(args.overwrite),
-        )
     else:
         if args.output_manifest is not None:
             parser.error("--output-manifest applies only with --images")
@@ -345,6 +342,48 @@ def main(argv: list[str] | None = None) -> None:
         args.mask_root.expanduser().resolve()
         if args.mask_root is not None else None
     )
+    # Validate both destinations before publishing anything. --overwrite only
+    # permits replacing outputs, never input data. resolve()
+    # catches symlink aliases; samefile() also catches existing hard links.
+    inputs = (
+        list(rows.values()) if args.images is not None
+        else [manifest, *(path for row in paths for path in row)]
+    )
+    inputs.extend(
+        path for path in (calibration / "intri.yml", calibration / "extri.yml", mask_manifest)
+        if path is not None and path.is_file()
+    )
+    if mask_root is not None and mask_root.is_dir():
+        inputs.extend(path for path in mask_root.rglob("*") if path.is_file())
+    if args.points is not None:
+        points = args.points.expanduser().resolve()
+        inputs.extend(path for path in points.rglob("*") if path.is_file())
+    targets = [config] + ([manifest] if args.images is not None else [])
+
+    def same_path(left: Path, right: Path) -> bool:
+        return left.resolve() == right.resolve() or (
+            left.exists() and right.exists() and left.samefile(right)
+        )
+
+    if same_path(config, manifest):
+        parser.error("config and dataset manifest must have different paths")
+    if config in manifest.parents or manifest in config.parents:
+        parser.error("an output file cannot be the parent directory of another output")
+    for target in targets:
+        if any(same_path(target, source) for source in inputs):
+            parser.error(f"output would overwrite an input file: {target}")
+        if target.exists() and (not args.overwrite or not target.is_file()):
+            raise FileExistsError(f"refusing to overwrite output: {target}")
+        for parent in target.parents:
+            if parent.exists():
+                if not parent.is_dir():
+                    raise NotADirectoryError(f"output parent is not a directory: {parent}")
+                break
+    if args.images is not None:
+        _write_manifest(
+            rows, frames, cameras, manifest, fps=fps,
+            include_hashes=bool(args.hash_images), overwrite=bool(args.overwrite),
+        )
     _write_config(
         config,
         name=str(args.name or root.name),

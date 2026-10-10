@@ -11,6 +11,7 @@ from typing import Literal, overload
 import numpy as np
 
 from ftgspp.io.model import NativeGaussians
+from ftgspp.io.atomic import atomic_output
 
 PLY_TYPES = {
     "char": "i1", "int8": "i1", "uchar": "u1", "uint8": "u1",
@@ -260,7 +261,8 @@ def export_4dgs(path: Path, model: NativeGaussians) -> Path:
     header = ["ply", "format binary_little_endian 1.0", "comment exported from FTGSPP native Vulkan", f"element vertex {n}"]
     header.extend(f"property float {name}" for name in names)
     header.append("end_header")
-    with path.open("wb") as stream:
-        stream.write(("\n".join(header) + "\n").encode("ascii"))
-        vertices.tofile(stream)
+    with atomic_output(path) as temporary:
+        with temporary.open("wb") as stream:
+            stream.write(("\n".join(header) + "\n").encode("ascii"))
+            vertices.tofile(stream)
     return path

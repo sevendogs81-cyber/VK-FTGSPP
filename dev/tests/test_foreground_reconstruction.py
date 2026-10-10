@@ -1441,9 +1441,8 @@ def test_locked_final_test_cli_uses_selected_model_identity_without_mutation(
     class Runner:
         def __init__(self, actual_config):
             assert actual_config is config
-        def _preflight(self):
-            return training_scene
-        def _evaluate(self, backend, dataset, step, *, metric_extension=None):
+        def evaluate(self, backend, dataset, step, *, scope, metric_extension=None):
+            assert scope == "final_test"
             observed["dataset"] = dataset
             observed["step"] = step
             observed["color_correction"] = config.train.color_correction
@@ -1474,7 +1473,8 @@ def test_locked_final_test_cli_uses_selected_model_identity_without_mutation(
             observed["closed"] = True
 
     monkeypatch.setattr(cli_module, "load_run_config", lambda path: config)
-    monkeypatch.setattr("ftgspp.training.runner.NativeRunner", Runner)
+    monkeypatch.setattr("ftgspp.training.evaluation.Evaluator", Runner)
+    monkeypatch.setattr("ftgspp.training.evaluation.load_evaluation_scene", lambda config: training_scene)
     monkeypatch.setattr("ftgspp.training.backend.NativeVulkanBackend", Backend)
     monkeypatch.setattr("ftgspp.training.backend.camera_extent", lambda scene: 1.0)
     monkeypatch.setattr(
@@ -1533,8 +1533,9 @@ def test_lpips_cli_rejects_non_final_holdout_eval(tmp_path, monkeypatch):
     assert exc.value.code == 2
 
 
+@pytest.mark.parametrize("quick", [False, True])
 def test_holdout_eval_cli_does_not_apply_trained_color_corrector(
-    tmp_path, monkeypatch,
+    tmp_path, monkeypatch, quick,
 ):
     from ftgspp import cli as cli_module
 
@@ -1568,9 +1569,8 @@ def test_holdout_eval_cli_does_not_apply_trained_color_corrector(
     class Runner:
         def __init__(self, actual_config):
             assert actual_config is config
-        def _preflight(self):
-            return holdout_scene
-        def _evaluate(self, backend, dataset, step):
+        def evaluate(self, backend, dataset, step, *, scope):
+            assert scope == ("candidate" if quick else "validation")
             observed["dataset"] = dataset
             observed["step"] = step
             observed["color_correction"] = config.train.color_correction
@@ -1593,7 +1593,8 @@ def test_holdout_eval_cli_does_not_apply_trained_color_corrector(
             observed["closed"] = True
 
     monkeypatch.setattr(cli_module, "load_run_config", lambda path: config)
-    monkeypatch.setattr("ftgspp.training.runner.NativeRunner", Runner)
+    monkeypatch.setattr("ftgspp.training.evaluation.Evaluator", Runner)
+    monkeypatch.setattr("ftgspp.training.evaluation.load_evaluation_scene", lambda config: holdout_scene)
     monkeypatch.setattr("ftgspp.training.backend.NativeVulkanBackend", Backend)
     monkeypatch.setattr("ftgspp.training.backend.camera_extent", lambda scene: 1.0)
     monkeypatch.setattr("ftgspp.io.checkpoint.load_model", lambda path: "model")
@@ -1603,7 +1604,7 @@ def test_holdout_eval_cli_does_not_apply_trained_color_corrector(
             AssertionError("hold-out eval must not load a training checkpoint")
         ),
     )
-    cli_module.main(["eval", "--run", str(run), "--device", "1"])
+    cli_module.main(["eval", "--run", str(run), "--device", "1"] + (["--quick"] if quick else []))
 
     assert observed == {
         "device": 1,
