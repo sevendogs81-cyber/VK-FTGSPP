@@ -1,15 +1,49 @@
-# Third-party software
+# Research attribution and third-party software
 
 The FTGSPP portions are governed by the research license in `LICENSE`. The
 vendored VkSplat portions retain Apache-2.0 in
 `LICENSES/VKSPLAT-APACHE-2.0.txt`. All other packages and assets remain under
 their respective upstream terms.
 
+## FreeTimeGS++ paper and citation
+
+FTGSPP refers to **FreeTimeGS++**, the research work on which this community
+Vulkan implementation is based:
+
+Lucas Yunkyu Lee, Soonho Kim, Youngwook Kim, Sangmin Kim, and Jaesik Park.
+**FreeTimeGS++: Secrets of Dynamic Gaussian Splatting and Their Principles.**
+2026. [Paper (arXiv:2605.03337)](https://arxiv.org/abs/2605.03337) ·
+[Authors' project page](https://yklcs.com/ftgspp).
+
+When using this work in research, please cite the original paper. The BibTeX
+below follows the authors' project page:
+
+```bibtex
+@misc{ftgspp,
+  title={FreeTimeGS++: Secrets of Dynamic Gaussian Splatting and Their Principles},
+  author={Lucas Yunkyu Lee and Soonho Kim and Youngwook Kim and Sangmin Kim and Jaesik Park},
+  year={2026},
+  eprint={2605.03337},
+  archivePrefix={arXiv},
+  primaryClass={cs.CV},
+  url={https://arxiv.org/abs/2605.03337}
+}
+```
+
+VK-FTGSPP is a modified community implementation. Its supported algorithms
+and experimental results are described in this repository; the paper citation
+does not imply that every component of the original method is implemented.
+Academic attribution and software licensing are separate: the citation does
+not replace the license and source notices below.
+
 ## Source attribution
 
-The FTGSPP pipeline was imported from source revision
-`73797291a1d490b79f27178c9c94519ce9a3ce55`; the VkSplat renderer was imported from
-`harry7557558/vksplat` revision `e26c254938c81ff85998cd357a9e005e255d9b03`.
+The local FTGSPP pipeline import is recorded at source revision
+`73797291a1d490b79f27178c9c94519ce9a3ce55` in the
+[source history](dev/docs/source-history.md). This is code provenance, not a
+paper identifier or a public upstream release link.
+The [VkSplat renderer](https://github.com/harry7557558/vksplat) was imported from
+revision `e26c254938c81ff85998cd357a9e005e255d9b03`.
 Both source trees are vendored. Their license boundaries and notices are
 preserved below; development history is in [dev](dev/docs/source-history.md).
 
@@ -17,10 +51,15 @@ preserved below; development history is in [dev](dev/docs/source-history.md).
 
 | Component | Role | License |
 | --- | --- | --- |
+| FreeTimeGS++ / FTGSPP-derived pipeline | Dynamic Gaussian representation and training pipeline, modified for this implementation | Research and educational use; see `LICENSE` and the original-paper citation above |
 | VkSplat | Vulkan projection, tile processing, alpha blending, loss/backward runtime | Apache-2.0 |
 | GPU radix sort | Bundled radix-sort shaders | MIT; see `native/shaders/radix_sort/LICENSE` |
 
 ## Build/runtime software
+
+This is an inventory of major dependencies, not a complete transitive license
+manifest. Versions are recorded in `uv.lock` and `native/CMakeLists.txt`;
+the license files and notices shipped with each installed dependency apply.
 
 | Component | Role | Typical license |
 | --- | --- | --- |
@@ -33,8 +72,18 @@ preserved below; development history is in [dev](dev/docs/source-history.md).
 | Addict, evo, ImageIO/MoviePy, Pillow, plyfile, trimesh | pinned DA3 inference API support | upstream terms |
 | OmegaConf | structured YAML configuration | BSD-3-Clause |
 | OpenCV, NumPy, SciPy | SelfCap data and initialization utilities | upstream terms |
+| [pycolmap / COLMAP](https://github.com/colmap/colmap) | Camera models and image undistortion | upstream terms, including bundled dependencies |
+| [tqdm](https://github.com/tqdm/tqdm) | Training and preparation progress reporting | upstream license notices |
+| [websockets](https://github.com/python-websockets/websockets) | Optional browser viewer transport | upstream license notices |
+| [TensorBoard](https://github.com/tensorflow/tensorboard) | Optional training event logging | upstream license notices |
+| Hugging Face Hub | Optional model-weight retrieval | upstream license notices |
 | torchmetrics | optional eval-time LPIPS implementation | Apache-2.0 |
 | Depth Anything 3 0.1.1 | pinned optional DA3 depth/pose initialization backend | Apache-2.0 code; checkpoint-specific terms apply |
+
+Installation/build tooling also includes uv, scikit-build-core, CMake and Ninja.
+Video import/export invokes an external FFmpeg installation; its licensing
+depends on the build and enabled codecs. These tools retain their upstream
+notices and are not relicensed by this project.
 
 ## Optional models and datasets
 
